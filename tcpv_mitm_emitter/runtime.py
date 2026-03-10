@@ -210,6 +210,58 @@ class TcpvRuntime:
             ts_ms=ts_ms,
         )
 
+    def tcp_start(
+        self,
+        flow: Any | None = None,
+        account: str | None = None,
+        cid: str | None = None,
+        ts_ms: int | None = None,
+    ) -> str:
+        if not self.enabled or self.store is None:
+            return ""
+
+        account_value = str(account or "").strip()
+        if not account_value and flow is not None:
+            account_value = str(getattr(flow, "id", "") or "").strip()
+        if not account_value and flow is not None:
+            account_value = str(getattr(flow, "account_info", "") or "").strip()
+        if not account_value:
+            return ""
+
+        cid_value = cid
+        if cid_value is None:
+            cid_value = self._build_cid(flow) if flow is not None else ""
+
+        now_ms = int(ts_ms or (time.time() * 1000))
+        self.store.mark_flow_start(account=account_value, cid=cid_value or "", ts_ms=now_ms)
+        return account_value
+
+    def tcp_end(
+        self,
+        flow: Any | None = None,
+        account: str | None = None,
+        cid: str | None = None,
+        ts_ms: int | None = None,
+    ) -> str:
+        if not self.enabled or self.store is None:
+            return ""
+
+        account_value = str(account or "").strip()
+        if not account_value and flow is not None:
+            account_value = str(getattr(flow, "id", "") or "").strip()
+        if not account_value and flow is not None:
+            account_value = str(getattr(flow, "account_info", "") or "").strip()
+        if not account_value:
+            return ""
+
+        cid_value = cid
+        if cid_value is None:
+            cid_value = self._build_cid(flow) if flow is not None else ""
+
+        now_ms = int(ts_ms or (time.time() * 1000))
+        self.store.mark_flow_end(account=account_value, cid=cid_value or "", ts_ms=now_ms)
+        return account_value
+
     def get_accounts(self) -> list[dict[str, Any]]:
         store = self.store
         if store is None:
@@ -393,3 +445,23 @@ def emit_lobby_packet(
 def clear_lobby_account(account: str) -> None:
     """Safe no-op when runtime is disabled."""
     TCPV_RUNTIME.clear_account(account=account)
+
+
+def tcp_start(
+    flow: Any | None = None,
+    account: str | None = None,
+    cid: str | None = None,
+    ts_ms: int | None = None,
+) -> str:
+    """Mark flow as started in external emitter."""
+    return TCPV_RUNTIME.tcp_start(flow=flow, account=account, cid=cid, ts_ms=ts_ms)
+
+
+def tcp_end(
+    flow: Any | None = None,
+    account: str | None = None,
+    cid: str | None = None,
+    ts_ms: int | None = None,
+) -> str:
+    """Mark flow as ended in external emitter."""
+    return TCPV_RUNTIME.tcp_end(flow=flow, account=account, cid=cid, ts_ms=ts_ms)

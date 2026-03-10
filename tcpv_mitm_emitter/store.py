@@ -78,8 +78,17 @@ class TcpvEventStore:
         pipe = self.r.pipeline()
         pipe.xadd(stream_key, fields, maxlen=self.stream_maxlen, approximate=True)
         pipe.sadd(self.accounts_key, account)
-        pipe.hset(meta_key, mapping={"last_ts": str(now_ms), "last_cid": cid})
+        pipe.hsetnx(meta_key, "first_ts", str(now_ms))
+        meta_mapping = {
+            "last_ts": str(now_ms),
+            "status": "open",
+            "ended_ts": "0",
+        }
+        if cid:
+            meta_mapping["last_cid"] = cid
+        pipe.hset(meta_key, mapping=meta_mapping)
         pipe.hincrby(meta_key, "total_count", 1)
+        pipe.hincrby(meta_key, "total_bytes", len(payload_bytes))
 
         pipe.expire(stream_key, self.ttl_seconds)
         pipe.expire(meta_key, self.ttl_seconds)
@@ -91,6 +100,64 @@ class TcpvEventStore:
         if isinstance(stream_id, (bytes, bytearray)):
             return stream_id.decode("utf-8", errors="replace")
         return str(stream_id)
+
+    def mark_flow_start(
+        self,
+        account: str,
+        cid: str = "",
+        ts_ms: int | None = None,
+    ) -> None:
+        account = str(account or "").strip()
+        if not account:
+            return
+
+        now_ms = int(ts_ms or int(time.time() * 1000))
+        meta_key = self.meta_key(account)
+
+        pipe = self.r.pipeline()
+        pipe.sadd(self.accounts_key, account)
+        pipe.hsetnx(meta_key, "first_ts", str(now_ms))
+        meta_mapping = {
+            "last_ts": str(now_ms),
+            "status": "open",
+            "ended_ts": "0",
+        }
+        if cid:
+            meta_mapping["last_cid"] = cid
+        pipe.hset(meta_key, mapping=meta_mapping)
+        pipe.expire(meta_key, self.ttl_seconds)
+        pipe.expire(self.accounts_key, self.ttl_seconds)
+        pipe.expire(self.seq_key(account), self.ttl_seconds)
+        pipe.execute()
+
+    def mark_flow_end(
+        self,
+        account: str,
+        cid: str = "",
+        ts_ms: int | None = None,
+    ) -> None:
+        account = str(account or "").strip()
+        if not account:
+            return
+
+        now_ms = int(ts_ms or int(time.time() * 1000))
+        meta_key = self.meta_key(account)
+
+        pipe = self.r.pipeline()
+        pipe.sadd(self.accounts_key, account)
+        pipe.hsetnx(meta_key, "first_ts", str(now_ms))
+        meta_mapping = {
+            "last_ts": str(now_ms),
+            "status": "closed",
+            "ended_ts": str(now_ms),
+        }
+        if cid:
+            meta_mapping["last_cid"] = cid
+        pipe.hset(meta_key, mapping=meta_mapping)
+        pipe.expire(meta_key, self.ttl_seconds)
+        pipe.expire(self.accounts_key, self.ttl_seconds)
+        pipe.expire(self.seq_key(account), self.ttl_seconds)
+        pipe.execute()
 
     def list_accounts(self) -> list[dict[str, Any]]:
         raw_accounts = self.r.smembers(self.accounts_key)
@@ -107,16 +174,42 @@ class TcpvEventStore:
         items: list[dict[str, Any]] = []
         for account, raw_meta in zip(accounts, raw_metas):
             meta = {self._to_str(k): self._to_str(v) for k, v in raw_meta.items()}
+            first_ts = self._to_int(meta.get("first_ts"), 0)
+            last_ts = self._to_int(meta.get("last_ts"), 0)
+            ended_ts = self._to_int(meta.get("ended_ts"), 0)
+            total_count = self._to_int(meta.get("total_count"), 0)
+            total_bytes = self._to_int(meta.get("total_bytes"), 0)
+            status = str(meta.get("status", "")).strip().lower()
+            if status not in {"open", "closed"}:
+                status = "closed" if ended_ts > 0 else "open"
+            if total_bytes <= 0 and total_count > 0:
+                # Backward compatibility for old meta rows without total_bytes.
+                total_bytes = total_count
+            if first_ts <= 0:
+                first_ts = last_ts
+            if status == "closed":
+                end_ref_ts = ended_ts if ended_ts > 0 else last_ts
+                duration_ms = max(end_ref_ts - first_ts, 0)
+            else:
+                duration_ms = max(last_ts - first_ts, 0)
             items.append(
                 {
                     "account": account,
-                    "last_ts": self._to_int(meta.get("last_ts"), 0),
-                    "total": self._to_int(meta.get("total_count"), 0),
+                    "first_ts": first_ts,
+                    "last_ts": last_ts,
+                    "ended_ts": ended_ts,
+                    "status": status,
+                    "is_open": status == "open",
+                    "duration_ms": duration_ms,
+                    "total": total_bytes,
+                    "total_bytes": total_bytes,
+                    "total_count": total_count,
                     "last_cid": meta.get("last_cid", ""),
                 }
             )
 
-        items.sort(key=lambda x: x["last_ts"], reverse=True)
+        # Keep flow order stable by first-seen time (old -> new).
+        items.sort(key=lambda x: (x.get("first_ts", 0), x.get("last_ts", 0), x.get("account", "")))
         return items
 
     def get_events(

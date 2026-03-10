@@ -4,6 +4,8 @@ from .runtime import (
     emit_lobby_packet,
     init_emitter,
     shutdown_emitter,
+    tcp_end,
+    tcp_start,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "shutdown_emitter",
     "emit_lobby_packet",
     "clear_lobby_account",
+    "tcp_start",
+    "tcp_end",
 ]

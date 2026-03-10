@@ -97,6 +97,11 @@ def create_app(runtime) -> FastAPI:
     ) -> list[dict]:
         return runtime.get_connections(account=account, recent=recent)
 
+    @app.post("/flows/clear")
+    def clear_flow(account: str = Query(..., min_length=1)) -> dict:
+        runtime.clear_account(account=account)
+        return {"ok": True, "account": account}
+
     @app.get("/instance")
     def instance() -> dict:
         if not runtime.instance_id:
