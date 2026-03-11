@@ -610,6 +610,18 @@ function formatTs(ts) {
   }
 }
 
+function formatTsShort(ts) {
+  try {
+    const d = new Date(ts || 0);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mi}:${ss}`;
+  } catch (_e) {
+    return String(ts || 0);
+  }
+}
+
 function getBytesPerRow() {
   const raw = Number(el.previewBytes.value || "16");
   return [16, 24, 32, 48, 64].includes(raw) ? raw : 32;
@@ -774,7 +786,8 @@ function renderEvents() {
 
     const tsSpan = document.createElement("span");
     tsSpan.className = "summary-fixed summary-ts";
-    tsSpan.textContent = `[${formatTs(ev.ts)}]`;
+    tsSpan.textContent = `[${formatTsShort(ev.ts)}]`;
+    tsSpan.title = formatTs(ev.ts);
     summary.appendChild(tsSpan);
 
     const dirWrap = document.createElement("span");
@@ -789,12 +802,13 @@ function renderEvents() {
 
     const lenWrap = document.createElement("span");
     lenWrap.className = "summary-fixed summary-len";
-    lenWrap.appendChild(document.createTextNode("[len="));
+    lenWrap.appendChild(document.createTextNode("[l="));
     const lenSpan = document.createElement("span");
     lenSpan.className = "len-field";
     lenSpan.textContent = String(ev.len ?? "");
     lenWrap.appendChild(lenSpan);
     lenWrap.appendChild(document.createTextNode("]"));
+    lenWrap.title = `len=${String(ev.len ?? "")}`;
     summary.appendChild(lenWrap);
 
     const previewWrap = document.createElement("span");

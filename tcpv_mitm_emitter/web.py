@@ -183,7 +183,7 @@ INDEX_HTML = """
       display: grid;
       grid-template-columns: minmax(110px, 1fr) 38px 54px 40px;
       gap: 4px;
-      align-items: start;
+      align-items: center;
       cursor: pointer;
       background: var(--panel);
       min-width: 0;
@@ -197,11 +197,18 @@ INDEX_HTML = """
       padding-left: 5px;
     }
 
+    .flow-row > div {
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .flow-path {
-      overflow: visible;
-      text-overflow: clip;
-      white-space: normal;
-      overflow-wrap: anywhere;
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
       line-height: 1.25;
       min-width: 0;
     }
@@ -341,12 +348,14 @@ INDEX_HTML = """
       border-left: 4px solid var(--line);
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
       white-space: nowrap;
       font-size: 12px;
       line-height: 1.25;
       min-height: 26px;
       min-width: 0;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1;
     }
 
     summary::-webkit-details-marker { display: none; }
@@ -358,26 +367,33 @@ INDEX_HTML = """
 
     .summary-preview {
       flex: 1 1 auto;
-      min-width: 220px;
+      min-width: 0;
+      display: flex;
+      align-items: center;
       overflow: hidden;
-      text-overflow: ellipsis;
       white-space: nowrap;
     }
 
     .summary-ts,
     .summary-len {
       color: var(--muted);
-      opacity: 0.85;
+      opacity: 0.72;
+      font-size: 11px;
     }
 
     .summary-extra {
-      flex: 0 1 20ch;
+      flex: 0 1 auto;
+      max-width: 20ch;
       color: var(--muted);
       opacity: 0.9;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       min-width: 0;
+    }
+
+    .summary-extra:empty {
+      display: none;
     }
 
     .summary-tail {
@@ -400,8 +416,8 @@ INDEX_HTML = """
 
     .len-field {
       display: inline-block;
-      width: 6ch;
-      text-align: center;
+      min-width: 0;
+      text-align: right;
     }
 
     .preview-mark {
@@ -411,6 +427,8 @@ INDEX_HTML = """
 
     .preview-hex {
       display: inline-block;
+      min-width: 0;
+      max-width: 100%;
       white-space: pre;
       line-height: 1.25;
       background: color-mix(in srgb, var(--chip-bg) 82%, transparent);
@@ -418,9 +436,8 @@ INDEX_HTML = """
       border-radius: 4px;
       padding: 0 5px;
       color: var(--text);
-      max-width: none;
-      overflow: visible;
-      text-overflow: clip;
+      overflow: hidden;
+      text-overflow: ellipsis;
       vertical-align: bottom;
     }
 
