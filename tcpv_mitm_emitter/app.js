@@ -2,7 +2,6 @@ const state = {
   flowId: "",
   allFlows: [],
   flows: [],
-  hiddenFlowIds: new Set(),
   afterId: null,
   hasMore: true,
   events: [],
@@ -20,11 +19,9 @@ const el = {
   rightPane: document.getElementById("rightPane"),
   flowList: document.getElementById("flowList"),
   flowCount: document.getElementById("flowCount"),
-  hiddenCount: document.getElementById("hiddenCount"),
   selectedTitle: document.getElementById("selectedFlowTitle"),
   reload: document.getElementById("reloadBtn"),
   deleteFlow: document.getElementById("deleteFlowBtn"),
-  unhide: document.getElementById("unhideBtn"),
   prefix: document.getElementById("prefixRule"),
   color: document.getElementById("ruleColor"),
   hideAscii: document.getElementById("hideAscii"),
@@ -107,27 +104,6 @@ async function apiPost(url) {
   return resp.json();
 }
 
-function loadHiddenFlows() {
-  try {
-    const raw = localStorage.getItem("tcpv_hidden_flows_v1");
-    if (!raw) return new Set();
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return new Set();
-    return new Set(
-      arr
-        .map((v) => String(v || "").trim())
-        .filter((v) => v.length > 0)
-    );
-  } catch (_e) {
-    return new Set();
-  }
-}
-
-function saveHiddenFlows() {
-  const list = Array.from(state.hiddenFlowIds.values()).map((v) => String(v || "").trim()).filter((v) => v);
-  localStorage.setItem("tcpv_hidden_flows_v1", JSON.stringify(list));
-}
-
 function loadRules() {
   el.prefix.value = localStorage.getItem("tcpv_rule_prefix") || "";
   el.color.value = localStorage.getItem("tcpv_rule_color") || "#ffd166";
@@ -144,7 +120,6 @@ function loadRules() {
 
   state.autoRefresh = el.autoRefresh.value === "1";
   state.themeMode = el.themeMode.value;
-  state.hiddenFlowIds = loadHiddenFlows();
   applyTheme();
   applyBodyTone();
 
@@ -364,25 +339,18 @@ function updateActionButtons() {
   if (el.deleteFlow) {
     el.deleteFlow.disabled = !state.flowId;
   }
-  if (el.unhide) {
-    el.unhide.disabled = state.hiddenFlowIds.size <= 0;
-  }
 }
 
 function renderFlowList() {
   const rows = state.flows;
-  const total = state.allFlows.length;
-  el.flowCount.textContent = `${rows.length}/${total}`;
-  if (el.hiddenCount) {
-    el.hiddenCount.textContent = `hidden:${state.hiddenFlowIds.size}`;
-  }
+  el.flowCount.textContent = `${rows.length}`;
   el.flowList.innerHTML = "";
   updateActionButtons();
 
   if (rows.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = total > 0 ? "All flows are hidden." : "No flow data yet";
+    empty.textContent = "No flow data yet";
     el.flowList.appendChild(empty);
     return;
   }
@@ -427,7 +395,7 @@ async function loadFlows(resetSelection = false, preferredFlowId = "") {
   const raw = await apiJson("/accounts");
   const data = normalizeAccounts(raw);
   state.allFlows = data;
-  const visible = data.filter((x) => !state.hiddenFlowIds.has(String(x.account || "")));
+  const visible = data;
   const prev = state.flowId;
   state.flows = visible;
 
@@ -474,7 +442,9 @@ function renderSelectedTitle() {
   const accountInfo = extractAccountInfoFromCid(rawCid);
   const accountText = accountInfo ? `[acc:${accountInfo}]` : "";
   const text = cid ? `${accountText} ${cid}`.trim() : accountText;
-  el.selectedTitle.textContent = text || "Flow selected";
+  const dateTs = Number(item.first_ts || item.last_ts || 0);
+  const dateText = dateTs > 0 ? `[${formatDateOnly(dateTs)}]` : "";
+  el.selectedTitle.textContent = `${dateText} ${text || "Flow selected"}`.trim();
 }
 
 async function selectFlow(flowId) {
@@ -522,7 +492,7 @@ async function syncLatestEvents() {
   }
 }
 
-async function hideCurrentFlow() {
+async function clearCurrentFlow() {
   const flowId = String(state.flowId || "").trim();
   if (!flowId) return;
 
@@ -532,7 +502,7 @@ async function hideCurrentFlow() {
   if (currentIdx >= 0) {
     for (let i = currentIdx + 1; i < currentOrder.length; i++) {
       const candidate = currentOrder[i];
-      if (candidate && candidate !== flowId && !state.hiddenFlowIds.has(candidate)) {
+      if (candidate && candidate !== flowId) {
         preferredFlowId = candidate;
         break;
       }
@@ -540,7 +510,7 @@ async function hideCurrentFlow() {
     if (!preferredFlowId) {
       for (let i = currentIdx - 1; i >= 0; i--) {
         const candidate = currentOrder[i];
-        if (candidate && candidate !== flowId && !state.hiddenFlowIds.has(candidate)) {
+        if (candidate && candidate !== flowId) {
           preferredFlowId = candidate;
           break;
         }
@@ -548,13 +518,10 @@ async function hideCurrentFlow() {
     }
   }
 
-  state.hiddenFlowIds.add(flowId);
-  saveHiddenFlows();
-
   try {
     await apiPost(`/flows/clear?account=${encodeURIComponent(flowId)}`);
   } catch (e) {
-    setStatus(`hide clear warning: ${e.message}`);
+    setStatus(`clear flow warning: ${e.message}`);
   }
 
   state.events = [];
@@ -568,20 +535,7 @@ async function hideCurrentFlow() {
   } else {
     renderEvents();
   }
-  setStatus(`hidden selected flow total_hidden=${state.hiddenFlowIds.size}`);
-}
-
-async function unhideAllFlows() {
-  if (state.hiddenFlowIds.size <= 0) return;
-  state.hiddenFlowIds.clear();
-  saveHiddenFlows();
-  await loadFlows(false);
-  if (state.flowId) {
-    await selectFlow(state.flowId);
-  } else {
-    renderEvents();
-  }
-  setStatus("all hidden flows are restored");
+  setStatus("selected flow cleared");
 }
 
 function b64ToBytes(base64Text) {
@@ -610,6 +564,18 @@ function formatTs(ts) {
   }
 }
 
+function formatDateOnly(ts) {
+  try {
+    const d = new Date(ts || 0);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  } catch (_e) {
+    return String(ts || 0);
+  }
+}
+
 function formatTsShort(ts) {
   try {
     const d = new Date(ts || 0);
@@ -624,7 +590,7 @@ function formatTsShort(ts) {
 
 function getBytesPerRow() {
   const raw = Number(el.previewBytes.value || "16");
-  return [16, 24, 32, 48, 64].includes(raw) ? raw : 32;
+  return [16, 24, 32, 48, 64, 80].includes(raw) ? raw : 32;
 }
 
 function formatHexDump(base64Text, hideAscii) {
@@ -791,7 +757,7 @@ function renderEvents() {
     summary.appendChild(tsSpan);
 
     const dirWrap = document.createElement("span");
-    dirWrap.className = "summary-fixed";
+    dirWrap.className = "summary-fixed summary-dir";
     dirWrap.appendChild(document.createTextNode("["));
     const dirBadge = document.createElement("span");
     dirBadge.className = `dir-badge ${isReq ? "dir-req" : "dir-resp"}`;
@@ -879,7 +845,7 @@ async function tick() {
       await syncLatestEvents();
     }
 
-    const line = `emit=${s.emit_count} write=${s.write_count} err=${s.write_error_count} drop=${s.dropped_count} q=${s.queue_size} local=${state.events.length} hidden=${state.hiddenFlowIds.size}`;
+    const line = `emit=${s.emit_count} write=${s.write_count} err=${s.write_error_count} drop=${s.dropped_count} q=${s.queue_size} local=${state.events.length}`;
     if (s.last_write_error) {
       setStatus(`${line} | last_error=${s.last_write_error}`);
     } else {
@@ -907,19 +873,9 @@ el.reload.addEventListener("click", async () => {
 if (el.deleteFlow) {
   el.deleteFlow.addEventListener("click", async () => {
     try {
-      await hideCurrentFlow();
+      await clearCurrentFlow();
     } catch (e) {
       setStatus(`delete flow error: ${e.message}`);
-    }
-  });
-}
-
-if (el.unhide) {
-  el.unhide.addEventListener("click", async () => {
-    try {
-      await unhideAllFlows();
-    } catch (e) {
-      setStatus(`unhide error: ${e.message}`);
     }
   });
 }

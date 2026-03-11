@@ -365,6 +365,20 @@ INDEX_HTML = """
 
     .summary-fixed { flex: 0 0 auto; }
 
+    .summary-ts {
+      flex: 0 0 10ch;
+    }
+
+    .summary-dir {
+      flex: 0 0 4ch;
+      text-align: center;
+    }
+
+    .summary-len {
+      flex: 0 0 9ch;
+      text-align: left;
+    }
+
     .summary-preview {
       flex: 1 1 auto;
       min-width: 0;
@@ -416,7 +430,7 @@ INDEX_HTML = """
 
     .len-field {
       display: inline-block;
-      min-width: 0;
+      width: 5ch;
       text-align: right;
     }
 
@@ -522,10 +536,8 @@ INDEX_HTML = """
         <div class="left-title">Flows</div>
         <div class="left-tools">
           <span id="flowCount" class="count">0</span>
-          <span id="hiddenCount" class="count">hidden:0</span>
           <button id="reloadBtn">Reload</button>
           <button id="deleteFlowBtn">Delete Flow</button>
-          <button id="unhideBtn">Unhide All</button>
         </div>
       </div>
       <div class="flow-cols">
@@ -560,6 +572,7 @@ INDEX_HTML = """
           <option value="32">32 byte</option>
           <option value="48">48 byte</option>
           <option value="64">64 byte</option>
+          <option value="80">80 byte</option>
         </select>
         <select id="previewSpace" title="Insert an extra separator every 16 bytes in preview and hex body.">
           <option value="1">Gap16 On</option>
