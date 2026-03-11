@@ -239,7 +239,7 @@ INDEX_HTML = """
 
     .right {
       display: grid;
-      grid-template-rows: auto auto auto minmax(0, 1fr);
+      grid-template-rows: auto auto auto auto minmax(0, 1fr);
       background: var(--panel);
       min-width: 0;
       overflow: hidden;
@@ -264,7 +264,7 @@ INDEX_HTML = """
     .toolbar {
       border-bottom: 1px solid var(--line);
       display: grid;
-      grid-template-columns: minmax(220px, 1fr) 140px 72px 78px 88px 96px 106px 92px 88px 118px;
+      grid-template-columns: minmax(220px, 1fr) 180px 128px 72px 78px 88px 96px 106px 92px 88px 118px;
       gap: 8px;
       align-items: center;
       padding: 8px 10px;
@@ -290,6 +290,11 @@ INDEX_HTML = """
       min-width: 0;
     }
 
+    input.input-invalid {
+      border-color: var(--resp);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--resp) 55%, transparent);
+    }
+
     button {
       cursor: pointer;
       border-color: var(--chip-line);
@@ -311,6 +316,16 @@ INDEX_HTML = """
       color: var(--muted);
       background: color-mix(in srgb, var(--panel) 88%, var(--bg));
       font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .rule-guide {
+      border-bottom: 1px solid var(--line);
+      padding: 6px 10px;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--panel) 90%, var(--bg));
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -412,7 +427,7 @@ INDEX_HTML = """
 
     .summary-tail {
       flex: 0 0 auto;
-      max-width: 10ch;
+      max-width: 16ch;
       overflow: hidden;
       text-overflow: ellipsis;
       color: var(--muted);
@@ -434,11 +449,6 @@ INDEX_HTML = """
       text-align: right;
     }
 
-    .preview-mark {
-      border-radius: 3px;
-      padding: 1px 4px;
-    }
-
     .preview-hex {
       display: inline-block;
       min-width: 0;
@@ -453,6 +463,22 @@ INDEX_HTML = """
       overflow: hidden;
       text-overflow: ellipsis;
       vertical-align: bottom;
+    }
+
+    .preview-byte {
+      display: inline-block;
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+
+    .preview-byte-hit {
+      border-radius: 2px;
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--line) 48%, transparent) inset;
+    }
+
+    .preview-hit-outside {
+      border-style: dashed;
+      border-width: 1px;
     }
 
     .body {
@@ -560,7 +586,20 @@ INDEX_HTML = """
       </div>
       <div class="toolbar">
         <div id="selectedFlowTitle" class="headline">No flow selected</div>
-        <input id="prefixRule" placeholder="highlight prefix" />
+        <input id="prefixRule" list="ruleExamples" placeholder="输入十六进制规则：xx通配；用;分多条" />
+        <datalist id="ruleExamples">
+          <option value="0a 92"></option>
+          <option value="19 00 00 00 xx 00 00 00 00 xx"></option>
+          <option value="33 66 00 0b@#8ec5ff; 40 13 xx 00@#ffd166"></option>
+        </datalist>
+        <select id="highlightMode" title="Highlight mode and match scope.">
+          <option value="preview_contains">Preview 包含 (推荐)</option>
+          <option value="preview_prefix">Preview 前缀</option>
+          <option value="preview_exact">Preview 完全</option>
+          <option value="full_contains">全包 包含 (8KB)</option>
+          <option value="full_prefix">全包 前缀 (8KB)</option>
+          <option value="full_exact">全包 完全 (8KB)</option>
+        </select>
         <input id="ruleColor" type="color" value="#ffd166" />
         <select id="hideAscii">
           <option value="0">ASCII</option>
@@ -597,6 +636,7 @@ INDEX_HTML = """
           <option value="system">System</option>
         </select>
       </div>
+      <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB', 输入框按 Esc 快速清空。</div>
       <div class="status" id="status">__STATUS_BOOT__</div>
       <div id="events">__INITIAL_EVENTS__</div>
     </section>

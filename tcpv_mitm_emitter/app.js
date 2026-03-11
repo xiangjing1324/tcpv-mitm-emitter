@@ -23,6 +23,7 @@ const el = {
   reload: document.getElementById("reloadBtn"),
   deleteFlow: document.getElementById("deleteFlowBtn"),
   prefix: document.getElementById("prefixRule"),
+  highlightMode: document.getElementById("highlightMode"),
   color: document.getElementById("ruleColor"),
   hideAscii: document.getElementById("hideAscii"),
   previewBytes: document.getElementById("previewBytes"),
@@ -46,6 +47,8 @@ const BODY_TONES = {
   rose: { body: "#ffd3df", offset: "#f43f5e", ascii: "#cf9faf", accent: "#fb7185" },
   violet: { body: "#e2d4ff", offset: "#8b5cf6", ascii: "#b6a1d8", accent: "#a78bfa" },
 };
+
+const MAX_FULL_SCAN_BYTES = 8192;
 
 function setStatus(text) {
   if (el.status) {
@@ -106,6 +109,9 @@ async function apiPost(url) {
 
 function loadRules() {
   el.prefix.value = localStorage.getItem("tcpv_rule_prefix") || "";
+  if (el.highlightMode) {
+    el.highlightMode.value = localStorage.getItem("tcpv_highlight_mode") || "preview_contains";
+  }
   el.color.value = localStorage.getItem("tcpv_rule_color") || "#ffd166";
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   el.previewBytes.value = localStorage.getItem("tcpv_preview_bytes") || "32";
@@ -130,6 +136,9 @@ function loadRules() {
 
 function saveRules() {
   localStorage.setItem("tcpv_rule_prefix", (el.prefix.value || "").trim().toLowerCase());
+  if (el.highlightMode) {
+    localStorage.setItem("tcpv_highlight_mode", el.highlightMode.value || "preview_contains");
+  }
   localStorage.setItem("tcpv_rule_color", el.color.value);
   localStorage.setItem("tcpv_hide_ascii", el.hideAscii.value);
   localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
@@ -253,18 +262,6 @@ function getHexGroupSizes(bytesPerRow) {
     remain -= size;
   }
   return sizes;
-}
-
-function formatHexByteListWithGrouping(hexBytes) {
-  if (!Array.isArray(hexBytes) || hexBytes.length === 0) return "";
-  if (!usePreviewSpace()) {
-    return hexBytes.join(" ");
-  }
-  const parts = [];
-  for (let i = 0; i < hexBytes.length; i += 16) {
-    parts.push(hexBytes.slice(i, i + 16).join(" "));
-  }
-  return parts.join("  ");
 }
 
 function getFlowRowPath(item) {
@@ -664,25 +661,236 @@ function normalizeHex(text) {
   return String(text || "").toLowerCase().replace(/[^0-9a-f]/g, "");
 }
 
-function shouldHighlight(prefixHex) {
-  const rule = normalizeHex(el.prefix.value || "");
-  if (!rule) return false;
-  return normalizeHex(prefixHex || "").startsWith(rule);
+function normalizeHexColor(rawColor, fallbackColor = "") {
+  const text = String(rawColor || "").trim();
+  if (!text) return fallbackColor;
+  if (/^#[0-9a-f]{6}$/i.test(text) || /^#[0-9a-f]{3}$/i.test(text)) {
+    return text.toLowerCase();
+  }
+  if (/^[0-9a-f]{6}$/i.test(text) || /^[0-9a-f]{3}$/i.test(text)) {
+    return `#${text.toLowerCase()}`;
+  }
+  return fallbackColor;
+}
+
+function parseHighlightMode(rawMode) {
+  const mode = String(rawMode || "").trim().toLowerCase();
+  const known = {
+    preview_contains: { scope: "preview", mode: "contains" },
+    preview_prefix: { scope: "preview", mode: "prefix" },
+    preview_exact: { scope: "preview", mode: "exact" },
+    full_contains: { scope: "full", mode: "contains" },
+    full_prefix: { scope: "full", mode: "prefix" },
+    full_exact: { scope: "full", mode: "exact" },
+  };
+  return known[mode] || known.preview_contains;
+}
+
+function parseHighlightPattern(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) {
+    return { tokens: [], invalid: false };
+  }
+
+  const compact = raw
+    .toLowerCase()
+    .replace(/0x/g, "")
+    .replace(/[^0-9a-fx?*]/g, "");
+
+  if (!compact) {
+    return { tokens: [], invalid: false };
+  }
+  if (compact.length % 2 !== 0) {
+    return { tokens: [], invalid: true };
+  }
+
+  const tokens = [];
+  for (let i = 0; i < compact.length; i += 2) {
+    const pair = compact.slice(i, i + 2);
+    if (pair === "xx" || pair === "??" || pair === "**") {
+      tokens.push(null);
+      continue;
+    }
+    if (/^[0-9a-f]{2}$/.test(pair)) {
+      tokens.push(parseInt(pair, 16));
+      continue;
+    }
+    return { tokens: [], invalid: true };
+  }
+
+  const fixedCount = tokens.filter((x) => x !== null).length;
+  if (fixedCount <= 0) {
+    return { tokens: [], invalid: true };
+  }
+  return { tokens, invalid: false };
+}
+
+function parseHighlightRules(rawInput, fallbackColor) {
+  const text = String(rawInput || "").trim();
+  if (!text) {
+    return { rules: [], invalidCount: 0 };
+  }
+
+  const parts = text
+    .split(/[;\n]+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+
+  if (parts.length === 0) {
+    return { rules: [], invalidCount: 0 };
+  }
+
+  const rules = [];
+  let invalidCount = 0;
+  const defaultColor = normalizeHexColor(fallbackColor, "#ffd166");
+
+  for (const part of parts) {
+    let patternText = part;
+    let colorText = "";
+    const atIdx = part.lastIndexOf("@");
+    if (atIdx > 0) {
+      patternText = part.slice(0, atIdx).trim();
+      colorText = part.slice(atIdx + 1).trim();
+    }
+
+    const parsed = parseHighlightPattern(patternText);
+    if (parsed.invalid || !Array.isArray(parsed.tokens) || parsed.tokens.length === 0) {
+      invalidCount += 1;
+      continue;
+    }
+    const color = normalizeHexColor(colorText, defaultColor);
+    rules.push({
+      tokens: parsed.tokens,
+      color,
+    });
+  }
+
+  return { rules, invalidCount };
+}
+
+function findPatternMatches(byteValues, patternTokens, mode = "contains", maxMatches = 12) {
+  if (!Array.isArray(byteValues) || byteValues.length === 0) return [];
+  if (!Array.isArray(patternTokens) || patternTokens.length === 0) return [];
+
+  const plen = patternTokens.length;
+  if (plen > byteValues.length) return [];
+
+  const ranges = [];
+  const matcher = (start) => {
+    for (let j = 0; j < plen; j++) {
+      const token = patternTokens[j];
+      if (token !== null && token !== byteValues[start + j]) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (mode === "exact") {
+    if (plen !== byteValues.length) return [];
+    if (matcher(0)) {
+      ranges.push({ start: 0, end: plen });
+    }
+    return ranges;
+  }
+
+  if (mode === "prefix") {
+    if (matcher(0)) {
+      ranges.push({ start: 0, end: plen });
+    }
+    return ranges;
+  }
+
+  for (let start = 0; start <= byteValues.length - plen; start++) {
+    if (!matcher(start)) continue;
+
+    ranges.push({ start, end: start + plen });
+    if (ranges.length >= maxMatches) break;
+    start += Math.max(0, plen - 1);
+  }
+  return ranges;
+}
+
+function mergeRuleMatches(byteValues, rules, mode, maxMatches = 16) {
+  if (!Array.isArray(rules) || rules.length === 0) return [];
+  const all = [];
+  for (const rule of rules) {
+    if (!rule || !Array.isArray(rule.tokens) || rule.tokens.length === 0) continue;
+    const ranges = findPatternMatches(byteValues, rule.tokens, mode, maxMatches);
+    for (const range of ranges) {
+      all.push({
+        start: range.start,
+        end: range.end,
+        color: rule.color || "",
+      });
+      if (all.length >= maxMatches) {
+        return all;
+      }
+    }
+  }
+  return all;
+}
+
+function clipRangesToLength(ranges, maxLen) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return [];
+  const clipped = [];
+  for (const r of ranges) {
+    const start = Math.max(0, Number(r.start || 0));
+    const end = Math.min(maxLen, Number(r.end || 0));
+    if (end <= start) continue;
+    clipped.push({ start, end, color: r.color || "" });
+  }
+  return clipped;
+}
+
+function renderPreviewBytes(previewSpan, byteValues, highlightRanges) {
+  if (!previewSpan) return;
+  previewSpan.textContent = "";
+  if (!Array.isArray(byteValues) || byteValues.length === 0) return;
+
+  const gap16 = usePreviewSpace();
+  const colorByIndex = new Array(byteValues.length).fill("");
+  if (Array.isArray(highlightRanges) && highlightRanges.length > 0) {
+    for (const r of highlightRanges) {
+      const start = Math.max(0, Number(r.start || 0));
+      const end = Math.min(byteValues.length, Number(r.end || 0));
+      const color = r.color || "";
+      for (let i = start; i < end; i++) {
+        if (!colorByIndex[i]) {
+          colorByIndex[i] = color;
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < byteValues.length; i++) {
+    if (i > 0) {
+      previewSpan.appendChild(document.createTextNode(gap16 && i % 16 === 0 ? "  " : " "));
+    }
+
+    const byteNode = document.createElement("span");
+    byteNode.className = "preview-byte";
+    byteNode.textContent = byteValues[i].toString(16).padStart(2, "0");
+    const hitColor = colorByIndex[i];
+    if (hitColor) {
+      byteNode.className += " preview-byte-hit";
+      byteNode.style.background = hitColor;
+    }
+    previewSpan.appendChild(byteNode);
+  }
 }
 
 function getPreviewInfo(ev) {
   const previewLen = getBytesPerRow();
-  const bytes = b64ToBytes(ev.pay);
-  let hexBytes = [];
-  if (bytes.length > 0) {
-    hexBytes = bytes.slice(0, previewLen).map((v) => v.toString(16).padStart(2, "0"));
+  const payloadBytes = b64ToBytes(ev.pay);
+  let previewBytes = [];
+  if (payloadBytes.length > 0) {
+    previewBytes = payloadBytes.slice(0, previewLen);
   } else {
     const fallback = normalizeHex(ev.pfx || "");
-    hexBytes = (fallback.match(/.{1,2}/g) || []).slice(0, previewLen);
+    previewBytes = (fallback.match(/.{1,2}/g) || []).slice(0, previewLen).map((x) => parseInt(x, 16));
   }
-  const raw = hexBytes.join("");
-  const display = formatHexByteListWithGrouping(hexBytes);
-  return { raw, display };
+  return { payloadBytes, previewBytes };
 }
 
 function getEventExtraInfo(ev) {
@@ -701,6 +909,32 @@ function getEventId(ev) {
   return `${ev.ts ?? 0}|${ev.cid ?? ""}|${ev.seq ?? 0}|${ev.msg_idx ?? -1}|${ev.chunk_idx ?? -1}|${ev.dir ?? -1}|${ev.len ?? -1}`;
 }
 
+function buildEventBody(ev, hideAscii) {
+  const body = document.createElement("div");
+  body.className = "body";
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `id=${ev.id} cid=${ev.cid} seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
+  body.appendChild(meta);
+
+  const dump = formatHexDump(ev.pay, hideAscii);
+  const hexShell = document.createElement("div");
+  hexShell.className = "hex-shell";
+  const hexHead = document.createElement("div");
+  hexHead.className = "hex-head";
+  hexHead.textContent = dump.header;
+  const pre = document.createElement("pre");
+  pre.className = "hex-body";
+  pre.innerHTML = renderHexBodyHtml(dump, hideAscii);
+
+  hexShell.appendChild(hexHead);
+  hexShell.appendChild(pre);
+  body.appendChild(hexShell);
+
+  return body;
+}
+
 function renderEvents() {
   const openIds = new Set();
   for (const node of el.events.querySelectorAll("details[data-event-id]")) {
@@ -712,6 +946,18 @@ function renderEvents() {
 
   el.events.innerHTML = "";
   const hideAscii = el.hideAscii.value === "1";
+  const modeSpec = parseHighlightMode(el.highlightMode ? el.highlightMode.value : "preview_contains");
+  const parsedRules = parseHighlightRules(el.prefix.value || "", el.color.value);
+  if (el.prefix) {
+    const invalid = parsedRules.invalidCount > 0;
+    el.prefix.classList.toggle("input-invalid", invalid);
+    if (invalid) {
+      el.prefix.title = `Invalid rule count=${parsedRules.invalidCount}. Use: 19 00 00 00 xx 00 00 00 00 xx; 33 66@#8ec5ff`;
+    } else {
+      el.prefix.title = "Rule format: pattern; pattern@#RRGGBB. Wildcard: xx/??/**. Press Esc to clear.";
+    }
+  }
+  const highlightRules = parsedRules.rules;
 
   if (!state.flowId) {
     const empty = document.createElement("div");
@@ -729,6 +975,7 @@ function renderEvents() {
     return;
   }
 
+  const listFrag = document.createDocumentFragment();
   for (const ev of state.events) {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
@@ -738,17 +985,28 @@ function renderEvents() {
       wrap.open = true;
     }
 
-    wrap.addEventListener("toggle", () => {
-      if (!eventId) return;
-      if (wrap.open) state.expandedIds.add(eventId);
-      else state.expandedIds.delete(eventId);
-    });
-
     const summary = document.createElement("summary");
     const isReq = ev.dir === 0;
     const dirArrow = isReq ? "->" : "<-";
     const preview = getPreviewInfo(ev);
     const frag = ev.msg_idx >= 0 && ev.chunk_idx >= 0 ? `m${ev.msg_idx}/c${ev.chunk_idx}` : "m-/c-";
+    const seqNum = Number(ev.seq || 0);
+    const seqText = Number.isFinite(seqNum) && seqNum > 0 ? `#${seqNum}` : "#-";
+
+    const matchTarget =
+      modeSpec.scope === "full"
+        ? (preview.payloadBytes.length > 0
+          ? preview.payloadBytes.slice(0, MAX_FULL_SCAN_BYTES)
+          : preview.previewBytes)
+        : preview.previewBytes;
+    const matchRanges = mergeRuleMatches(matchTarget, highlightRules, modeSpec.mode, 24);
+    const previewRanges =
+      modeSpec.scope === "full"
+        ? clipRangesToLength(matchRanges, preview.previewBytes.length)
+        : matchRanges;
+    const hasOutOfPreviewMatch =
+      modeSpec.scope === "full" &&
+      matchRanges.some((r) => Number(r.start || 0) >= preview.previewBytes.length);
 
     const tsSpan = document.createElement("span");
     tsSpan.className = "summary-fixed summary-ts";
@@ -782,10 +1040,13 @@ function renderEvents() {
     previewWrap.appendChild(document.createTextNode("["));
     const previewSpan = document.createElement("span");
     previewSpan.className = "preview-hex";
-    previewSpan.textContent = preview.display;
-    if (shouldHighlight(preview.raw)) {
-      previewSpan.className += " preview-mark";
-      previewSpan.style.background = el.color.value;
+    renderPreviewBytes(previewSpan, preview.previewBytes, previewRanges);
+    if (hasOutOfPreviewMatch && previewRanges.length === 0) {
+      previewSpan.classList.add("preview-hit-outside");
+      const firstColor = String(matchRanges[0]?.color || el.color.value || "").trim();
+      if (firstColor) {
+        previewSpan.style.borderColor = firstColor;
+      }
     }
     previewWrap.appendChild(previewSpan);
     previewWrap.appendChild(document.createTextNode("]"));
@@ -798,35 +1059,32 @@ function renderEvents() {
 
     const tailSpan = document.createElement("span");
     tailSpan.className = "summary-tail";
-    tailSpan.textContent = frag;
-    tailSpan.title = `msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
+    tailSpan.textContent = `${seqText} ${frag}`;
+    tailSpan.title = `seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
     summary.appendChild(tailSpan);
 
-    const body = document.createElement("div");
-    body.className = "body";
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `id=${ev.id} cid=${ev.cid} seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
-    body.appendChild(meta);
-
-    const dump = formatHexDump(ev.pay, hideAscii);
-    const hexShell = document.createElement("div");
-    hexShell.className = "hex-shell";
-    const hexHead = document.createElement("div");
-    hexHead.className = "hex-head";
-    hexHead.textContent = dump.header;
-    const pre = document.createElement("pre");
-    pre.className = "hex-body";
-    pre.innerHTML = renderHexBodyHtml(dump, hideAscii);
-
-    hexShell.appendChild(hexHead);
-    hexShell.appendChild(pre);
-    body.appendChild(hexShell);
-
     wrap.appendChild(summary);
-    wrap.appendChild(body);
-    el.events.appendChild(wrap);
+    const ensureBody = () => {
+      if (wrap.dataset.bodyReady === "1") return;
+      wrap.appendChild(buildEventBody(ev, hideAscii));
+      wrap.dataset.bodyReady = "1";
+    };
+    if (wrap.open) {
+      ensureBody();
+    }
+    wrap.addEventListener("toggle", () => {
+      if (!eventId) return;
+      if (wrap.open) {
+        state.expandedIds.add(eventId);
+        ensureBody();
+      } else {
+        state.expandedIds.delete(eventId);
+      }
+    });
+
+    listFrag.appendChild(wrap);
   }
+  el.events.appendChild(listFrag);
 }
 
 async function tick() {
@@ -884,6 +1142,22 @@ el.prefix.addEventListener("input", () => {
   saveRules();
   renderEvents();
 });
+
+el.prefix.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") {
+    el.prefix.value = "";
+    saveRules();
+    renderEvents();
+    ev.preventDefault();
+  }
+});
+
+if (el.highlightMode) {
+  el.highlightMode.addEventListener("change", () => {
+    saveRules();
+    renderEvents();
+  });
+}
 
 el.color.addEventListener("input", () => {
   saveRules();

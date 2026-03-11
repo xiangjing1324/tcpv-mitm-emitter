@@ -80,6 +80,45 @@ tcp_end(flow=None, account="123456789", cid="10.0.0.1:50000->1.2.3.4:65010")
 shutdown_emitter()
 ```
 
+## Viewer Highlight (Simple Guide)
+
+Open the viewer in browser:
+
+```bash
+http://127.0.0.1:18091
+```
+
+Then use these 4 steps:
+
+1. Select a flow on the left.
+2. In `highlight` input, type hex pattern (spaces optional).
+3. Choose mode from `Preview Contains (recommended)` first.
+4. Pick a color with color picker.
+
+Pattern basics:
+
+- Use `xx` / `??` / `**` as 1-byte wildcard.
+- Example: `19 00 00 00 xx 00 00 00 00 xx`
+- You can type without spaces: `19000000xx00000000xx`
+- Press `Esc` in highlight input to clear quickly.
+
+Multiple rules + per-rule color:
+
+- Split rules by `;` (or new line).
+- Add color using `@#RRGGBB`.
+- Example:
+  - `0a 92@#ffd166; 33 66 00 0b@#8ec5ff`
+
+Mode explanation:
+
+- `Preview *`: match only current preview bytes (fastest, recommended for live analysis).
+- `Full *`: match full payload (for deep check). For performance, scan is limited to first `8KB` per packet.
+
+Display notes:
+
+- Right tail now shows packet sequence: `#seq mX/cY`
+- `m/c` is kept for compatibility.
+
 ## API Endpoints
 
 When initialized, FastAPI viewer endpoints are exposed on `bind_host:bind_port`:
