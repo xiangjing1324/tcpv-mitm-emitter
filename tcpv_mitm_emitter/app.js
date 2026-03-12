@@ -29,6 +29,7 @@ const el = {
   previewBytes: document.getElementById("previewBytes"),
   previewSpace: document.getElementById("previewSpace"),
   bodyTone: document.getElementById("bodyTone"),
+  expandMode: document.getElementById("expandMode"),
   autoRefresh: document.getElementById("autoRefresh"),
   themeMode: document.getElementById("themeMode"),
   events: document.getElementById("events"),
@@ -121,6 +122,9 @@ function loadRules() {
   if (el.bodyTone) {
     el.bodyTone.value = localStorage.getItem("tcpv_body_tone") || "slate";
   }
+  if (el.expandMode) {
+    el.expandMode.value = localStorage.getItem("tcpv_expand_mode") || "smart";
+  }
   el.autoRefresh.value = localStorage.getItem("tcpv_auto_refresh") || "1";
   el.themeMode.value = localStorage.getItem("tcpv_theme_mode") || "github-dark";
 
@@ -148,8 +152,20 @@ function saveRules() {
   if (el.bodyTone) {
     localStorage.setItem("tcpv_body_tone", el.bodyTone.value || "slate");
   }
+  if (el.expandMode) {
+    localStorage.setItem("tcpv_expand_mode", el.expandMode.value || "smart");
+  }
   localStorage.setItem("tcpv_auto_refresh", el.autoRefresh.value);
   localStorage.setItem("tcpv_theme_mode", el.themeMode.value);
+}
+
+function getExpandMode() {
+  if (!el.expandMode) return "smart";
+  const mode = String(el.expandMode.value || "").toLowerCase();
+  if (mode === "on" || mode === "off" || mode === "smart") {
+    return mode;
+  }
+  return "smart";
 }
 
 function setSplitWidth(px, persist = true) {
@@ -893,6 +909,16 @@ function getPreviewInfo(ev) {
   return { payloadBytes, previewBytes };
 }
 
+function estimatePayloadByteLen(base64Text) {
+  const text = String(base64Text || "").replace(/\s+/g, "");
+  if (!text) return 0;
+  const len = text.length;
+  let pad = 0;
+  if (text.endsWith("==")) pad = 2;
+  else if (text.endsWith("=")) pad = 1;
+  return Math.max(0, Math.floor((len * 3) / 4) - pad);
+}
+
 function getEventExtraInfo(ev) {
   const keys = ["extra_info", "extra", "info", "note", "tag"];
   for (const k of keys) {
@@ -947,6 +973,7 @@ function renderEvents() {
   el.events.innerHTML = "";
   const hideAscii = el.hideAscii.value === "1";
   const modeSpec = parseHighlightMode(el.highlightMode ? el.highlightMode.value : "preview_contains");
+  const expandMode = getExpandMode();
   const parsedRules = parseHighlightRules(el.prefix.value || "", el.color.value);
   if (el.prefix) {
     const invalid = parsedRules.invalidCount > 0;
@@ -958,6 +985,17 @@ function renderEvents() {
     }
   }
   const highlightRules = parsedRules.rules;
+  const flowHasTruncatedPayload = state.events.some((ev) => {
+    const fullLen = Number(ev && ev.len);
+    if (!Number.isFinite(fullLen) || fullLen <= 0) return false;
+    const payloadLen = estimatePayloadByteLen(ev ? ev.pay : "");
+    if (payloadLen <= 0) return false;
+    return fullLen > payloadLen;
+  });
+  const flowExpandLocked = expandMode === "off" || (expandMode === "smart" && flowHasTruncatedPayload);
+  if (flowExpandLocked) {
+    state.expandedIds.clear();
+  }
 
   if (!state.flowId) {
     const empty = document.createElement("div");
@@ -979,13 +1017,20 @@ function renderEvents() {
   for (const ev of state.events) {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
+    const allowExpand = !flowExpandLocked;
     wrap.dataset.eventId = eventId;
     wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
-    if (state.expandedIds.has(eventId)) {
+    if (allowExpand && state.expandedIds.has(eventId)) {
       wrap.open = true;
+    }
+    if (!allowExpand) {
+      wrap.classList.add("no-expand");
     }
 
     const summary = document.createElement("summary");
+    if (!allowExpand) {
+      summary.dataset.noExpandLabel = expandMode === "off" ? "expand-off" : "preview-only";
+    }
     const isReq = ev.dir === 0;
     const dirArrow = isReq ? "->" : "<-";
     const preview = getPreviewInfo(ev);
@@ -1069,18 +1114,25 @@ function renderEvents() {
       wrap.appendChild(buildEventBody(ev, hideAscii));
       wrap.dataset.bodyReady = "1";
     };
-    if (wrap.open) {
-      ensureBody();
-    }
-    wrap.addEventListener("toggle", () => {
-      if (!eventId) return;
+    if (allowExpand) {
       if (wrap.open) {
-        state.expandedIds.add(eventId);
         ensureBody();
-      } else {
-        state.expandedIds.delete(eventId);
       }
-    });
+      wrap.addEventListener("toggle", () => {
+        if (!eventId) return;
+        if (wrap.open) {
+          state.expandedIds.add(eventId);
+          ensureBody();
+        } else {
+          state.expandedIds.delete(eventId);
+        }
+      });
+    } else {
+      state.expandedIds.delete(eventId);
+      summary.addEventListener("click", (clickEv) => {
+        clickEv.preventDefault();
+      });
+    }
 
     listFrag.appendChild(wrap);
   }
@@ -1185,6 +1237,13 @@ if (el.bodyTone) {
   el.bodyTone.addEventListener("change", () => {
     saveRules();
     applyBodyTone();
+    renderEvents();
+  });
+}
+
+if (el.expandMode) {
+  el.expandMode.addEventListener("change", () => {
+    saveRules();
     renderEvents();
   });
 }

@@ -356,6 +356,19 @@ INDEX_HTML = """
       margin: 0 0 8px 0;
     }
 
+    details.no-expand > summary {
+      cursor: default;
+    }
+
+    details.no-expand > summary::after {
+      content: attr(data-no-expand-label);
+      margin-left: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      opacity: 0.85;
+      flex: 0 0 auto;
+    }
+
     summary {
       list-style: none;
       cursor: pointer;
@@ -624,6 +637,11 @@ INDEX_HTML = """
           <option value="amber">Body Amber</option>
           <option value="rose">Body Rose</option>
           <option value="violet">Body Violet</option>
+        </select>
+        <select id="expandMode" title="Expand behavior for packet body details.">
+          <option value="smart">展开 智能</option>
+          <option value="on">展开 开</option>
+          <option value="off">展开 关</option>
         </select>
         <select id="autoRefresh" title="Auto Follow: continuously pull latest packets. Manual: pause updates.">
           <option value="1">Auto Follow</option>

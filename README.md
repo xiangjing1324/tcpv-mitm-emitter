@@ -129,6 +129,10 @@ Display notes:
 
 - Right tail now shows packet sequence: `#seq mX/cY`
 - `m/c` is kept for compatibility.
+- `展开 智能/开/关`:
+  - `智能` (recommended): if current flow contains truncated packets (`len > stored payload`), body expand is auto disabled for easier preview scanning.
+  - `开`: always allow expand.
+  - `关`: force collapse all packet bodies.
 
 ## API Endpoints
 
