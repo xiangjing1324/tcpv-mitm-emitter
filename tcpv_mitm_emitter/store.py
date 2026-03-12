@@ -172,13 +172,23 @@ class TcpvEventStore:
         raw_metas = pipe.execute()
 
         items: list[dict[str, Any]] = []
+        empty_accounts: list[str] = []
         for account, raw_meta in zip(accounts, raw_metas):
+            if not raw_meta:
+                empty_accounts.append(account)
+                continue
             meta = {self._to_str(k): self._to_str(v) for k, v in raw_meta.items()}
             first_ts = self._to_int(meta.get("first_ts"), 0)
             last_ts = self._to_int(meta.get("last_ts"), 0)
             ended_ts = self._to_int(meta.get("ended_ts"), 0)
             total_count = self._to_int(meta.get("total_count"), 0)
             total_bytes = self._to_int(meta.get("total_bytes"), 0)
+
+            # Ignore and prune flows that only called start/end but never emitted packet payload.
+            if total_count <= 0 and total_bytes <= 0:
+                empty_accounts.append(account)
+                continue
+
             status = str(meta.get("status", "")).strip().lower()
             if status not in {"open", "closed"}:
                 status = "closed" if ended_ts > 0 else "open"
@@ -207,6 +217,15 @@ class TcpvEventStore:
                     "last_cid": meta.get("last_cid", ""),
                 }
             )
+
+        if empty_accounts:
+            clean = self.r.pipeline()
+            for account in empty_accounts:
+                clean.delete(self.stream_key(account))
+                clean.delete(self.meta_key(account))
+                clean.delete(self.seq_key(account))
+                clean.srem(self.accounts_key, account)
+            clean.execute()
 
         # Keep flow order stable by first-seen time (old -> new).
         items.sort(key=lambda x: (x.get("first_ts", 0), x.get("last_ts", 0), x.get("account", "")))
