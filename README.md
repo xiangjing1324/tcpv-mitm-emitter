@@ -74,6 +74,17 @@ emit_lobby_packet(
     from_client=True,
 )
 
+# Preview-only mode (store first N bytes but keep real packet length in UI)
+full_len = len(packet_data)
+emit_lobby_packet(
+    flow=None,
+    account="123456789",
+    cid="10.0.0.1:50000->1.2.3.4:65010",
+    packet_data=packet_data[:80],
+    packet_len=full_len,
+    from_client=True,
+)
+
 tcp_start(flow=None, account="123456789", cid="10.0.0.1:50000->1.2.3.4:65010")
 # ... emit_lobby_packet(...)
 tcp_end(flow=None, account="123456789", cid="10.0.0.1:50000->1.2.3.4:65010")

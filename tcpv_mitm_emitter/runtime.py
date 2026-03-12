@@ -148,6 +148,7 @@ class TcpvRuntime:
         msg_idx: int | None = None,
         chunk_idx: int | None = None,
         ts_ms: int | None = None,
+        packet_len: int | None = None,
     ) -> None:
         if not self.enabled or self.store is None:
             return
@@ -160,11 +161,19 @@ class TcpvRuntime:
         if not payload:
             return
 
+        try:
+            real_packet_len = int(packet_len) if packet_len is not None else len(payload)
+        except (TypeError, ValueError):
+            real_packet_len = len(payload)
+        if real_packet_len <= 0:
+            real_packet_len = len(payload)
+
         event = {
             "account": account,
             "cid": cid or "",
             "dir": 0 if from_client else 1,
             "payload": payload,
+            "packet_len": real_packet_len,
             "ts_ms": int(ts_ms or (time.time() * 1000)),
             "msg_idx": msg_idx,
             "chunk_idx": chunk_idx,
@@ -188,6 +197,7 @@ class TcpvRuntime:
         account: str | None = None,
         cid: str | None = None,
         ts_ms: int | None = None,
+        packet_len: int | None = None,
     ) -> None:
         account_value = account
         if account_value is None and flow is not None:
@@ -208,6 +218,7 @@ class TcpvRuntime:
             msg_idx=msg_idx,
             chunk_idx=chunk_idx,
             ts_ms=ts_ms,
+            packet_len=packet_len,
         )
 
     def tcp_start(
@@ -327,6 +338,7 @@ class TcpvRuntime:
                     cid=item["cid"],
                     direction=item["dir"],
                     payload=item["payload"],
+                    packet_len=item.get("packet_len"),
                     ts_ms=item["ts_ms"],
                     msg_idx=item.get("msg_idx"),
                     chunk_idx=item.get("chunk_idx"),
@@ -423,6 +435,7 @@ def emit_lobby_packet(
     account: str | None = None,
     cid: str | None = None,
     ts_ms: int | None = None,
+    packet_len: int | None = None,
 ) -> None:
     """Safe no-op when runtime is disabled.
 
@@ -439,6 +452,7 @@ def emit_lobby_packet(
         account=account,
         cid=cid,
         ts_ms=ts_ms,
+        packet_len=packet_len,
     )
 
 

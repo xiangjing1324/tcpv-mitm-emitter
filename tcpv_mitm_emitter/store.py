@@ -47,6 +47,7 @@ class TcpvEventStore:
         ts_ms: int | None = None,
         msg_idx: int | None = None,
         chunk_idx: int | None = None,
+        packet_len: int | None = None,
     ) -> str:
         if not account:
             raise ValueError("account must not be empty")
@@ -55,6 +56,12 @@ class TcpvEventStore:
             raise TypeError("payload must be bytes")
 
         payload_bytes = bytes(payload)
+        try:
+            real_packet_len = int(packet_len) if packet_len is not None else len(payload_bytes)
+        except (TypeError, ValueError):
+            real_packet_len = len(payload_bytes)
+        if real_packet_len <= 0:
+            real_packet_len = len(payload_bytes)
         now_ms = int(ts_ms or int(time.time() * 1000))
         seq = int(self.r.incr(self.seq_key(account)))
 
@@ -65,7 +72,7 @@ class TcpvEventStore:
             "ts": str(now_ms),
             "cid": cid,
             "dir": str(int(direction)),
-            "len": str(len(payload_bytes)),
+            "len": str(real_packet_len),
             "pfx": payload_bytes[: self.prefix_len].hex(),
             "pay": base64.b64encode(payload_bytes).decode("ascii"),
             "seq": str(seq),
@@ -88,7 +95,7 @@ class TcpvEventStore:
             meta_mapping["last_cid"] = cid
         pipe.hset(meta_key, mapping=meta_mapping)
         pipe.hincrby(meta_key, "total_count", 1)
-        pipe.hincrby(meta_key, "total_bytes", len(payload_bytes))
+        pipe.hincrby(meta_key, "total_bytes", real_packet_len)
 
         pipe.expire(stream_key, self.ttl_seconds)
         pipe.expire(meta_key, self.ttl_seconds)
