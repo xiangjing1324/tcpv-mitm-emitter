@@ -99,19 +99,20 @@ Open the viewer in browser:
 http://127.0.0.1:18091
 ```
 
-Then use these 4 steps:
+Then use these 5 steps:
 
 1. Select a flow on the left.
 2. In `highlight` input, type hex pattern (spaces optional).
 3. Choose mode from `Preview Contains (recommended)` first.
 4. Pick a color with color picker.
+5. Click `Search` or press `Enter` to apply. Typing alone will not start matching.
 
 Pattern basics:
 
 - Use `xx` / `??` / `**` as 1-byte wildcard.
 - Example: `19 00 00 00 xx 00 00 00 00 xx`
 - You can type without spaces: `19000000xx00000000xx`
-- Press `Esc` in highlight input to clear quickly.
+- Press `Esc` in highlight input to clear and remove current search quickly.
 
 Multiple rules + per-rule color:
 
@@ -129,6 +130,15 @@ Display notes:
 
 - Right tail now shows packet sequence: `#seq mX/cY`
 - `m/c` is kept for compatibility.
+- Search is now manual:
+  - `Search`: apply current pattern/mode/color.
+  - `Prev` / `Next`: jump through matched packets.
+  - `x/y`: current hit / total hit count.
+- Filters can be stacked:
+  - `Dir All / Req Only / Resp Only`
+  - `Min Len`
+  - `Max Len`
+  - Click `Filter` to apply, `Clear` to reset.
 - `展开 智能/开/关`:
   - `智能` (recommended): if current flow contains truncated packets (`len > stored payload`), body expand is auto disabled for easier preview scanning.
   - `开`: always allow expand.

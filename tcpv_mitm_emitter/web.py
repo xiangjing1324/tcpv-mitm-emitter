@@ -239,7 +239,7 @@ INDEX_HTML = """
 
     .right {
       display: grid;
-      grid-template-rows: auto auto auto auto minmax(0, 1fr);
+      grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
       background: var(--panel);
       min-width: 0;
       overflow: hidden;
@@ -264,7 +264,17 @@ INDEX_HTML = """
     .toolbar {
       border-bottom: 1px solid var(--line);
       display: grid;
-      grid-template-columns: minmax(220px, 1fr) 180px 128px 72px 78px 88px 96px 106px 92px 88px 118px;
+      grid-template-columns: minmax(320px, 1fr) 78px 88px 96px 106px 92px 88px 118px;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      min-width: 0;
+    }
+
+    .filterbar {
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) 146px 56px 72px 62px 62px 74px 88px 94px 94px 72px 72px;
       gap: 8px;
       align-items: center;
       padding: 8px 10px;
@@ -308,6 +318,21 @@ INDEX_HTML = """
       cursor: not-allowed;
       opacity: 0.55;
       border-color: var(--line);
+    }
+
+    .tool-stat {
+      height: 28px;
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--chip-bg) 86%, transparent);
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1;
+      white-space: nowrap;
+      padding: 0 7px;
     }
 
     .status {
@@ -354,6 +379,15 @@ INDEX_HTML = """
       background: var(--panel);
       overflow: hidden;
       margin: 0 0 8px 0;
+    }
+
+    details.event-hit > summary {
+      background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+    }
+
+    details.event-hit-current {
+      border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
     }
 
     details.no-expand > summary {
@@ -562,7 +596,8 @@ INDEX_HTML = """
         border-right: 0;
         border-bottom: 1px solid var(--line);
       }
-      .toolbar {
+      .toolbar,
+      .filterbar {
         grid-template-columns: 1fr 1fr;
       }
     }
@@ -599,21 +634,6 @@ INDEX_HTML = """
       </div>
       <div class="toolbar">
         <div id="selectedFlowTitle" class="headline">No flow selected</div>
-        <input id="prefixRule" list="ruleExamples" placeholder="输入十六进制规则：xx通配；用;分多条" />
-        <datalist id="ruleExamples">
-          <option value="0a 92"></option>
-          <option value="19 00 00 00 xx 00 00 00 00 xx"></option>
-          <option value="33 66 00 0b@#8ec5ff; 40 13 xx 00@#ffd166"></option>
-        </datalist>
-        <select id="highlightMode" title="Highlight mode and match scope.">
-          <option value="preview_contains">Preview 包含 (推荐)</option>
-          <option value="preview_prefix">Preview 前缀</option>
-          <option value="preview_exact">Preview 完全</option>
-          <option value="full_contains">全包 包含 (8KB)</option>
-          <option value="full_prefix">全包 前缀 (8KB)</option>
-          <option value="full_exact">全包 完全 (8KB)</option>
-        </select>
-        <input id="ruleColor" type="color" value="#ffd166" />
         <select id="hideAscii">
           <option value="0">ASCII</option>
           <option value="1">NoASCII</option>
@@ -654,7 +674,37 @@ INDEX_HTML = """
           <option value="system">System</option>
         </select>
       </div>
-      <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB', 输入框按 Esc 快速清空。</div>
+      <div class="filterbar">
+        <input id="prefixRule" list="ruleExamples" placeholder="输入十六进制规则：xx通配；用;分多条" />
+        <datalist id="ruleExamples">
+          <option value="0a 92"></option>
+          <option value="19 00 00 00 xx 00 00 00 00 xx"></option>
+          <option value="33 66 00 0b@#8ec5ff; 40 13 xx 00@#ffd166"></option>
+        </datalist>
+        <select id="highlightMode" title="Highlight mode and match scope.">
+          <option value="preview_contains">Preview 包含 (推荐)</option>
+          <option value="preview_prefix">Preview 前缀</option>
+          <option value="preview_exact">Preview 完全</option>
+          <option value="full_contains">全包 包含 (8KB)</option>
+          <option value="full_prefix">全包 前缀 (8KB)</option>
+          <option value="full_exact">全包 完全 (8KB)</option>
+        </select>
+        <input id="ruleColor" type="color" value="#ffd166" />
+        <button id="searchApplyBtn" title="Apply highlight search.">Search</button>
+        <button id="searchPrevBtn" title="Jump to previous hit.">Prev</button>
+        <button id="searchNextBtn" title="Jump to next hit.">Next</button>
+        <div id="searchHitStat" class="tool-stat" title="current hit / total hit">--/--</div>
+        <select id="filterDir" title="Filter by request or response direction.">
+          <option value="all">Dir All</option>
+          <option value="req">Req Only</option>
+          <option value="resp">Resp Only</option>
+        </select>
+        <input id="filterMinLen" type="number" min="0" step="1" placeholder="Min Len" />
+        <input id="filterMaxLen" type="number" min="0" step="1" placeholder="Max Len" />
+        <button id="filterApplyBtn" title="Apply current filters.">Filter</button>
+        <button id="filterClearBtn" title="Clear all filters.">Clear</button>
+      </div>
+      <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB'。输入后点 Search 或按 Enter；Prev/Next 跳命中。Filter 可叠加方向 + 长度范围。</div>
       <div class="status" id="status">__STATUS_BOOT__</div>
       <div id="events">__INITIAL_EVENTS__</div>
     </section>

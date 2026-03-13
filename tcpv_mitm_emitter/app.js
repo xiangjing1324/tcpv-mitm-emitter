@@ -10,6 +10,23 @@ const state = {
   tick: 0,
   expandedIds: new Set(),
   themeMode: "github-dark",
+  search: {
+    active: false,
+    text: "",
+    mode: "preview_contains",
+    color: "#ffd166",
+    rules: [],
+    invalidCount: 0,
+  },
+  filters: {
+    dir: "all",
+    minLen: "",
+    maxLen: "",
+  },
+  hitEventIds: [],
+  hitCursor: -1,
+  pendingHitScroll: false,
+  filteredCount: 0,
 };
 
 const el = {
@@ -23,8 +40,17 @@ const el = {
   reload: document.getElementById("reloadBtn"),
   deleteFlow: document.getElementById("deleteFlowBtn"),
   prefix: document.getElementById("prefixRule"),
+  searchApply: document.getElementById("searchApplyBtn"),
+  searchPrev: document.getElementById("searchPrevBtn"),
+  searchNext: document.getElementById("searchNextBtn"),
+  searchHitStat: document.getElementById("searchHitStat"),
   highlightMode: document.getElementById("highlightMode"),
   color: document.getElementById("ruleColor"),
+  filterDir: document.getElementById("filterDir"),
+  filterMinLen: document.getElementById("filterMinLen"),
+  filterMaxLen: document.getElementById("filterMaxLen"),
+  filterApply: document.getElementById("filterApplyBtn"),
+  filterClear: document.getElementById("filterClearBtn"),
   hideAscii: document.getElementById("hideAscii"),
   previewBytes: document.getElementById("previewBytes"),
   previewSpace: document.getElementById("previewSpace"),
@@ -90,6 +116,37 @@ function applyBodyTone() {
   rootStyle.setProperty("--hex-accent-color", tone.accent);
 }
 
+function normalizeFilterDir(rawDir) {
+  const dir = String(rawDir || "").trim().toLowerCase();
+  if (dir === "req" || dir === "resp") {
+    return dir;
+  }
+  return "all";
+}
+
+function normalizeFilterLen(rawValue) {
+  const text = String(rawValue || "").trim();
+  if (!text) return "";
+  const num = Number(text);
+  if (!Number.isFinite(num) || num < 0) return "";
+  return String(Math.floor(num));
+}
+
+function normalizeFilterState(rawDir, rawMinLen, rawMaxLen) {
+  let minLen = normalizeFilterLen(rawMinLen);
+  let maxLen = normalizeFilterLen(rawMaxLen);
+  if (minLen && maxLen && Number(minLen) > Number(maxLen)) {
+    const oldMin = minLen;
+    minLen = maxLen;
+    maxLen = oldMin;
+  }
+  return {
+    dir: normalizeFilterDir(rawDir),
+    minLen,
+    maxLen,
+  };
+}
+
 async function apiJson(url) {
   const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) {
@@ -109,11 +166,30 @@ async function apiPost(url) {
 }
 
 function loadRules() {
-  el.prefix.value = localStorage.getItem("tcpv_rule_prefix") || "";
+  const appliedSearchText = localStorage.getItem("tcpv_applied_rule_prefix") || "";
+  const appliedSearchMode = localStorage.getItem("tcpv_applied_highlight_mode") || "preview_contains";
+  const appliedSearchColor = localStorage.getItem("tcpv_applied_rule_color") || "#ffd166";
+  const draftSearchText = localStorage.getItem("tcpv_rule_prefix");
+  const draftSearchMode = localStorage.getItem("tcpv_highlight_mode");
+  const draftSearchColor = localStorage.getItem("tcpv_rule_color");
+  const appliedFilterDir = localStorage.getItem("tcpv_applied_filter_dir") || "all";
+  const appliedFilterMinLen = localStorage.getItem("tcpv_applied_filter_min_len") || "";
+  const appliedFilterMaxLen = localStorage.getItem("tcpv_applied_filter_max_len") || "";
+
+  el.prefix.value = draftSearchText !== null ? draftSearchText : appliedSearchText;
   if (el.highlightMode) {
-    el.highlightMode.value = localStorage.getItem("tcpv_highlight_mode") || "preview_contains";
+    el.highlightMode.value = draftSearchMode || appliedSearchMode;
   }
-  el.color.value = localStorage.getItem("tcpv_rule_color") || "#ffd166";
+  el.color.value = draftSearchColor || appliedSearchColor;
+  if (el.filterDir) {
+    el.filterDir.value = localStorage.getItem("tcpv_filter_dir_draft") || appliedFilterDir;
+  }
+  if (el.filterMinLen) {
+    el.filterMinLen.value = localStorage.getItem("tcpv_filter_min_len_draft") || appliedFilterMinLen;
+  }
+  if (el.filterMaxLen) {
+    el.filterMaxLen.value = localStorage.getItem("tcpv_filter_max_len_draft") || appliedFilterMaxLen;
+  }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   el.previewBytes.value = localStorage.getItem("tcpv_preview_bytes") || "32";
   if (el.previewSpace) {
@@ -130,8 +206,12 @@ function loadRules() {
 
   state.autoRefresh = el.autoRefresh.value === "1";
   state.themeMode = el.themeMode.value;
+  state.search = buildAppliedSearchState(appliedSearchText, appliedSearchMode, appliedSearchColor);
+  state.filters = normalizeFilterState(appliedFilterDir, appliedFilterMinLen, appliedFilterMaxLen);
   applyTheme();
   applyBodyTone();
+  updateSearchDraftState();
+  updateSearchUi();
 
   const splitRaw = Number(localStorage.getItem("tcpv_split_left") || "380");
   const split = Number.isFinite(splitRaw) ? splitRaw : 380;
@@ -144,6 +224,15 @@ function saveRules() {
     localStorage.setItem("tcpv_highlight_mode", el.highlightMode.value || "preview_contains");
   }
   localStorage.setItem("tcpv_rule_color", el.color.value);
+  if (el.filterDir) {
+    localStorage.setItem("tcpv_filter_dir_draft", el.filterDir.value || "all");
+  }
+  if (el.filterMinLen) {
+    localStorage.setItem("tcpv_filter_min_len_draft", el.filterMinLen.value || "");
+  }
+  if (el.filterMaxLen) {
+    localStorage.setItem("tcpv_filter_max_len_draft", el.filterMaxLen.value || "");
+  }
   localStorage.setItem("tcpv_hide_ascii", el.hideAscii.value);
   localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
   if (el.previewSpace) {
@@ -157,6 +246,18 @@ function saveRules() {
   }
   localStorage.setItem("tcpv_auto_refresh", el.autoRefresh.value);
   localStorage.setItem("tcpv_theme_mode", el.themeMode.value);
+}
+
+function saveAppliedSearch() {
+  localStorage.setItem("tcpv_applied_rule_prefix", state.search.text || "");
+  localStorage.setItem("tcpv_applied_highlight_mode", state.search.mode || "preview_contains");
+  localStorage.setItem("tcpv_applied_rule_color", state.search.color || "#ffd166");
+}
+
+function saveAppliedFilters() {
+  localStorage.setItem("tcpv_applied_filter_dir", state.filters.dir || "all");
+  localStorage.setItem("tcpv_applied_filter_min_len", state.filters.minLen || "");
+  localStorage.setItem("tcpv_applied_filter_max_len", state.filters.maxLen || "");
 }
 
 function getExpandMode() {
@@ -469,8 +570,12 @@ async function selectFlow(flowId) {
   state.afterId = null;
   state.hasMore = true;
   state.expandedIds.clear();
+  state.hitEventIds = [];
+  state.hitCursor = -1;
+  state.filteredCount = 0;
   renderFlowList();
   renderSelectedTitle();
+  updateSearchUi();
   await syncLatestEvents();
 }
 
@@ -541,6 +646,9 @@ async function clearCurrentFlow() {
   state.afterId = null;
   state.hasMore = true;
   state.expandedIds.clear();
+  state.hitEventIds = [];
+  state.hitCursor = -1;
+  state.filteredCount = 0;
 
   await loadFlows(true, preferredFlowId);
   if (state.flowId) {
@@ -692,12 +800,12 @@ function normalizeHexColor(rawColor, fallbackColor = "") {
 function parseHighlightMode(rawMode) {
   const mode = String(rawMode || "").trim().toLowerCase();
   const known = {
-    preview_contains: { scope: "preview", mode: "contains" },
-    preview_prefix: { scope: "preview", mode: "prefix" },
-    preview_exact: { scope: "preview", mode: "exact" },
-    full_contains: { scope: "full", mode: "contains" },
-    full_prefix: { scope: "full", mode: "prefix" },
-    full_exact: { scope: "full", mode: "exact" },
+    preview_contains: { key: "preview_contains", scope: "preview", mode: "contains" },
+    preview_prefix: { key: "preview_prefix", scope: "preview", mode: "prefix" },
+    preview_exact: { key: "preview_exact", scope: "preview", mode: "exact" },
+    full_contains: { key: "full_contains", scope: "full", mode: "contains" },
+    full_prefix: { key: "full_prefix", scope: "full", mode: "prefix" },
+    full_exact: { key: "full_exact", scope: "full", mode: "exact" },
   };
   return known[mode] || known.preview_contains;
 }
@@ -782,6 +890,76 @@ function parseHighlightRules(rawInput, fallbackColor) {
   }
 
   return { rules, invalidCount };
+}
+
+function buildAppliedSearchState(rawText, rawMode, rawColor) {
+  const modeSpec = parseHighlightMode(rawMode);
+  const text = String(rawText || "").trim();
+  const color = normalizeHexColor(rawColor, "#ffd166");
+  if (!text) {
+    return {
+      active: false,
+      text: "",
+      mode: modeSpec.key,
+      color,
+      rules: [],
+      invalidCount: 0,
+    };
+  }
+
+  const parsed = parseHighlightRules(text, color);
+  const active = parsed.invalidCount === 0 && parsed.rules.length > 0;
+  return {
+    active,
+    text,
+    mode: modeSpec.key,
+    color,
+    rules: active ? parsed.rules : [],
+    invalidCount: parsed.invalidCount,
+  };
+}
+
+function updateSearchDraftState() {
+  const draft = buildAppliedSearchState(
+    el.prefix ? el.prefix.value : "",
+    el.highlightMode ? el.highlightMode.value : "preview_contains",
+    el.color ? el.color.value : "#ffd166",
+  );
+  if (el.prefix) {
+    const invalid = draft.invalidCount > 0;
+    el.prefix.classList.toggle("input-invalid", invalid);
+    if (invalid) {
+      el.prefix.title = `Invalid rule count=${draft.invalidCount}. Use: 19 00 00 00 xx 00 00 00 00 xx; 33 66@#8ec5ff`;
+    } else {
+      el.prefix.title = "Rule format: pattern; pattern@#RRGGBB. Wildcard: xx/??/**. Press Enter or Search to apply.";
+    }
+  }
+  return draft;
+}
+
+function updateSearchUi() {
+  const totalHits = Array.isArray(state.hitEventIds) ? state.hitEventIds.length : 0;
+  const currentHit = totalHits > 0 && state.hitCursor >= 0 ? state.hitCursor + 1 : 0;
+  if (el.searchHitStat) {
+    el.searchHitStat.textContent = state.search.active ? `${currentHit}/${totalHits}` : "--/--";
+    el.searchHitStat.title = state.search.active
+      ? `current hit ${currentHit}, total hit ${totalHits}`
+      : "no active highlight search";
+  }
+  if (el.searchPrev) {
+    el.searchPrev.disabled = totalHits <= 0;
+  }
+  if (el.searchNext) {
+    el.searchNext.disabled = totalHits <= 0;
+  }
+}
+
+function getFilterDraftState() {
+  return normalizeFilterState(
+    el.filterDir ? el.filterDir.value : "all",
+    el.filterMinLen ? el.filterMinLen.value : "",
+    el.filterMaxLen ? el.filterMaxLen.value : "",
+  );
 }
 
 function findPatternMatches(byteValues, patternTokens, mode = "contains", maxMatches = 12) {
@@ -898,6 +1076,10 @@ function renderPreviewBytes(previewSpan, byteValues, highlightRanges) {
 
 function getPreviewInfo(ev) {
   const previewLen = getBytesPerRow();
+  const cacheKey = `${previewLen}|${String(ev && ev.pay ? ev.pay : "")}|${String(ev && ev.pfx ? ev.pfx : "")}`;
+  if (ev && ev.__tcpvPreviewCacheKey === cacheKey && ev.__tcpvPreviewInfo) {
+    return ev.__tcpvPreviewInfo;
+  }
   const payloadBytes = b64ToBytes(ev.pay);
   let previewBytes = [];
   if (payloadBytes.length > 0) {
@@ -906,17 +1088,29 @@ function getPreviewInfo(ev) {
     const fallback = normalizeHex(ev.pfx || "");
     previewBytes = (fallback.match(/.{1,2}/g) || []).slice(0, previewLen).map((x) => parseInt(x, 16));
   }
-  return { payloadBytes, previewBytes };
+  const previewInfo = { payloadBytes, previewBytes };
+  if (ev && typeof ev === "object") {
+    ev.__tcpvPreviewCacheKey = cacheKey;
+    ev.__tcpvPreviewInfo = previewInfo;
+  }
+  return previewInfo;
 }
 
-function estimatePayloadByteLen(base64Text) {
-  const text = String(base64Text || "").replace(/\s+/g, "");
+function estimatePayloadByteLen(ev) {
+  if (ev && Number.isFinite(ev.__tcpvPayloadLen)) {
+    return ev.__tcpvPayloadLen;
+  }
+  const text = String(ev && ev.pay ? ev.pay : "").replace(/\s+/g, "");
   if (!text) return 0;
   const len = text.length;
   let pad = 0;
   if (text.endsWith("==")) pad = 2;
   else if (text.endsWith("=")) pad = 1;
-  return Math.max(0, Math.floor((len * 3) / 4) - pad);
+  const payloadLen = Math.max(0, Math.floor((len * 3) / 4) - pad);
+  if (ev && typeof ev === "object") {
+    ev.__tcpvPayloadLen = payloadLen;
+  }
+  return payloadLen;
 }
 
 function getEventExtraInfo(ev) {
@@ -961,6 +1155,112 @@ function buildEventBody(ev, hideAscii) {
   return body;
 }
 
+function eventMatchesFilters(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  const dir = state.filters.dir || "all";
+  if (dir === "req" && Number(ev.dir) !== 0) return false;
+  if (dir === "resp" && Number(ev.dir) !== 1) return false;
+
+  const len = Number(ev.len || 0);
+  const minLen = state.filters.minLen ? Number(state.filters.minLen) : null;
+  const maxLen = state.filters.maxLen ? Number(state.filters.maxLen) : null;
+  if (minLen !== null && Number.isFinite(minLen) && len < minLen) return false;
+  if (maxLen !== null && Number.isFinite(maxLen) && len > maxLen) return false;
+  return true;
+}
+
+function findEventNodeById(eventId) {
+  if (!eventId) return null;
+  for (const node of el.events.querySelectorAll("details[data-event-id]")) {
+    if (String(node.dataset.eventId || "") === String(eventId)) {
+      return node;
+    }
+  }
+  return null;
+}
+
+function focusCurrentHit(behavior = "smooth") {
+  if (!Array.isArray(state.hitEventIds) || state.hitEventIds.length === 0) return;
+  if (state.hitCursor < 0 || state.hitCursor >= state.hitEventIds.length) return;
+  const eventId = state.hitEventIds[state.hitCursor];
+  const node = findEventNodeById(eventId);
+  if (!node) return;
+  node.scrollIntoView({ behavior, block: "center" });
+}
+
+function applySearch(focusFirstHit = true) {
+  saveRules();
+  const draft = updateSearchDraftState();
+  if (!draft.text) {
+    state.search = buildAppliedSearchState("", draft.mode, draft.color);
+    state.hitCursor = -1;
+    state.pendingHitScroll = false;
+    saveAppliedSearch();
+    renderEvents();
+    return;
+  }
+  if (draft.invalidCount > 0) {
+    setStatus(`search rule invalid: ${draft.invalidCount}`);
+    return;
+  }
+
+  state.search = draft;
+  state.hitCursor = focusFirstHit ? 0 : state.hitCursor;
+  state.pendingHitScroll = focusFirstHit;
+  saveAppliedSearch();
+  renderEvents();
+}
+
+function applyFilters() {
+  state.filters = getFilterDraftState();
+  if (el.filterDir) {
+    el.filterDir.value = state.filters.dir || "all";
+  }
+  if (el.filterMinLen) {
+    el.filterMinLen.value = state.filters.minLen || "";
+  }
+  if (el.filterMaxLen) {
+    el.filterMaxLen.value = state.filters.maxLen || "";
+  }
+  saveRules();
+  saveAppliedFilters();
+  renderEvents();
+}
+
+function clearFilters() {
+  if (el.filterDir) {
+    el.filterDir.value = "all";
+  }
+  if (el.filterMinLen) {
+    el.filterMinLen.value = "";
+  }
+  if (el.filterMaxLen) {
+    el.filterMaxLen.value = "";
+  }
+  state.filters = getFilterDraftState();
+  saveRules();
+  saveAppliedFilters();
+  renderEvents();
+}
+
+function moveHit(step) {
+  if (!Array.isArray(state.hitEventIds) || state.hitEventIds.length === 0) return;
+  const total = state.hitEventIds.length;
+  const base = state.hitCursor >= 0 ? state.hitCursor : 0;
+  state.hitCursor = (base + step + total) % total;
+  updateSearchUi();
+
+  for (const node of el.events.querySelectorAll("details.event-hit-current")) {
+    node.classList.remove("event-hit-current");
+  }
+  const currentId = state.hitEventIds[state.hitCursor] || "";
+  const currentNode = findEventNodeById(currentId);
+  if (currentNode) {
+    currentNode.classList.add("event-hit-current");
+  }
+  focusCurrentHit("smooth");
+}
+
 function renderEvents() {
   const openIds = new Set();
   for (const node of el.events.querySelectorAll("details[data-event-id]")) {
@@ -972,23 +1272,13 @@ function renderEvents() {
 
   el.events.innerHTML = "";
   const hideAscii = el.hideAscii.value === "1";
-  const modeSpec = parseHighlightMode(el.highlightMode ? el.highlightMode.value : "preview_contains");
+  const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
   const expandMode = getExpandMode();
-  const parsedRules = parseHighlightRules(el.prefix.value || "", el.color.value);
-  if (el.prefix) {
-    const invalid = parsedRules.invalidCount > 0;
-    el.prefix.classList.toggle("input-invalid", invalid);
-    if (invalid) {
-      el.prefix.title = `Invalid rule count=${parsedRules.invalidCount}. Use: 19 00 00 00 xx 00 00 00 00 xx; 33 66@#8ec5ff`;
-    } else {
-      el.prefix.title = "Rule format: pattern; pattern@#RRGGBB. Wildcard: xx/??/**. Press Esc to clear.";
-    }
-  }
-  const highlightRules = parsedRules.rules;
+  const highlightRules = state.search.active ? state.search.rules : [];
   const flowHasTruncatedPayload = state.events.some((ev) => {
     const fullLen = Number(ev && ev.len);
     if (!Number.isFinite(fullLen) || fullLen <= 0) return false;
-    const payloadLen = estimatePayloadByteLen(ev ? ev.pay : "");
+    const payloadLen = estimatePayloadByteLen(ev);
     if (payloadLen <= 0) return false;
     return fullLen > payloadLen;
   });
@@ -996,8 +1286,17 @@ function renderEvents() {
   if (flowExpandLocked) {
     state.expandedIds.clear();
   }
+  const prevCurrentHitId =
+    state.hitCursor >= 0 && state.hitCursor < state.hitEventIds.length
+      ? state.hitEventIds[state.hitCursor]
+      : "";
 
   if (!state.flowId) {
+    state.filteredCount = 0;
+    state.hitEventIds = [];
+    state.hitCursor = -1;
+    state.pendingHitScroll = false;
+    updateSearchUi();
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = "Select a flow on the left.";
@@ -1006,6 +1305,11 @@ function renderEvents() {
   }
 
   if (state.events.length === 0) {
+    state.filteredCount = 0;
+    state.hitEventIds = [];
+    state.hitCursor = -1;
+    state.pendingHitScroll = false;
+    updateSearchUi();
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = "No packets yet for selected flow.";
@@ -1013,8 +1317,23 @@ function renderEvents() {
     return;
   }
 
+  const visibleEvents = state.events.filter((ev) => eventMatchesFilters(ev));
+  state.filteredCount = visibleEvents.length;
+  if (visibleEvents.length === 0) {
+    state.hitEventIds = [];
+    state.hitCursor = -1;
+    state.pendingHitScroll = false;
+    updateSearchUi();
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No packets match current filters.";
+    el.events.appendChild(empty);
+    return;
+  }
+
   const listFrag = document.createDocumentFragment();
-  for (const ev of state.events) {
+  const nextHitEventIds = [];
+  for (const ev of visibleEvents) {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
     const allowExpand = !flowExpandLocked;
@@ -1044,7 +1363,7 @@ function renderEvents() {
           ? preview.payloadBytes.slice(0, MAX_FULL_SCAN_BYTES)
           : preview.previewBytes)
         : preview.previewBytes;
-    const matchRanges = mergeRuleMatches(matchTarget, highlightRules, modeSpec.mode, 24);
+    const matchRanges = state.search.active ? mergeRuleMatches(matchTarget, highlightRules, modeSpec.mode, 24) : [];
     const previewRanges =
       modeSpec.scope === "full"
         ? clipRangesToLength(matchRanges, preview.previewBytes.length)
@@ -1052,6 +1371,12 @@ function renderEvents() {
     const hasOutOfPreviewMatch =
       modeSpec.scope === "full" &&
       matchRanges.some((r) => Number(r.start || 0) >= preview.previewBytes.length);
+    const isHit = state.search.active && matchRanges.length > 0;
+    if (isHit) {
+      nextHitEventIds.push(eventId);
+      wrap.classList.add("event-hit");
+      wrap.dataset.hitIndex = String(nextHitEventIds.length);
+    }
 
     const tsSpan = document.createElement("span");
     tsSpan.className = "summary-fixed summary-ts";
@@ -1137,6 +1462,33 @@ function renderEvents() {
     listFrag.appendChild(wrap);
   }
   el.events.appendChild(listFrag);
+
+  state.hitEventIds = nextHitEventIds;
+  if (nextHitEventIds.length <= 0) {
+    state.hitCursor = -1;
+  } else if (state.pendingHitScroll) {
+    state.hitCursor = 0;
+  } else if (prevCurrentHitId) {
+    const keepIdx = nextHitEventIds.indexOf(prevCurrentHitId);
+    state.hitCursor = keepIdx >= 0 ? keepIdx : Math.min(Math.max(state.hitCursor, 0), nextHitEventIds.length - 1);
+  } else {
+    state.hitCursor = Math.min(Math.max(state.hitCursor, 0), nextHitEventIds.length - 1);
+  }
+
+  if (state.hitCursor >= 0 && state.hitCursor < nextHitEventIds.length) {
+    const currentNode = findEventNodeById(nextHitEventIds[state.hitCursor]);
+    if (currentNode) {
+      currentNode.classList.add("event-hit-current");
+    }
+  }
+
+  updateSearchUi();
+  if (state.pendingHitScroll) {
+    state.pendingHitScroll = false;
+    requestAnimationFrame(() => {
+      focusCurrentHit("smooth");
+    });
+  }
 }
 
 async function tick() {
@@ -1155,7 +1507,10 @@ async function tick() {
       await syncLatestEvents();
     }
 
-    const line = `emit=${s.emit_count} write=${s.write_count} err=${s.write_error_count} drop=${s.dropped_count} q=${s.queue_size} local=${state.events.length}`;
+    const line =
+      `emit=${s.emit_count} write=${s.write_count} err=${s.write_error_count} drop=${s.dropped_count} ` +
+      `q=${s.queue_size} local=${state.events.length} view=${state.filteredCount}/${state.events.length}` +
+      `${state.search.active ? ` hit=${state.hitEventIds.length}` : ""}`;
     if (s.last_write_error) {
       setStatus(`${line} | last_error=${s.last_write_error}`);
     } else {
@@ -1192,14 +1547,20 @@ if (el.deleteFlow) {
 
 el.prefix.addEventListener("input", () => {
   saveRules();
-  renderEvents();
+  updateSearchDraftState();
 });
 
 el.prefix.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    applySearch(true);
+    ev.preventDefault();
+    return;
+  }
   if (ev.key === "Escape") {
     el.prefix.value = "";
+    updateSearchDraftState();
     saveRules();
-    renderEvents();
+    applySearch(false);
     ev.preventDefault();
   }
 });
@@ -1207,14 +1568,74 @@ el.prefix.addEventListener("keydown", (ev) => {
 if (el.highlightMode) {
   el.highlightMode.addEventListener("change", () => {
     saveRules();
-    renderEvents();
+    updateSearchDraftState();
+  });
+}
+
+if (el.searchApply) {
+  el.searchApply.addEventListener("click", () => {
+    applySearch(true);
+  });
+}
+
+if (el.searchPrev) {
+  el.searchPrev.addEventListener("click", () => {
+    moveHit(-1);
+  });
+}
+
+if (el.searchNext) {
+  el.searchNext.addEventListener("click", () => {
+    moveHit(1);
   });
 }
 
 el.color.addEventListener("input", () => {
   saveRules();
-  renderEvents();
+  updateSearchDraftState();
 });
+
+if (el.filterDir) {
+  el.filterDir.addEventListener("change", () => {
+    saveRules();
+  });
+}
+
+if (el.filterMinLen) {
+  el.filterMinLen.addEventListener("input", () => {
+    saveRules();
+  });
+  el.filterMinLen.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      applyFilters();
+      ev.preventDefault();
+    }
+  });
+}
+
+if (el.filterMaxLen) {
+  el.filterMaxLen.addEventListener("input", () => {
+    saveRules();
+  });
+  el.filterMaxLen.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      applyFilters();
+      ev.preventDefault();
+    }
+  });
+}
+
+if (el.filterApply) {
+  el.filterApply.addEventListener("click", () => {
+    applyFilters();
+  });
+}
+
+if (el.filterClear) {
+  el.filterClear.addEventListener("click", () => {
+    clearFilters();
+  });
+}
 
 el.hideAscii.addEventListener("change", () => {
   saveRules();
