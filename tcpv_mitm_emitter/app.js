@@ -76,9 +76,8 @@ const BODY_TONES = {
 };
 
 const MAX_FULL_SCAN_BYTES = 8192;
-const MAX_EVENTS_IN_MEMORY = 1200;
+const MAX_EVENTS_IN_MEMORY = 5000;
 const EVENTS_FETCH_LIMIT = 200;
-const MAX_RENDERED_EVENTS = 500;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
@@ -681,46 +680,63 @@ async function selectFlow(flowId) {
   renderFlowList();
   renderSelectedTitle();
   updateSearchUi();
-  await syncLatestEvents();
+  await syncLatestEvents({ drain: true, maxPages: 60 });
 }
 
-async function syncLatestEvents() {
+async function syncLatestEvents(options = {}) {
   if (!state.flowId || state.loading) return;
+  const drain = !!(options && options.drain);
+  const maxPagesRaw = Number(options && options.maxPages);
+  const maxPages = Number.isFinite(maxPagesRaw) && maxPagesRaw > 0 ? Math.floor(maxPagesRaw) : 1;
   state.loading = true;
 
   try {
     const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
     const needPayloadInList = state.search.active && modeSpec.scope === "full";
-    const params = new URLSearchParams({
-      account: state.flowId,
-      limit: String(EVENTS_FETCH_LIMIT),
-      include_payload: needPayloadInList ? "1" : "0",
-    });
-    if (state.afterId) {
-      params.set("after_id", state.afterId);
-    }
-    const data = await apiJson(`/events?${params.toString()}`);
+    let page = 0;
+    let changed = false;
+    let shouldRenderEmpty = false;
 
-    const rows = Array.isArray(data.events) ? data.events : [];
-    if (!needPayloadInList) {
-      for (const ev of rows) {
-        if (ev && typeof ev === "object") {
-          ev.pay = "";
+    while (page < maxPages) {
+      const params = new URLSearchParams({
+        account: state.flowId,
+        limit: String(EVENTS_FETCH_LIMIT),
+        include_payload: needPayloadInList ? "1" : "0",
+      });
+      if (state.afterId) {
+        params.set("after_id", state.afterId);
+      }
+      const data = await apiJson(`/events?${params.toString()}`);
+
+      const rows = Array.isArray(data.events) ? data.events : [];
+      if (!needPayloadInList) {
+        for (const ev of rows) {
+          if (ev && typeof ev === "object") {
+            ev.pay = "";
+          }
         }
       }
-    }
-    if (rows.length > 0) {
-      state.events.push(...rows);
-      if (state.events.length > MAX_EVENTS_IN_MEMORY) {
-        state.events = state.events.slice(-MAX_EVENTS_IN_MEMORY);
+      if (rows.length > 0) {
+        state.events.push(...rows);
+        if (state.events.length > MAX_EVENTS_IN_MEMORY) {
+          state.events = state.events.slice(-MAX_EVENTS_IN_MEMORY);
+        }
+        changed = true;
+      } else if (state.events.length === 0) {
+        shouldRenderEmpty = true;
       }
-      renderEvents();
-    } else if (state.events.length === 0) {
-      renderEvents();
+
+      state.afterId = data.last_id || state.afterId;
+      state.hasMore = !!data.has_more;
+      page += 1;
+      if (!drain || !state.hasMore || rows.length <= 0) {
+        break;
+      }
     }
 
-    state.afterId = data.last_id || state.afterId;
-    state.hasMore = !!data.has_more;
+    if (changed || shouldRenderEmpty) {
+      renderEvents();
+    }
   } catch (e) {
     setStatus(`sync error: ${e.message}`);
   } finally {
@@ -1427,7 +1443,7 @@ async function applySearch(focusFirstHit = true) {
     state.hitEventIds = [];
     state.filteredCount = 0;
     renderEvents();
-    await syncLatestEvents();
+    await syncLatestEvents({ drain: true, maxPages: 60 });
     return;
   }
   renderEvents();
@@ -1556,16 +1572,8 @@ function renderEvents() {
   const listFrag = document.createDocumentFragment();
   const nextHitEventIds = [];
   const needFullScan = state.search.active && modeSpec.scope === "full";
-  const useRenderWindow = !state.search.active && visibleEvents.length > MAX_RENDERED_EVENTS;
-  const renderEventsList = useRenderWindow ? visibleEvents.slice(-MAX_RENDERED_EVENTS) : visibleEvents;
-  if (useRenderWindow) {
-    const tip = document.createElement("div");
-    tip.className = "empty";
-    tip.textContent = `Performance mode: showing latest ${renderEventsList.length}/${visibleEvents.length} packets.`;
-    listFrag.appendChild(tip);
-  }
 
-  for (const ev of renderEventsList) {
+  for (const ev of visibleEvents) {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
     if (!needFullScan && !state.expandedIds.has(eventId)) {
