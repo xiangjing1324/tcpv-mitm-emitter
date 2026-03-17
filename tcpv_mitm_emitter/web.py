@@ -264,7 +264,7 @@ INDEX_HTML = """
     .toolbar {
       border-bottom: 1px solid var(--line);
       display: grid;
-      grid-template-columns: minmax(320px, 1fr) 78px 88px 96px 106px 92px 88px 118px;
+      grid-template-columns: minmax(300px, 1fr) 78px 88px 232px 96px 106px 92px 88px 118px;
       gap: 8px;
       align-items: center;
       padding: 8px 10px;
@@ -318,6 +318,49 @@ INDEX_HTML = """
       cursor: not-allowed;
       opacity: 0.55;
       border-color: var(--line);
+    }
+
+    .preview-offset-group {
+      display: grid;
+      grid-template-columns: 24px 24px minmax(80px, 1fr) 24px 56px;
+      gap: 4px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .preview-offset-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 11px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      height: 28px;
+      background: color-mix(in srgb, var(--chip-bg) 86%, transparent);
+    }
+
+    .preview-offset-range {
+      width: 100%;
+      padding: 0;
+      height: 28px;
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+    }
+
+    .preview-offset-input {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1;
+    }
+
+    .mini-btn {
+      padding: 0;
+      width: 24px;
+      min-width: 24px;
+      text-align: center;
+      font-weight: 700;
     }
 
     .tool-stat {
@@ -645,7 +688,16 @@ INDEX_HTML = """
           <option value="48">48 byte</option>
           <option value="64">64 byte</option>
           <option value="80">80 byte</option>
+          <option value="96">96 byte</option>
+          <option value="128">128 byte</option>
         </select>
+        <div class="preview-offset-group" title="Preview window offset. Shift preview window forward without expanding body.">
+          <span class="preview-offset-label">ofs</span>
+          <button id="previewOffsetPrev" class="mini-btn" type="button" title="Shift preview window backward.">-</button>
+          <input id="previewOffsetRange" class="preview-offset-range" type="range" min="0" max="4096" step="1" value="0" />
+          <button id="previewOffsetNext" class="mini-btn" type="button" title="Shift preview window forward.">+</button>
+          <input id="previewOffsetInput" class="preview-offset-input" type="number" min="0" max="65535" step="1" value="0" />
+        </div>
         <select id="previewSpace" title="Insert an extra separator every 16 bytes in preview and hex body.">
           <option value="1">Gap16 On</option>
           <option value="0">Gap16 Off</option>
@@ -704,7 +756,7 @@ INDEX_HTML = """
         <button id="filterApplyBtn" title="Apply current filters.">Filter</button>
         <button id="filterClearBtn" title="Clear all filters.">Clear</button>
       </div>
-      <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB'。输入后点 Search 或按 Enter；Prev/Next 跳命中。Filter 可叠加方向 + 长度范围。</div>
+      <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB'。输入后点 Search 或按 Enter；Prev/Next 跳命中。Filter 可叠加方向 + 长度范围。ofs 可平移预览窗口做纵向对比。</div>
       <div class="status" id="status">__STATUS_BOOT__</div>
       <div id="events">__INITIAL_EVENTS__</div>
     </section>

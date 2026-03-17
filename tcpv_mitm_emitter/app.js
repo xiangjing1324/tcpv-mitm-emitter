@@ -53,6 +53,10 @@ const el = {
   filterClear: document.getElementById("filterClearBtn"),
   hideAscii: document.getElementById("hideAscii"),
   previewBytes: document.getElementById("previewBytes"),
+  previewOffsetRange: document.getElementById("previewOffsetRange"),
+  previewOffsetInput: document.getElementById("previewOffsetInput"),
+  previewOffsetPrev: document.getElementById("previewOffsetPrev"),
+  previewOffsetNext: document.getElementById("previewOffsetNext"),
   previewSpace: document.getElementById("previewSpace"),
   bodyTone: document.getElementById("bodyTone"),
   expandMode: document.getElementById("expandMode"),
@@ -78,6 +82,7 @@ const BODY_TONES = {
 const MAX_FULL_SCAN_BYTES = 8192;
 const MAX_EVENTS_IN_MEMORY = 5000;
 const EVENTS_FETCH_LIMIT = 200;
+const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
@@ -85,6 +90,7 @@ const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
 const payloadCache = new Map();
 const payloadInFlight = new Map();
 let payloadCacheBytes = 0;
+let previewOffsetRenderTimer = 0;
 
 function setStatus(text) {
   if (el.status) {
@@ -154,6 +160,54 @@ function normalizeFilterState(rawDir, rawMinLen, rawMaxLen) {
     minLen,
     maxLen,
   };
+}
+
+function normalizePreviewOffset(rawValue) {
+  const num = Number(rawValue);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Math.min(PREVIEW_OFFSET_MAX, Math.floor(num));
+}
+
+function getPreviewOffset() {
+  if (!el.previewOffsetInput) return 0;
+  return normalizePreviewOffset(el.previewOffsetInput.value);
+}
+
+function setPreviewOffsetControls(rawValue) {
+  const offset = normalizePreviewOffset(rawValue);
+  if (el.previewOffsetInput) {
+    el.previewOffsetInput.value = String(offset);
+  }
+  if (el.previewOffsetRange) {
+    el.previewOffsetRange.value = String(offset);
+  }
+  return offset;
+}
+
+function schedulePreviewOffsetRender() {
+  if (previewOffsetRenderTimer) {
+    clearTimeout(previewOffsetRenderTimer);
+  }
+  previewOffsetRenderTimer = window.setTimeout(() => {
+    previewOffsetRenderTimer = 0;
+    renderEvents();
+  }, 90);
+}
+
+function applyPreviewOffset(rawValue, renderNow = false) {
+  const offset = setPreviewOffsetControls(rawValue);
+  saveRules();
+  if (renderNow) {
+    renderEvents();
+  } else {
+    schedulePreviewOffsetRender();
+  }
+  return offset;
+}
+
+function getPreviewOffsetStep() {
+  const bytesPerRow = getBytesPerRow();
+  return Math.max(1, Math.floor(bytesPerRow / 2));
 }
 
 async function apiJson(url) {
@@ -279,6 +333,7 @@ function loadRules() {
   const appliedFilterDir = localStorage.getItem("tcpv_applied_filter_dir") || "all";
   const appliedFilterMinLen = localStorage.getItem("tcpv_applied_filter_min_len") || "";
   const appliedFilterMaxLen = localStorage.getItem("tcpv_applied_filter_max_len") || "";
+  const previewOffset = localStorage.getItem("tcpv_preview_offset") || "0";
 
   el.prefix.value = draftSearchText !== null ? draftSearchText : appliedSearchText;
   if (el.highlightMode) {
@@ -296,6 +351,13 @@ function loadRules() {
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   el.previewBytes.value = localStorage.getItem("tcpv_preview_bytes") || "32";
+  setPreviewOffsetControls(previewOffset);
+  if (el.previewOffsetRange) {
+    el.previewOffsetRange.max = String(PREVIEW_OFFSET_MAX);
+  }
+  if (el.previewOffsetInput) {
+    el.previewOffsetInput.max = String(PREVIEW_OFFSET_MAX);
+  }
   if (el.previewSpace) {
     el.previewSpace.value = localStorage.getItem("tcpv_preview_space") || "1";
   }
@@ -339,6 +401,7 @@ function saveRules() {
   }
   localStorage.setItem("tcpv_hide_ascii", el.hideAscii.value);
   localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
+  localStorage.setItem("tcpv_preview_offset", String(getPreviewOffset()));
   if (el.previewSpace) {
     localStorage.setItem("tcpv_preview_space", el.previewSpace.value || "1");
   }
@@ -823,6 +886,17 @@ function b64ToBytesLimited(base64Text, maxBytes) {
   return decoded.slice(0, limit);
 }
 
+function b64ToBytesWindow(base64Text, startOffset, windowLen) {
+  const start = Math.max(0, Number(startOffset || 0));
+  const size = Math.max(0, Number(windowLen || 0));
+  if (!Number.isFinite(start) || !Number.isFinite(size) || size <= 0) return [];
+
+  const need = start + size;
+  const decoded = b64ToBytesLimited(base64Text, need);
+  if (!Array.isArray(decoded) || decoded.length <= start) return [];
+  return decoded.slice(start, start + size);
+}
+
 function formatTs(ts) {
   try {
     const d = new Date(ts || 0);
@@ -864,7 +938,7 @@ function formatTsShort(ts) {
 
 function getBytesPerRow() {
   const raw = Number(el.previewBytes.value || "16");
-  return [16, 24, 32, 48, 64, 80].includes(raw) ? raw : 32;
+  return [16, 24, 32, 48, 64, 80, 96, 128].includes(raw) ? raw : 32;
 }
 
 function formatHexDump(base64Text, hideAscii) {
@@ -1178,14 +1252,17 @@ function mergeRuleMatches(byteValues, rules, mode, maxMatches = 16) {
   return all;
 }
 
-function clipRangesToLength(ranges, maxLen) {
+function projectRangesToWindow(ranges, windowStart, windowLen) {
   if (!Array.isArray(ranges) || ranges.length === 0) return [];
+  const begin = Math.max(0, Number(windowStart || 0));
+  const finish = begin + Math.max(0, Number(windowLen || 0));
+  if (!(finish > begin)) return [];
   const clipped = [];
   for (const r of ranges) {
-    const start = Math.max(0, Number(r.start || 0));
-    const end = Math.min(maxLen, Number(r.end || 0));
+    const start = Math.max(begin, Number(r.start || 0));
+    const end = Math.min(finish, Number(r.end || 0));
     if (end <= start) continue;
-    clipped.push({ start, end, color: r.color || "" });
+    clipped.push({ start: start - begin, end: end - begin, color: r.color || "" });
   }
   return clipped;
 }
@@ -1246,16 +1323,19 @@ function renderPreviewBytes(previewSpan, byteValues, highlightRanges, plainTextH
 
 function getPreviewInfo(ev, needFullScan = false) {
   const previewLen = getBytesPerRow();
+  const previewOffset = getPreviewOffset();
   const pay = String(ev && ev.pay ? ev.pay : "");
-  const cacheKey = `${previewLen}|${usePreviewSpace() ? 1 : 0}|${getEventId(ev)}`;
+  const cacheKey = `${previewLen}|${previewOffset}|${usePreviewSpace() ? 1 : 0}|${getEventId(ev)}`;
   if (!needFullScan && ev && ev.__tcpvPreviewCacheKey === cacheKey && ev.__tcpvPreviewInfo) {
     return ev.__tcpvPreviewInfo;
   }
 
-  let previewBytes = b64ToBytesLimited(pay, previewLen);
+  let previewBytes = b64ToBytesWindow(pay, previewOffset, previewLen);
+  let fallbackBytes = [];
   if (previewBytes.length <= 0) {
     const fallback = normalizeHex(ev && ev.pfx ? ev.pfx : "");
-    previewBytes = (fallback.match(/.{1,2}/g) || []).slice(0, previewLen).map((x) => parseInt(x, 16));
+    fallbackBytes = (fallback.match(/.{1,2}/g) || []).map((x) => parseInt(x, 16));
+    previewBytes = fallbackBytes.slice(previewOffset, previewOffset + previewLen);
   }
 
   let scanBytes = previewBytes;
@@ -1263,10 +1343,17 @@ function getPreviewInfo(ev, needFullScan = false) {
     const fullScan = b64ToBytesLimited(pay, MAX_FULL_SCAN_BYTES);
     if (fullScan.length > 0) {
       scanBytes = fullScan;
+    } else if (fallbackBytes.length > 0) {
+      scanBytes = fallbackBytes;
     }
   }
 
-  const previewInfo = { previewBytes, scanBytes, previewText: formatPreviewBytesText(previewBytes) };
+  const previewInfo = {
+    previewBytes,
+    scanBytes,
+    previewOffset,
+    previewText: formatPreviewBytesText(previewBytes),
+  };
   if (!needFullScan && ev && typeof ev === "object") {
     ev.__tcpvPreviewCacheKey = cacheKey;
     ev.__tcpvPreviewInfo = previewInfo;
@@ -1602,13 +1689,19 @@ function renderEvents() {
 
     const matchTarget = needFullScan ? preview.scanBytes : preview.previewBytes;
     const matchRanges = state.search.active ? mergeRuleMatches(matchTarget, highlightRules, modeSpec.mode, 24) : [];
+    const previewStart = Number(preview.previewOffset || 0);
+    const previewEnd = previewStart + preview.previewBytes.length;
     const previewRanges =
       modeSpec.scope === "full"
-        ? clipRangesToLength(matchRanges, preview.previewBytes.length)
+        ? projectRangesToWindow(matchRanges, previewStart, preview.previewBytes.length)
         : matchRanges;
     const hasOutOfPreviewMatch =
       modeSpec.scope === "full" &&
-      matchRanges.some((r) => Number(r.start || 0) >= preview.previewBytes.length);
+      matchRanges.some((r) => {
+        const start = Number(r.start || 0);
+        const end = Number(r.end || 0);
+        return end <= previewStart || start >= previewEnd;
+      });
     const isHit = state.search.active && matchRanges.length > 0;
     if (isHit) {
       nextHitEventIds.push(eventId);
@@ -1645,6 +1738,7 @@ function renderEvents() {
 
     const previewWrap = document.createElement("span");
     previewWrap.className = "summary-preview";
+    previewWrap.title = `preview offset=${preview.previewOffset || 0} byte`;
     previewWrap.appendChild(document.createTextNode("["));
     const previewSpan = document.createElement("span");
     previewSpan.className = "preview-hex";
@@ -1797,7 +1891,8 @@ async function tick() {
 
     const line =
       `emit=${s.emit_count} write=${s.write_count} err=${s.write_error_count} drop=${s.dropped_count} ` +
-      `q=${s.queue_size} local=${state.events.length} view=${state.filteredCount}/${state.events.length}` +
+      `q=${s.queue_size} local=${state.events.length} view=${state.filteredCount}/${state.events.length} ` +
+      `ofs=${getPreviewOffset()}` +
       `${state.search.active ? ` hit=${state.hitEventIds.length}` : ""}`;
     if (s.last_write_error) {
       setStatus(`${line} | last_error=${s.last_write_error}`);
@@ -1934,6 +2029,44 @@ el.previewBytes.addEventListener("change", () => {
   saveRules();
   renderEvents();
 });
+
+if (el.previewOffsetRange) {
+  el.previewOffsetRange.addEventListener("input", () => {
+    applyPreviewOffset(el.previewOffsetRange.value, false);
+  });
+  el.previewOffsetRange.addEventListener("change", () => {
+    applyPreviewOffset(el.previewOffsetRange.value, true);
+  });
+}
+
+if (el.previewOffsetInput) {
+  el.previewOffsetInput.addEventListener("input", () => {
+    applyPreviewOffset(el.previewOffsetInput.value, false);
+  });
+  el.previewOffsetInput.addEventListener("change", () => {
+    applyPreviewOffset(el.previewOffsetInput.value, true);
+  });
+  el.previewOffsetInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      applyPreviewOffset(el.previewOffsetInput.value, true);
+      ev.preventDefault();
+    }
+  });
+}
+
+if (el.previewOffsetPrev) {
+  el.previewOffsetPrev.addEventListener("click", () => {
+    const next = Math.max(0, getPreviewOffset() - getPreviewOffsetStep());
+    applyPreviewOffset(next, true);
+  });
+}
+
+if (el.previewOffsetNext) {
+  el.previewOffsetNext.addEventListener("click", () => {
+    const next = Math.min(PREVIEW_OFFSET_MAX, getPreviewOffset() + getPreviewOffsetStep());
+    applyPreviewOffset(next, true);
+  });
+}
 
 if (el.previewSpace) {
   el.previewSpace.addEventListener("change", () => {

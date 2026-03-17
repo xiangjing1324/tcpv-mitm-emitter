@@ -16,7 +16,7 @@ class TcpvEventStore:
         instance_id: str,
         ttl_seconds: int = 6 * 60 * 60,
         stream_maxlen: int = 5000,
-        prefix_len: int = 80,
+        prefix_len: int = 128,
     ) -> None:
         self.r = redis_client
         self.instance_id = instance_id
