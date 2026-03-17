@@ -86,6 +86,8 @@ const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
+const WINDOW_PREFETCH_BUDGET_AUTO = 8;
+const WINDOW_PREFETCH_BUDGET_MANUAL = 24;
 
 const payloadCache = new Map();
 const payloadInFlight = new Map();
@@ -210,6 +212,15 @@ function getPreviewOffsetStep() {
   return Math.max(1, Math.floor(bytesPerRow / 2));
 }
 
+function getExpectedPreviewWindowLen(ev, previewOffset, previewLen) {
+  const packetLen = Number(ev && ev.len);
+  if (Number.isFinite(packetLen) && packetLen >= 0) {
+    if (previewOffset >= packetLen) return 0;
+    return Math.min(previewLen, Math.max(0, packetLen - previewOffset));
+  }
+  return Math.max(0, Number(previewLen || 0));
+}
+
 async function apiJson(url) {
   const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) {
@@ -320,7 +331,11 @@ function prefetchEventPayload(account, eventId) {
   if (!accountText || !idText) return;
   const key = buildPayloadCacheKey(accountText, idText);
   if (payloadCache.has(key) || payloadInFlight.has(key)) return;
-  fetchEventPayload(accountText, idText).catch((_e) => {});
+  fetchEventPayload(accountText, idText)
+    .then(() => {
+      schedulePreviewOffsetRender();
+    })
+    .catch((_e) => {});
 }
 
 function loadRules() {
@@ -1324,13 +1339,27 @@ function renderPreviewBytes(previewSpan, byteValues, highlightRanges, plainTextH
 function getPreviewInfo(ev, needFullScan = false) {
   const previewLen = getBytesPerRow();
   const previewOffset = getPreviewOffset();
-  const pay = String(ev && ev.pay ? ev.pay : "");
-  const cacheKey = `${previewLen}|${previewOffset}|${usePreviewSpace() ? 1 : 0}|${getEventId(ev)}`;
+  const eventId = getEventId(ev);
+  const flowId = String(state.flowId || "");
+  const cacheKey = `${previewLen}|${previewOffset}|${usePreviewSpace() ? 1 : 0}|${flowId}|${eventId}`;
   if (!needFullScan && ev && ev.__tcpvPreviewCacheKey === cacheKey && ev.__tcpvPreviewInfo) {
     return ev.__tcpvPreviewInfo;
   }
 
+  const inlinePay = String(ev && ev.pay ? ev.pay : "");
+  let pay = inlinePay;
+  let hasCachedPayload = false;
   let previewBytes = b64ToBytesWindow(pay, previewOffset, previewLen);
+  if (previewBytes.length <= 0 && !pay && flowId && eventId) {
+    const cached = readPayloadCache(flowId, eventId);
+    const cachedPay = String(cached && cached.pay ? cached.pay : "");
+    if (cachedPay) {
+      pay = cachedPay;
+      hasCachedPayload = true;
+      previewBytes = b64ToBytesWindow(pay, previewOffset, previewLen);
+    }
+  }
+
   let fallbackBytes = [];
   if (previewBytes.length <= 0) {
     const fallback = normalizeHex(ev && ev.pfx ? ev.pfx : "");
@@ -1348,10 +1377,23 @@ function getPreviewInfo(ev, needFullScan = false) {
     }
   }
 
+  const expectedWindowLen = getExpectedPreviewWindowLen(ev, previewOffset, previewLen);
+  const missingWindowBytes = Math.max(0, expectedWindowLen - previewBytes.length);
+  const needsWindowFetch =
+    !needFullScan &&
+    !inlinePay &&
+    !hasCachedPayload &&
+    !!flowId &&
+    !!eventId &&
+    missingWindowBytes > 0;
+
   const previewInfo = {
     previewBytes,
     scanBytes,
     previewOffset,
+    expectedWindowLen,
+    missingWindowBytes,
+    needsWindowFetch,
     previewText: formatPreviewBytesText(previewBytes),
   };
   if (!needFullScan && ev && typeof ev === "object") {
@@ -1659,6 +1701,7 @@ function renderEvents() {
   const listFrag = document.createDocumentFragment();
   const nextHitEventIds = [];
   const needFullScan = state.search.active && modeSpec.scope === "full";
+  let windowPrefetchBudget = state.autoRefresh ? WINDOW_PREFETCH_BUDGET_AUTO : WINDOW_PREFETCH_BUDGET_MANUAL;
 
   for (const ev of visibleEvents) {
     const wrap = document.createElement("details");
@@ -1739,6 +1782,10 @@ function renderEvents() {
     const previewWrap = document.createElement("span");
     previewWrap.className = "summary-preview";
     previewWrap.title = `preview offset=${preview.previewOffset || 0} byte`;
+    if (preview.missingWindowBytes > 0) {
+      const suffix = preview.needsWindowFetch ? " (window loading...)" : " (window incomplete)";
+      previewWrap.title += suffix;
+    }
     previewWrap.appendChild(document.createTextNode("["));
     const previewSpan = document.createElement("span");
     previewSpan.className = "preview-hex";
@@ -1753,6 +1800,11 @@ function renderEvents() {
     previewWrap.appendChild(previewSpan);
     previewWrap.appendChild(document.createTextNode("]"));
     summary.appendChild(previewWrap);
+
+    if (preview.needsWindowFetch && windowPrefetchBudget > 0 && state.flowId) {
+      prefetchEventPayload(state.flowId, eventId);
+      windowPrefetchBudget -= 1;
+    }
 
     const extraSpan = document.createElement("span");
     extraSpan.className = "summary-extra";
