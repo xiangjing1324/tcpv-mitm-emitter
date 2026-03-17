@@ -16,13 +16,14 @@ class TcpvEventStore:
         instance_id: str,
         ttl_seconds: int = 6 * 60 * 60,
         stream_maxlen: int = 5000,
-        prefix_len: int = 12,
+        prefix_len: int = 80,
     ) -> None:
         self.r = redis_client
         self.instance_id = instance_id
         self.ttl_seconds = int(ttl_seconds)
         self.stream_maxlen = int(stream_maxlen)
         self.prefix_len = int(prefix_len)
+        self._prefer_unlink = True
 
         self.accounts_key = self._key("accounts")
 
@@ -226,13 +227,15 @@ class TcpvEventStore:
             )
 
         if empty_accounts:
+            keys_to_remove: list[str] = []
             clean = self.r.pipeline()
             for account in empty_accounts:
-                clean.delete(self.stream_key(account))
-                clean.delete(self.meta_key(account))
-                clean.delete(self.seq_key(account))
+                keys_to_remove.append(self.stream_key(account))
+                keys_to_remove.append(self.meta_key(account))
+                keys_to_remove.append(self.seq_key(account))
                 clean.srem(self.accounts_key, account)
             clean.execute()
+            self._delete_keys(keys_to_remove)
 
         # Keep flow order stable by first-seen time (old -> new).
         items.sort(key=lambda x: (x.get("first_ts", 0), x.get("last_ts", 0), x.get("account", "")))
@@ -243,6 +246,7 @@ class TcpvEventStore:
         account: str,
         after_id: str | None = None,
         limit: int = 200,
+        include_payload: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         stream_key = self.stream_key(account)
         batch = max(1, min(int(limit), 1000))
@@ -253,9 +257,24 @@ class TcpvEventStore:
         if has_more:
             rows = rows[:batch]
 
-        events = [self._decode_row(entry_id, fields) for entry_id, fields in rows]
+        events = [self._decode_row(entry_id, fields, include_payload=include_payload) for entry_id, fields in rows]
         last_id = events[-1]["id"] if events else after_id
         return events, last_id, has_more
+
+    def get_event(self, account: str, event_id: str) -> dict[str, Any] | None:
+        stream_key = self.stream_key(account)
+        target_id = str(event_id or "").strip()
+        if not target_id:
+            return None
+
+        rows = self.r.xrange(stream_key, min=target_id, max=target_id, count=1)
+        if not rows:
+            return None
+
+        entry_id, fields = rows[0]
+        if self._to_str(entry_id) != target_id:
+            return None
+        return self._decode_row(entry_id, fields, include_payload=True)
 
     def get_connections(self, account: str, recent: int = 2000) -> list[dict[str, Any]]:
         stream_key = self.stream_key(account)
@@ -285,21 +304,42 @@ class TcpvEventStore:
         while True:
             cursor, keys = self.r.scan(cursor=cursor, match=pattern, count=500)
             if keys:
-                self.r.delete(*keys)
+                self._delete_keys([self._to_str(k) for k in keys])
             if cursor == 0:
                 break
 
     def cleanup_account(self, account: str) -> None:
         if not account:
             return
-        pipe = self.r.pipeline()
-        pipe.delete(self.stream_key(account))
-        pipe.delete(self.meta_key(account))
-        pipe.delete(self.seq_key(account))
-        pipe.srem(self.accounts_key, account)
-        pipe.execute()
+        keys_to_remove = [
+            self.stream_key(account),
+            self.meta_key(account),
+            self.seq_key(account),
+        ]
+        self._delete_keys(keys_to_remove)
+        self.r.srem(self.accounts_key, account)
 
-    def _decode_row(self, entry_id: bytes | str, fields: dict[Any, Any]) -> dict[str, Any]:
+    def _delete_keys(self, keys: list[str]) -> int:
+        key_list = [str(k) for k in keys if str(k)]
+        if not key_list:
+            return 0
+
+        if self._prefer_unlink:
+            try:
+                result = self.r.execute_command("UNLINK", *key_list)
+                return int(result or 0)
+            except redis.ResponseError:
+                self._prefer_unlink = False
+
+        result = self.r.delete(*key_list)
+        return int(result or 0)
+
+    def _decode_row(
+        self,
+        entry_id: bytes | str,
+        fields: dict[Any, Any],
+        include_payload: bool = True,
+    ) -> dict[str, Any]:
         decoded = {self._to_str(k): self._to_str(v) for k, v in fields.items()}
         return {
             "id": self._to_str(entry_id),
@@ -308,7 +348,7 @@ class TcpvEventStore:
             "dir": self._to_int(decoded.get("dir"), 0),
             "len": self._to_int(decoded.get("len"), 0),
             "pfx": decoded.get("pfx", ""),
-            "pay": decoded.get("pay", ""),
+            "pay": decoded.get("pay", "") if include_payload else "",
             "seq": self._to_int(decoded.get("seq"), 0),
             "msg_idx": self._to_int(decoded.get("midx"), -1),
             "chunk_idx": self._to_int(decoded.get("cidx"), -1),

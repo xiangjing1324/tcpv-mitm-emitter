@@ -76,6 +76,16 @@ const BODY_TONES = {
 };
 
 const MAX_FULL_SCAN_BYTES = 8192;
+const MAX_EVENTS_IN_MEMORY = 1200;
+const EVENTS_FETCH_LIMIT = 200;
+const MAX_RENDERED_EVENTS = 500;
+const PAYLOAD_PREFETCH_DELAY_MS = 220;
+const PAYLOAD_CACHE_MAX_ENTRIES = 24;
+const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
+
+const payloadCache = new Map();
+const payloadInFlight = new Map();
+let payloadCacheBytes = 0;
 
 function setStatus(text) {
   if (el.status) {
@@ -163,6 +173,101 @@ async function apiPost(url) {
     throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${body.slice(0, 200)}`);
   }
   return resp.json();
+}
+
+async function apiGetEvent(account, eventId) {
+  const params = new URLSearchParams({
+    account: String(account || ""),
+    id: String(eventId || ""),
+  });
+  return apiJson(`/event?${params.toString()}`);
+}
+
+function buildPayloadCacheKey(account, eventId) {
+  return `${String(account || "")}|${String(eventId || "")}`;
+}
+
+function trimPayloadCache() {
+  while (
+    payloadCache.size > PAYLOAD_CACHE_MAX_ENTRIES ||
+    payloadCacheBytes > PAYLOAD_CACHE_MAX_BYTES
+  ) {
+    const firstKey = payloadCache.keys().next().value;
+    if (!firstKey) break;
+    const firstRec = payloadCache.get(firstKey);
+    payloadCache.delete(firstKey);
+    if (firstRec && Number.isFinite(firstRec.size)) {
+      payloadCacheBytes = Math.max(0, payloadCacheBytes - Number(firstRec.size || 0));
+    }
+  }
+}
+
+function readPayloadCache(account, eventId) {
+  const key = buildPayloadCacheKey(account, eventId);
+  const rec = payloadCache.get(key);
+  if (!rec || !rec.detail) return null;
+  payloadCache.delete(key);
+  payloadCache.set(key, rec);
+  return rec.detail;
+}
+
+function writePayloadCache(account, eventId, detail) {
+  const normalized = detail && typeof detail === "object" ? detail : null;
+  const pay = String(normalized && normalized.pay ? normalized.pay : "");
+  if (!pay) return;
+
+  const key = buildPayloadCacheKey(account, eventId);
+  const old = payloadCache.get(key);
+  if (old && Number.isFinite(old.size)) {
+    payloadCacheBytes = Math.max(0, payloadCacheBytes - Number(old.size || 0));
+  }
+
+  const rec = {
+    detail: {
+      pay,
+      pfx: String(normalized.pfx || ""),
+      cid: String(normalized.cid || ""),
+      seq: Number.isFinite(Number(normalized.seq)) ? Number(normalized.seq) : undefined,
+      msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
+      chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
+    },
+    size: pay.length,
+  };
+  payloadCache.set(key, rec);
+  payloadCacheBytes += rec.size;
+  trimPayloadCache();
+}
+
+async function fetchEventPayload(account, eventId) {
+  const cached = readPayloadCache(account, eventId);
+  if (cached) return cached;
+
+  const key = buildPayloadCacheKey(account, eventId);
+  if (payloadInFlight.has(key)) {
+    return payloadInFlight.get(key);
+  }
+
+  const task = apiGetEvent(account, eventId)
+    .then((detail) => {
+      writePayloadCache(account, eventId, detail);
+      const replay = readPayloadCache(account, eventId);
+      return replay || detail;
+    })
+    .finally(() => {
+      payloadInFlight.delete(key);
+    });
+
+  payloadInFlight.set(key, task);
+  return task;
+}
+
+function prefetchEventPayload(account, eventId) {
+  const accountText = String(account || "").trim();
+  const idText = String(eventId || "").trim();
+  if (!accountText || !idText) return;
+  const key = buildPayloadCacheKey(accountText, idText);
+  if (payloadCache.has(key) || payloadInFlight.has(key)) return;
+  fetchEventPayload(accountText, idText).catch((_e) => {});
 }
 
 function loadRules() {
@@ -584,17 +689,30 @@ async function syncLatestEvents() {
   state.loading = true;
 
   try {
-    const params = new URLSearchParams({ account: state.flowId, limit: "400" });
+    const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
+    const needPayloadInList = state.search.active && modeSpec.scope === "full";
+    const params = new URLSearchParams({
+      account: state.flowId,
+      limit: String(EVENTS_FETCH_LIMIT),
+      include_payload: needPayloadInList ? "1" : "0",
+    });
     if (state.afterId) {
       params.set("after_id", state.afterId);
     }
     const data = await apiJson(`/events?${params.toString()}`);
 
     const rows = Array.isArray(data.events) ? data.events : [];
+    if (!needPayloadInList) {
+      for (const ev of rows) {
+        if (ev && typeof ev === "object") {
+          ev.pay = "";
+        }
+      }
+    }
     if (rows.length > 0) {
       state.events.push(...rows);
-      if (state.events.length > 8000) {
-        state.events = state.events.slice(-8000);
+      if (state.events.length > MAX_EVENTS_IN_MEMORY) {
+        state.events = state.events.slice(-MAX_EVENTS_IN_MEMORY);
       }
       renderEvents();
     } else if (state.events.length === 0) {
@@ -668,6 +786,25 @@ function b64ToBytes(base64Text) {
   } catch (_e) {
     return [];
   }
+}
+
+function b64ToBytesLimited(base64Text, maxBytes) {
+  const limit = Number(maxBytes || 0);
+  if (!Number.isFinite(limit) || limit <= 0) return [];
+
+  const compact = String(base64Text || "").replace(/\s+/g, "");
+  if (!compact) return [];
+
+  const charsNeeded = Math.ceil(limit / 3) * 4;
+  let chunk = compact.slice(0, charsNeeded);
+  const mod = chunk.length % 4;
+  if (mod !== 0) {
+    chunk = chunk.padEnd(chunk.length + (4 - mod), "=");
+  }
+
+  const decoded = b64ToBytes(chunk);
+  if (decoded.length <= limit) return decoded;
+  return decoded.slice(0, limit);
 }
 
 function formatTs(ts) {
@@ -1037,22 +1174,39 @@ function clipRangesToLength(ranges, maxLen) {
   return clipped;
 }
 
-function renderPreviewBytes(previewSpan, byteValues, highlightRanges) {
+function formatPreviewBytesText(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length === 0) return "";
+  const gap16 = usePreviewSpace();
+  let previewText = "";
+  for (let i = 0; i < byteValues.length; i++) {
+    if (i > 0) {
+      previewText += gap16 && i % 16 === 0 ? "  " : " ";
+    }
+    previewText += byteValues[i].toString(16).padStart(2, "0");
+  }
+  return previewText;
+}
+
+function renderPreviewBytes(previewSpan, byteValues, highlightRanges, plainTextHint = "") {
   if (!previewSpan) return;
   previewSpan.textContent = "";
   if (!Array.isArray(byteValues) || byteValues.length === 0) return;
 
+  const hasHighlights = Array.isArray(highlightRanges) && highlightRanges.length > 0;
+  if (!hasHighlights) {
+    previewSpan.textContent = plainTextHint || formatPreviewBytesText(byteValues);
+    return;
+  }
+
   const gap16 = usePreviewSpace();
   const colorByIndex = new Array(byteValues.length).fill("");
-  if (Array.isArray(highlightRanges) && highlightRanges.length > 0) {
-    for (const r of highlightRanges) {
-      const start = Math.max(0, Number(r.start || 0));
-      const end = Math.min(byteValues.length, Number(r.end || 0));
-      const color = r.color || "";
-      for (let i = start; i < end; i++) {
-        if (!colorByIndex[i]) {
-          colorByIndex[i] = color;
-        }
+  for (const r of highlightRanges) {
+    const start = Math.max(0, Number(r.start || 0));
+    const end = Math.min(byteValues.length, Number(r.end || 0));
+    const color = r.color || "";
+    for (let i = start; i < end; i++) {
+      if (!colorByIndex[i]) {
+        colorByIndex[i] = color;
       }
     }
   }
@@ -1074,22 +1228,30 @@ function renderPreviewBytes(previewSpan, byteValues, highlightRanges) {
   }
 }
 
-function getPreviewInfo(ev) {
+function getPreviewInfo(ev, needFullScan = false) {
   const previewLen = getBytesPerRow();
-  const cacheKey = `${previewLen}|${String(ev && ev.pay ? ev.pay : "")}|${String(ev && ev.pfx ? ev.pfx : "")}`;
-  if (ev && ev.__tcpvPreviewCacheKey === cacheKey && ev.__tcpvPreviewInfo) {
+  const pay = String(ev && ev.pay ? ev.pay : "");
+  const cacheKey = `${previewLen}|${usePreviewSpace() ? 1 : 0}|${getEventId(ev)}`;
+  if (!needFullScan && ev && ev.__tcpvPreviewCacheKey === cacheKey && ev.__tcpvPreviewInfo) {
     return ev.__tcpvPreviewInfo;
   }
-  const payloadBytes = b64ToBytes(ev.pay);
-  let previewBytes = [];
-  if (payloadBytes.length > 0) {
-    previewBytes = payloadBytes.slice(0, previewLen);
-  } else {
-    const fallback = normalizeHex(ev.pfx || "");
+
+  let previewBytes = b64ToBytesLimited(pay, previewLen);
+  if (previewBytes.length <= 0) {
+    const fallback = normalizeHex(ev && ev.pfx ? ev.pfx : "");
     previewBytes = (fallback.match(/.{1,2}/g) || []).slice(0, previewLen).map((x) => parseInt(x, 16));
   }
-  const previewInfo = { payloadBytes, previewBytes };
-  if (ev && typeof ev === "object") {
+
+  let scanBytes = previewBytes;
+  if (needFullScan) {
+    const fullScan = b64ToBytesLimited(pay, MAX_FULL_SCAN_BYTES);
+    if (fullScan.length > 0) {
+      scanBytes = fullScan;
+    }
+  }
+
+  const previewInfo = { previewBytes, scanBytes, previewText: formatPreviewBytesText(previewBytes) };
+  if (!needFullScan && ev && typeof ev === "object") {
     ev.__tcpvPreviewCacheKey = cacheKey;
     ev.__tcpvPreviewInfo = previewInfo;
   }
@@ -1155,6 +1317,55 @@ function buildEventBody(ev, hideAscii) {
   return body;
 }
 
+function applyEventPayloadDetail(ev, detail) {
+  if (!ev || typeof ev !== "object") return false;
+  if (!detail || typeof detail !== "object") return false;
+
+  const pay = String(detail.pay || "");
+  if (!pay) return false;
+  ev.pay = pay;
+  if (detail.pfx) ev.pfx = String(detail.pfx);
+  if (detail.cid) ev.cid = String(detail.cid);
+
+  const seqNum = Number(detail.seq);
+  if (Number.isFinite(seqNum)) ev.seq = seqNum;
+  const msgIdx = Number(detail.msg_idx);
+  if (Number.isFinite(msgIdx)) ev.msg_idx = msgIdx;
+  const chunkIdx = Number(detail.chunk_idx);
+  if (Number.isFinite(chunkIdx)) ev.chunk_idx = chunkIdx;
+
+  ev.__tcpvPreviewCacheKey = "";
+  ev.__tcpvPreviewInfo = null;
+  ev.__tcpvPayloadLen = undefined;
+  return true;
+}
+
+async function ensureEventPayload(ev, account, eventId) {
+  if (!ev || typeof ev !== "object") {
+    throw new Error("invalid event object");
+  }
+  if (String(ev.pay || "")) {
+    return ev;
+  }
+
+  const accountText = String(account || "").trim();
+  const idText = String(eventId || "").trim();
+  if (!accountText || !idText) {
+    throw new Error("invalid event id");
+  }
+
+  const cached = readPayloadCache(accountText, idText);
+  if (cached && applyEventPayloadDetail(ev, cached)) {
+    return ev;
+  }
+
+  const detail = await fetchEventPayload(accountText, idText);
+  if (!applyEventPayloadDetail(ev, detail)) {
+    throw new Error("event payload is empty");
+  }
+  return ev;
+}
+
 function eventMatchesFilters(ev) {
   if (!ev || typeof ev !== "object") return false;
   const dir = state.filters.dir || "all";
@@ -1188,7 +1399,7 @@ function focusCurrentHit(behavior = "smooth") {
   node.scrollIntoView({ behavior, block: "center" });
 }
 
-function applySearch(focusFirstHit = true) {
+async function applySearch(focusFirstHit = true) {
   saveRules();
   const draft = updateSearchDraftState();
   if (!draft.text) {
@@ -1208,6 +1419,17 @@ function applySearch(focusFirstHit = true) {
   state.hitCursor = focusFirstHit ? 0 : state.hitCursor;
   state.pendingHitScroll = focusFirstHit;
   saveAppliedSearch();
+  const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
+  if (state.search.active && modeSpec.scope === "full") {
+    state.events = [];
+    state.afterId = null;
+    state.hasMore = true;
+    state.hitEventIds = [];
+    state.filteredCount = 0;
+    renderEvents();
+    await syncLatestEvents();
+    return;
+  }
   renderEvents();
 }
 
@@ -1333,9 +1555,22 @@ function renderEvents() {
 
   const listFrag = document.createDocumentFragment();
   const nextHitEventIds = [];
-  for (const ev of visibleEvents) {
+  const needFullScan = state.search.active && modeSpec.scope === "full";
+  const useRenderWindow = !state.search.active && visibleEvents.length > MAX_RENDERED_EVENTS;
+  const renderEventsList = useRenderWindow ? visibleEvents.slice(-MAX_RENDERED_EVENTS) : visibleEvents;
+  if (useRenderWindow) {
+    const tip = document.createElement("div");
+    tip.className = "empty";
+    tip.textContent = `Performance mode: showing latest ${renderEventsList.length}/${visibleEvents.length} packets.`;
+    listFrag.appendChild(tip);
+  }
+
+  for (const ev of renderEventsList) {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
+    if (!needFullScan && !state.expandedIds.has(eventId)) {
+      ev.pay = "";
+    }
     const allowExpand = !flowExpandLocked;
     wrap.dataset.eventId = eventId;
     wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
@@ -1352,17 +1587,12 @@ function renderEvents() {
     }
     const isReq = ev.dir === 0;
     const dirArrow = isReq ? "->" : "<-";
-    const preview = getPreviewInfo(ev);
+    const preview = getPreviewInfo(ev, needFullScan);
     const frag = ev.msg_idx >= 0 && ev.chunk_idx >= 0 ? `m${ev.msg_idx}/c${ev.chunk_idx}` : "m-/c-";
     const seqNum = Number(ev.seq || 0);
     const seqText = Number.isFinite(seqNum) && seqNum > 0 ? `#${seqNum}` : "#-";
 
-    const matchTarget =
-      modeSpec.scope === "full"
-        ? (preview.payloadBytes.length > 0
-          ? preview.payloadBytes.slice(0, MAX_FULL_SCAN_BYTES)
-          : preview.previewBytes)
-        : preview.previewBytes;
+    const matchTarget = needFullScan ? preview.scanBytes : preview.previewBytes;
     const matchRanges = state.search.active ? mergeRuleMatches(matchTarget, highlightRules, modeSpec.mode, 24) : [];
     const previewRanges =
       modeSpec.scope === "full"
@@ -1410,7 +1640,7 @@ function renderEvents() {
     previewWrap.appendChild(document.createTextNode("["));
     const previewSpan = document.createElement("span");
     previewSpan.className = "preview-hex";
-    renderPreviewBytes(previewSpan, preview.previewBytes, previewRanges);
+    renderPreviewBytes(previewSpan, preview.previewBytes, previewRanges, preview.previewText || "");
     if (hasOutOfPreviewMatch && previewRanges.length === 0) {
       previewSpan.classList.add("preview-hit-outside");
       const firstColor = String(matchRanges[0]?.color || el.color.value || "").trim();
@@ -1434,22 +1664,72 @@ function renderEvents() {
     summary.appendChild(tailSpan);
 
     wrap.appendChild(summary);
-    const ensureBody = () => {
-      if (wrap.dataset.bodyReady === "1") return;
-      wrap.appendChild(buildEventBody(ev, hideAscii));
-      wrap.dataset.bodyReady = "1";
+    let prefetchTimer = 0;
+    const clearPrefetch = () => {
+      if (!prefetchTimer) return;
+      clearTimeout(prefetchTimer);
+      prefetchTimer = 0;
+    };
+    const schedulePrefetch = () => {
+      if (needFullScan || !allowExpand) return;
+      if (wrap.open || wrap.dataset.bodyLoading === "1") return;
+      clearPrefetch();
+      const flowIdAtSchedule = state.flowId;
+      prefetchTimer = window.setTimeout(() => {
+        prefetchTimer = 0;
+        if (!wrap.isConnected) return;
+        if (!flowIdAtSchedule || state.flowId !== flowIdAtSchedule) return;
+        prefetchEventPayload(flowIdAtSchedule, eventId);
+      }, PAYLOAD_PREFETCH_DELAY_MS);
+    };
+    summary.addEventListener("pointerenter", schedulePrefetch);
+    summary.addEventListener("focus", schedulePrefetch);
+    summary.addEventListener("pointerleave", clearPrefetch);
+    summary.addEventListener("blur", clearPrefetch);
+
+    const ensureBody = async () => {
+      if (wrap.dataset.bodyReady === "1" || wrap.dataset.bodyLoading === "1") return;
+      wrap.dataset.bodyLoading = "1";
+      const flowIdAtStart = state.flowId;
+      const loading = document.createElement("div");
+      loading.className = "body";
+      loading.textContent = "loading payload...";
+      wrap.appendChild(loading);
+
+      try {
+        await ensureEventPayload(ev, flowIdAtStart, eventId);
+        if (!wrap.isConnected || state.flowId !== flowIdAtStart) return;
+        if (loading.isConnected) loading.remove();
+        wrap.appendChild(buildEventBody(ev, hideAscii));
+        wrap.dataset.bodyReady = "1";
+      } catch (e) {
+        if (loading.isConnected) {
+          loading.textContent = `load payload error: ${e.message}`;
+        }
+      } finally {
+        delete wrap.dataset.bodyLoading;
+      }
     };
     if (allowExpand) {
       if (wrap.open) {
-        ensureBody();
+        ensureBody().catch((_e) => {});
       }
       wrap.addEventListener("toggle", () => {
         if (!eventId) return;
         if (wrap.open) {
+          clearPrefetch();
           state.expandedIds.add(eventId);
-          ensureBody();
+          ensureBody().catch((_e) => {});
         } else {
+          clearPrefetch();
           state.expandedIds.delete(eventId);
+          for (const node of wrap.querySelectorAll(".body")) {
+            node.remove();
+          }
+          wrap.dataset.bodyReady = "0";
+          if (!needFullScan) {
+            ev.pay = "";
+          }
         }
       });
     } else {
@@ -1552,7 +1832,7 @@ el.prefix.addEventListener("input", () => {
 
 el.prefix.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter") {
-    applySearch(true);
+    applySearch(true).catch((e) => setStatus(`search error: ${e.message}`));
     ev.preventDefault();
     return;
   }
@@ -1560,7 +1840,7 @@ el.prefix.addEventListener("keydown", (ev) => {
     el.prefix.value = "";
     updateSearchDraftState();
     saveRules();
-    applySearch(false);
+    applySearch(false).catch((e) => setStatus(`search error: ${e.message}`));
     ev.preventDefault();
   }
 });
@@ -1574,7 +1854,7 @@ if (el.highlightMode) {
 
 if (el.searchApply) {
   el.searchApply.addEventListener("click", () => {
-    applySearch(true);
+    applySearch(true).catch((e) => setStatus(`search error: ${e.message}`));
   });
 }
 

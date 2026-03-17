@@ -284,11 +284,23 @@ class TcpvRuntime:
         account: str,
         after_id: str | None,
         limit: int,
+        include_payload: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         store = self.store
         if store is None:
             return [], after_id, False
-        return store.get_events(account=account, after_id=after_id, limit=limit)
+        return store.get_events(
+            account=account,
+            after_id=after_id,
+            limit=limit,
+            include_payload=include_payload,
+        )
+
+    def get_event(self, account: str, event_id: str) -> dict[str, Any] | None:
+        store = self.store
+        if store is None:
+            return None
+        return store.get_event(account=account, event_id=event_id)
 
     def get_connections(self, account: str, recent: int) -> list[dict[str, Any]]:
         store = self.store

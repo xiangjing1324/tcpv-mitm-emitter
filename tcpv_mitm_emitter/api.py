@@ -27,7 +27,12 @@ def create_app(runtime) -> FastAPI:
         event_count = 0
         if accounts:
             first_account = str(accounts[0].get("account", ""))
-            events, _last_id, _has_more = runtime.get_events(account=first_account, after_id=None, limit=50)
+            events, _last_id, _has_more = runtime.get_events(
+                account=first_account,
+                after_id=None,
+                limit=50,
+                include_payload=False,
+            )
             event_count = len(events)
             blocks: list[str] = []
             for ev in events:
@@ -82,13 +87,29 @@ def create_app(runtime) -> FastAPI:
         account: str = Query(..., min_length=1),
         after_id: str | None = Query(None),
         limit: int = Query(200, ge=1, le=1000),
+        include_payload: bool = Query(True),
     ) -> dict:
-        items, last_id, has_more = runtime.get_events(account=account, after_id=after_id, limit=limit)
+        items, last_id, has_more = runtime.get_events(
+            account=account,
+            after_id=after_id,
+            limit=limit,
+            include_payload=include_payload,
+        )
         return {
             "events": items,
             "last_id": last_id,
             "has_more": has_more,
         }
+
+    @app.get("/event")
+    def event(
+        account: str = Query(..., min_length=1),
+        id: str = Query(..., min_length=1),
+    ) -> dict:
+        item = runtime.get_event(account=account, event_id=id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        return item
 
     @app.get("/connections")
     def connections(
