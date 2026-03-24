@@ -417,20 +417,24 @@ INDEX_HTML = """
     }
 
     details {
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: var(--panel);
-      overflow: hidden;
-      margin: 0 0 8px 0;
+      border: 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+      border-radius: 0;
+      background: transparent;
+      overflow: visible;
+      margin: 0;
     }
 
     details.event-hit > summary {
-      background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+      background: color-mix(in srgb, var(--accent) 5%, transparent);
     }
 
     details.event-hit-current {
-      border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+      border-bottom-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+    }
+
+    details.event-hit-current > summary {
+      background: color-mix(in srgb, var(--accent) 10%, var(--panel));
     }
 
     details.no-expand > summary {
@@ -449,21 +453,29 @@ INDEX_HTML = """
     summary {
       list-style: none;
       cursor: pointer;
-      padding: 7px 9px;
-      border-left: 4px solid var(--line);
+      padding: 8px 10px 8px 8px;
+      border-left: 3px solid var(--line);
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 6px;
       white-space: nowrap;
       font-size: 12px;
       line-height: 1.25;
-      min-height: 26px;
+      min-height: 30px;
       min-width: 0;
       font-variant-numeric: tabular-nums;
       font-feature-settings: "tnum" 1;
     }
 
     summary::-webkit-details-marker { display: none; }
+
+    summary:hover {
+      background: color-mix(in srgb, var(--panel) 82%, var(--bg));
+    }
+
+    details[open] > summary {
+      background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+    }
 
     details.event-req > summary { border-left-color: var(--req); }
     details.event-resp > summary { border-left-color: var(--resp); }
@@ -545,10 +557,10 @@ INDEX_HTML = """
       max-width: 100%;
       white-space: pre;
       line-height: 1.25;
-      background: color-mix(in srgb, var(--chip-bg) 82%, transparent);
-      border: 1px solid color-mix(in srgb, var(--preview-line) 70%, var(--line));
-      border-radius: 4px;
-      padding: 0 5px;
+      background: color-mix(in srgb, var(--preview-bg) 38%, transparent);
+      border: 0;
+      border-radius: 3px;
+      padding: 0 2px;
       color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -563,7 +575,7 @@ INDEX_HTML = """
 
     .preview-byte-hit {
       border-radius: 2px;
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--line) 48%, transparent) inset;
+      box-shadow: none;
     }
 
     .preview-hit-outside {
