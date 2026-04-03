@@ -291,6 +291,7 @@ function writePayloadCache(account, eventId, detail) {
       pay,
       pfx: String(normalized.pfx || ""),
       cid: String(normalized.cid || ""),
+      proxy_username: String(normalized.proxy_username || ""),
       seq: Number.isFinite(Number(normalized.seq)) ? Number(normalized.seq) : undefined,
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
@@ -504,14 +505,12 @@ function setupSplitter() {
   });
 }
 
-function extractAccountInfoFromCid(cidText) {
-  const cid = String(cidText || "");
-  const match = cid.match(/\[acc:([^\]]+)\]/i);
-  return match ? String(match[1] || "").trim() : "";
+function getProxyUsername(rawValue) {
+  return String(rawValue || "").trim();
 }
 
-function stripAccountInfoFromCid(cidText) {
-  return String(cidText || "").replace(/\s*\[acc:[^\]]+\]/gi, "").trim();
+function stripDecoratorsFromCid(cidText) {
+  return String(cidText || "").replace(/\s*\[(?:acc|kp):[^\]]+\]/gi, "").trim();
 }
 
 function formatSize(bytes) {
@@ -565,11 +564,12 @@ function getHexGroupSizes(bytesPerRow) {
 
 function getFlowRowPath(item) {
   const rawCid = String(item.last_cid || "");
-  const cid = stripAccountInfoFromCid(rawCid);
-  const accountInfo = extractAccountInfoFromCid(rawCid);
-  const accountBadge = accountInfo ? ` [acc:${accountInfo}]` : "";
-  if (cid) return `${cid}${accountBadge}`;
-  if (accountBadge) return accountBadge.trim();
+  const cid = stripDecoratorsFromCid(rawCid);
+  const proxyUsername = getProxyUsername(item && item.proxy_username);
+  const proxyBadge = proxyUsername ? `[kp:${proxyUsername}]` : "";
+  if (proxyBadge && cid) return `${proxyBadge} ${cid}`;
+  if (cid) return cid;
+  if (proxyBadge) return proxyBadge;
   return "(waiting cid)";
 }
 
@@ -734,10 +734,10 @@ function renderSelectedTitle() {
   }
 
   const rawCid = String(item.last_cid || "");
-  const cid = stripAccountInfoFromCid(rawCid);
-  const accountInfo = extractAccountInfoFromCid(rawCid);
-  const accountText = accountInfo ? `[acc:${accountInfo}]` : "";
-  const text = cid ? `${accountText} ${cid}`.trim() : accountText;
+  const cid = stripDecoratorsFromCid(rawCid);
+  const proxyUsername = getProxyUsername(item && item.proxy_username);
+  const proxyText = proxyUsername ? `[kp:${proxyUsername}]` : "";
+  const text = cid ? `${proxyText} ${cid}`.trim() : proxyText;
   const dateTs = Number(item.first_ts || item.last_ts || 0);
   const dateText = dateTs > 0 ? `[${formatDateOnly(dateTs)}]` : "";
   el.selectedTitle.textContent = `${dateText} ${text || "Flow selected"}`.trim();
@@ -1442,7 +1442,16 @@ function buildEventBody(ev, hideAscii) {
 
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = `id=${ev.id} cid=${ev.cid} seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
+  const metaParts = [`id=${ev.id}`];
+  const proxyUsername = getProxyUsername(ev && ev.proxy_username);
+  if (proxyUsername) {
+    metaParts.push(`kp=${proxyUsername}`);
+  }
+  metaParts.push(`cid=${stripDecoratorsFromCid(ev && ev.cid)}`);
+  metaParts.push(`seq=${ev.seq}`);
+  metaParts.push(`msg_idx=${ev.msg_idx}`);
+  metaParts.push(`chunk_idx=${ev.chunk_idx}`);
+  meta.textContent = metaParts.join(" ");
   body.appendChild(meta);
 
   const dump = formatHexDump(ev.pay, hideAscii);
@@ -1471,6 +1480,7 @@ function applyEventPayloadDetail(ev, detail) {
   ev.pay = pay;
   if (detail.pfx) ev.pfx = String(detail.pfx);
   if (detail.cid) ev.cid = String(detail.cid);
+  if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
 
   const seqNum = Number(detail.seq);
   if (Number.isFinite(seqNum)) ev.seq = seqNum;

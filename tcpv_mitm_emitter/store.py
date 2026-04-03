@@ -49,6 +49,7 @@ class TcpvEventStore:
         msg_idx: int | None = None,
         chunk_idx: int | None = None,
         packet_len: int | None = None,
+        proxy_username: str = "",
     ) -> str:
         if not account:
             raise ValueError("account must not be empty")
@@ -72,6 +73,7 @@ class TcpvEventStore:
         fields = {
             "ts": str(now_ms),
             "cid": cid,
+            "kp": str(proxy_username or ""),
             "dir": str(int(direction)),
             "len": str(real_packet_len),
             "pfx": payload_bytes[: self.prefix_len].hex(),
@@ -94,6 +96,8 @@ class TcpvEventStore:
         }
         if cid:
             meta_mapping["last_cid"] = cid
+        if proxy_username:
+            meta_mapping["proxy_username"] = str(proxy_username)
         pipe.hset(meta_key, mapping=meta_mapping)
         pipe.hincrby(meta_key, "total_count", 1)
         pipe.hincrby(meta_key, "total_bytes", real_packet_len)
@@ -113,6 +117,7 @@ class TcpvEventStore:
         self,
         account: str,
         cid: str = "",
+        proxy_username: str = "",
         ts_ms: int | None = None,
     ) -> None:
         account = str(account or "").strip()
@@ -132,6 +137,8 @@ class TcpvEventStore:
         }
         if cid:
             meta_mapping["last_cid"] = cid
+        if proxy_username:
+            meta_mapping["proxy_username"] = str(proxy_username)
         pipe.hset(meta_key, mapping=meta_mapping)
         pipe.expire(meta_key, self.ttl_seconds)
         pipe.expire(self.accounts_key, self.ttl_seconds)
@@ -142,6 +149,7 @@ class TcpvEventStore:
         self,
         account: str,
         cid: str = "",
+        proxy_username: str = "",
         ts_ms: int | None = None,
     ) -> None:
         account = str(account or "").strip()
@@ -161,6 +169,8 @@ class TcpvEventStore:
         }
         if cid:
             meta_mapping["last_cid"] = cid
+        if proxy_username:
+            meta_mapping["proxy_username"] = str(proxy_username)
         pipe.hset(meta_key, mapping=meta_mapping)
         pipe.expire(meta_key, self.ttl_seconds)
         pipe.expire(self.accounts_key, self.ttl_seconds)
@@ -223,6 +233,7 @@ class TcpvEventStore:
                     "total_bytes": total_bytes,
                     "total_count": total_count,
                     "last_cid": meta.get("last_cid", ""),
+                    "proxy_username": meta.get("proxy_username", ""),
                 }
             )
 
@@ -345,6 +356,7 @@ class TcpvEventStore:
             "id": self._to_str(entry_id),
             "ts": self._to_int(decoded.get("ts"), 0),
             "cid": decoded.get("cid", ""),
+            "proxy_username": decoded.get("kp", ""),
             "dir": self._to_int(decoded.get("dir"), 0),
             "len": self._to_int(decoded.get("len"), 0),
             "pfx": decoded.get("pfx", ""),

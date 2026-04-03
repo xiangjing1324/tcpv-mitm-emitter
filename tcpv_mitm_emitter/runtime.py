@@ -145,6 +145,7 @@ class TcpvRuntime:
         packet_data: Any,
         from_client: bool,
         cid: str = "",
+        proxy_username: str = "",
         msg_idx: int | None = None,
         chunk_idx: int | None = None,
         ts_ms: int | None = None,
@@ -171,6 +172,7 @@ class TcpvRuntime:
         event = {
             "account": account,
             "cid": cid or "",
+            "proxy_username": str(proxy_username or ""),
             "dir": 0 if from_client else 1,
             "payload": payload,
             "packet_len": real_packet_len,
@@ -196,6 +198,7 @@ class TcpvRuntime:
         chunk_idx: int | None = None,
         account: str | None = None,
         cid: str | None = None,
+        proxy_username: str | None = None,
         ts_ms: int | None = None,
         packet_len: int | None = None,
     ) -> None:
@@ -210,11 +213,16 @@ class TcpvRuntime:
             else:
                 cid_value = ""
 
+        proxy_username_value = str(proxy_username or "").strip()
+        if not proxy_username_value and flow is not None:
+            proxy_username_value = str(getattr(flow, "proxy_username", "") or "").strip()
+
         self.emit_packet(
             account=account_value or "",
             packet_data=packet_data,
             from_client=from_client,
             cid=cid_value,
+            proxy_username=proxy_username_value,
             msg_idx=msg_idx,
             chunk_idx=chunk_idx,
             ts_ms=ts_ms,
@@ -226,6 +234,7 @@ class TcpvRuntime:
         flow: Any | None = None,
         account: str | None = None,
         cid: str | None = None,
+        proxy_username: str | None = None,
         ts_ms: int | None = None,
     ) -> str:
         if not self.enabled or self.store is None:
@@ -243,8 +252,17 @@ class TcpvRuntime:
         if cid_value is None:
             cid_value = self._build_cid(flow) if flow is not None else ""
 
+        proxy_username_value = str(proxy_username or "").strip()
+        if not proxy_username_value and flow is not None:
+            proxy_username_value = str(getattr(flow, "proxy_username", "") or "").strip()
+
         now_ms = int(ts_ms or (time.time() * 1000))
-        self.store.mark_flow_start(account=account_value, cid=cid_value or "", ts_ms=now_ms)
+        self.store.mark_flow_start(
+            account=account_value,
+            cid=cid_value or "",
+            proxy_username=proxy_username_value,
+            ts_ms=now_ms,
+        )
         return account_value
 
     def tcp_end(
@@ -252,6 +270,7 @@ class TcpvRuntime:
         flow: Any | None = None,
         account: str | None = None,
         cid: str | None = None,
+        proxy_username: str | None = None,
         ts_ms: int | None = None,
     ) -> str:
         if not self.enabled or self.store is None:
@@ -269,8 +288,17 @@ class TcpvRuntime:
         if cid_value is None:
             cid_value = self._build_cid(flow) if flow is not None else ""
 
+        proxy_username_value = str(proxy_username or "").strip()
+        if not proxy_username_value and flow is not None:
+            proxy_username_value = str(getattr(flow, "proxy_username", "") or "").strip()
+
         now_ms = int(ts_ms or (time.time() * 1000))
-        self.store.mark_flow_end(account=account_value, cid=cid_value or "", ts_ms=now_ms)
+        self.store.mark_flow_end(
+            account=account_value,
+            cid=cid_value or "",
+            proxy_username=proxy_username_value,
+            ts_ms=now_ms,
+        )
         return account_value
 
     def get_accounts(self) -> list[dict[str, Any]]:
@@ -351,6 +379,7 @@ class TcpvRuntime:
                     direction=item["dir"],
                     payload=item["payload"],
                     packet_len=item.get("packet_len"),
+                    proxy_username=item.get("proxy_username", ""),
                     ts_ms=item["ts_ms"],
                     msg_idx=item.get("msg_idx"),
                     chunk_idx=item.get("chunk_idx"),
@@ -446,6 +475,7 @@ def emit_lobby_packet(
     chunk_idx: int | None = None,
     account: str | None = None,
     cid: str | None = None,
+    proxy_username: str | None = None,
     ts_ms: int | None = None,
     packet_len: int | None = None,
 ) -> None:
@@ -463,6 +493,7 @@ def emit_lobby_packet(
         chunk_idx=chunk_idx,
         account=account,
         cid=cid,
+        proxy_username=proxy_username,
         ts_ms=ts_ms,
         packet_len=packet_len,
     )
@@ -477,17 +508,31 @@ def tcp_start(
     flow: Any | None = None,
     account: str | None = None,
     cid: str | None = None,
+    proxy_username: str | None = None,
     ts_ms: int | None = None,
 ) -> str:
     """Mark flow as started in external emitter."""
-    return TCPV_RUNTIME.tcp_start(flow=flow, account=account, cid=cid, ts_ms=ts_ms)
+    return TCPV_RUNTIME.tcp_start(
+        flow=flow,
+        account=account,
+        cid=cid,
+        proxy_username=proxy_username,
+        ts_ms=ts_ms,
+    )
 
 
 def tcp_end(
     flow: Any | None = None,
     account: str | None = None,
     cid: str | None = None,
+    proxy_username: str | None = None,
     ts_ms: int | None = None,
 ) -> str:
     """Mark flow as ended in external emitter."""
-    return TCPV_RUNTIME.tcp_end(flow=flow, account=account, cid=cid, ts_ms=ts_ms)
+    return TCPV_RUNTIME.tcp_end(
+        flow=flow,
+        account=account,
+        cid=cid,
+        proxy_username=proxy_username,
+        ts_ms=ts_ms,
+    )
