@@ -37,16 +37,18 @@ def create_app(runtime) -> FastAPI:
             blocks: list[str] = []
             for ev in events:
                 ts = int(ev.get("ts", 0))
-                direction = "->" if int(ev.get("dir", 0)) == 0 else "<-"
+                direction = "->" if int(ev.get("dir", 0)) == 0 else "<-" 
                 length = int(ev.get("len", 0))
                 prefix = html.escape(str(ev.get("pfx", "")))
                 cid = html.escape(str(ev.get("cid", "")))
+                summary = html.escape(str(ev.get("summary", "")))
                 seq = int(ev.get("seq", 0))
+                meta_text = f"{summary} seq={seq} (server preloaded)" if summary else f"cid={cid} seq={seq} (server preloaded)"
                 blocks.append(
                     "<details>"
                     f"<summary>[{ts}] [{direction}] [len={length}] [{prefix}]</summary>"
                     "<div class=\"body\">"
-                    f"<div class=\"meta\">cid={cid} seq={seq} (server preloaded)</div>"
+                    f"<div class=\"meta\">{meta_text}</div>"
                     "</div>"
                     "</details>"
                 )
