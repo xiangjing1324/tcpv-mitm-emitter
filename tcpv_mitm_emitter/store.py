@@ -50,6 +50,7 @@ class TcpvEventStore:
         chunk_idx: int | None = None,
         packet_len: int | None = None,
         proxy_username: str = "",
+        summary: str = "",
     ) -> str:
         if not account:
             raise ValueError("account must not be empty")
@@ -74,6 +75,7 @@ class TcpvEventStore:
             "ts": str(now_ms),
             "cid": cid,
             "kp": str(proxy_username or ""),
+            "sm": str(summary or ""),
             "dir": str(int(direction)),
             "len": str(real_packet_len),
             "pfx": payload_bytes[: self.prefix_len].hex(),
@@ -357,6 +359,7 @@ class TcpvEventStore:
             "ts": self._to_int(decoded.get("ts"), 0),
             "cid": decoded.get("cid", ""),
             "proxy_username": decoded.get("kp", ""),
+            "summary": decoded.get("sm", ""),
             "dir": self._to_int(decoded.get("dir"), 0),
             "len": self._to_int(decoded.get("len"), 0),
             "pfx": decoded.get("pfx", ""),

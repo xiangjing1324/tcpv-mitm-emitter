@@ -292,6 +292,7 @@ function writePayloadCache(account, eventId, detail) {
       pfx: String(normalized.pfx || ""),
       cid: String(normalized.cid || ""),
       proxy_username: String(normalized.proxy_username || ""),
+      summary: String(normalized.summary || ""),
       seq: Number.isFinite(Number(normalized.seq)) ? Number(normalized.seq) : undefined,
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
@@ -1447,7 +1448,12 @@ function buildEventBody(ev, hideAscii) {
   if (proxyUsername) {
     metaParts.push(`kp=${proxyUsername}`);
   }
-  metaParts.push(`cid=${stripDecoratorsFromCid(ev && ev.cid)}`);
+  const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
+  if (summaryText) {
+    metaParts.push(summaryText);
+  } else {
+    metaParts.push(`cid=${stripDecoratorsFromCid(ev && ev.cid)}`);
+  }
   metaParts.push(`seq=${ev.seq}`);
   metaParts.push(`msg_idx=${ev.msg_idx}`);
   metaParts.push(`chunk_idx=${ev.chunk_idx}`);
@@ -1481,6 +1487,7 @@ function applyEventPayloadDetail(ev, detail) {
   if (detail.pfx) ev.pfx = String(detail.pfx);
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
+  if (detail.summary !== undefined) ev.summary = String(detail.summary || "");
 
   const seqNum = Number(detail.seq);
   if (Number.isFinite(seqNum)) ev.seq = seqNum;

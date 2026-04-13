@@ -146,6 +146,7 @@ class TcpvRuntime:
         from_client: bool,
         cid: str = "",
         proxy_username: str = "",
+        summary: str = "",
         msg_idx: int | None = None,
         chunk_idx: int | None = None,
         ts_ms: int | None = None,
@@ -173,6 +174,7 @@ class TcpvRuntime:
             "account": account,
             "cid": cid or "",
             "proxy_username": str(proxy_username or ""),
+            "summary": str(summary or ""),
             "dir": 0 if from_client else 1,
             "payload": payload,
             "packet_len": real_packet_len,
@@ -199,6 +201,7 @@ class TcpvRuntime:
         account: str | None = None,
         cid: str | None = None,
         proxy_username: str | None = None,
+        summary: str | None = None,
         ts_ms: int | None = None,
         packet_len: int | None = None,
     ) -> None:
@@ -216,6 +219,7 @@ class TcpvRuntime:
         proxy_username_value = str(proxy_username or "").strip()
         if not proxy_username_value and flow is not None:
             proxy_username_value = str(getattr(flow, "proxy_username", "") or "").strip()
+        summary_value = str(summary or "").strip()
 
         self.emit_packet(
             account=account_value or "",
@@ -223,6 +227,7 @@ class TcpvRuntime:
             from_client=from_client,
             cid=cid_value,
             proxy_username=proxy_username_value,
+            summary=summary_value,
             msg_idx=msg_idx,
             chunk_idx=chunk_idx,
             ts_ms=ts_ms,
@@ -380,6 +385,7 @@ class TcpvRuntime:
                     payload=item["payload"],
                     packet_len=item.get("packet_len"),
                     proxy_username=item.get("proxy_username", ""),
+                    summary=item.get("summary", ""),
                     ts_ms=item["ts_ms"],
                     msg_idx=item.get("msg_idx"),
                     chunk_idx=item.get("chunk_idx"),
@@ -476,6 +482,7 @@ def emit_lobby_packet(
     account: str | None = None,
     cid: str | None = None,
     proxy_username: str | None = None,
+    summary: str | None = None,
     ts_ms: int | None = None,
     packet_len: int | None = None,
 ) -> None:
@@ -494,6 +501,7 @@ def emit_lobby_packet(
         account=account,
         cid=cid,
         proxy_username=proxy_username,
+        summary=summary,
         ts_ms=ts_ms,
         packet_len=packet_len,
     )
