@@ -1469,14 +1469,21 @@ function buildEventBody(ev, hideAscii) {
   const hasDecodedDump = !!decodedPay;
   const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
 
-  function appendDumpSection(title, base64Text, lengthValue) {
+  const dumpGrid = document.createElement("div");
+  dumpGrid.className = "dump-grid";
+  body.appendChild(dumpGrid);
+
+  function appendDumpSection(title, base64Text, lengthValue, toneClass) {
     if (!base64Text) return;
+    const panel = document.createElement("section");
+    panel.className = `dump-panel ${toneClass || ""}`.trim();
+
     const sectionTitle = document.createElement("div");
-    sectionTitle.className = "meta";
+    sectionTitle.className = "dump-label";
     sectionTitle.textContent = Number.isFinite(Number(lengthValue))
       ? `${title} [len=${Number(lengthValue)}]`
       : title;
-    body.appendChild(sectionTitle);
+    panel.appendChild(sectionTitle);
 
     const dump = formatHexDump(base64Text, hideAscii);
     const hexShell = document.createElement("div");
@@ -1490,14 +1497,15 @@ function buildEventBody(ev, hideAscii) {
 
     hexShell.appendChild(hexHead);
     hexShell.appendChild(pre);
-    body.appendChild(hexShell);
+    panel.appendChild(hexShell);
+    dumpGrid.appendChild(panel);
   }
 
   if (hasFullDump && !fullDumpSameAsDecoded) {
-    appendDumpSection("full packet", fullPay, ev.full_len);
-    appendDumpSection("decoded slice", decodedPay, ev.len);
+    appendDumpSection("full packet", fullPay, ev.full_len, "dump-panel-full");
+    appendDumpSection("decoded slice", decodedPay, ev.len, "dump-panel-decoded");
   } else {
-    appendDumpSection("packet", decodedPay || fullPay, ev.len || ev.full_len);
+    appendDumpSection("packet", decodedPay || fullPay, ev.len || ev.full_len, "dump-panel-single");
   }
 
   return body;

@@ -594,11 +594,58 @@ INDEX_HTML = """
       margin-bottom: 6px;
     }
 
+    .dump-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 10px;
+    }
+
+    .dump-panel {
+      min-width: 0;
+    }
+
+    .dump-label {
+      margin-bottom: 6px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: color-mix(in srgb, var(--panel) 94%, var(--bg));
+    }
+
+    .dump-panel-full .dump-label {
+      border-color: color-mix(in srgb, var(--req) 52%, var(--line));
+      background: color-mix(in srgb, var(--req) 12%, var(--panel));
+      color: color-mix(in srgb, var(--req) 65%, var(--text));
+    }
+
+    .dump-panel-decoded .dump-label {
+      border-color: color-mix(in srgb, var(--resp) 52%, var(--line));
+      background: color-mix(in srgb, var(--resp) 12%, var(--panel));
+      color: color-mix(in srgb, var(--resp) 68%, var(--text));
+    }
+
+    .dump-panel-single .dump-label {
+      border-color: color-mix(in srgb, var(--line) 85%, var(--text));
+    }
+
     .hex-shell {
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--dump-bg);
       overflow-x: auto;
+    }
+
+    .dump-panel-full .hex-shell {
+      border-color: color-mix(in srgb, var(--req) 42%, var(--line));
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--req) 10%, transparent);
+    }
+
+    .dump-panel-decoded .hex-shell {
+      border-color: color-mix(in srgb, var(--resp) 42%, var(--line));
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--resp) 10%, transparent);
     }
 
     .hex-head {
@@ -654,6 +701,13 @@ INDEX_HTML = """
       .toolbar,
       .filterbar {
         grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (min-width: 1180px) {
+      .dump-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        align-items: start;
       }
     }
   </style>
