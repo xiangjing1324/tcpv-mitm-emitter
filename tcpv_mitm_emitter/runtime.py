@@ -151,6 +151,8 @@ class TcpvRuntime:
         chunk_idx: int | None = None,
         ts_ms: int | None = None,
         packet_len: int | None = None,
+        full_packet_data: Any | None = None,
+        full_packet_len: int | None = None,
     ) -> None:
         if not self.enabled or self.store is None:
             return
@@ -170,6 +172,14 @@ class TcpvRuntime:
         if real_packet_len <= 0:
             real_packet_len = len(payload)
 
+        full_payload = self._to_bytes(full_packet_data)
+        try:
+            real_full_packet_len = int(full_packet_len) if full_packet_len is not None else len(full_payload)
+        except (TypeError, ValueError):
+            real_full_packet_len = len(full_payload)
+        if real_full_packet_len <= 0:
+            real_full_packet_len = len(full_payload)
+
         event = {
             "account": account,
             "cid": cid or "",
@@ -178,6 +188,8 @@ class TcpvRuntime:
             "dir": 0 if from_client else 1,
             "payload": payload,
             "packet_len": real_packet_len,
+            "full_payload": full_payload,
+            "full_packet_len": real_full_packet_len,
             "ts_ms": int(ts_ms or (time.time() * 1000)),
             "msg_idx": msg_idx,
             "chunk_idx": chunk_idx,
@@ -204,6 +216,8 @@ class TcpvRuntime:
         summary: str | None = None,
         ts_ms: int | None = None,
         packet_len: int | None = None,
+        full_packet_data: Any | None = None,
+        full_packet_len: int | None = None,
     ) -> None:
         account_value = account
         if account_value is None and flow is not None:
@@ -232,6 +246,8 @@ class TcpvRuntime:
             chunk_idx=chunk_idx,
             ts_ms=ts_ms,
             packet_len=packet_len,
+            full_packet_data=full_packet_data,
+            full_packet_len=full_packet_len,
         )
 
     def tcp_start(
@@ -384,6 +400,8 @@ class TcpvRuntime:
                     direction=item["dir"],
                     payload=item["payload"],
                     packet_len=item.get("packet_len"),
+                    full_payload=item.get("full_payload"),
+                    full_packet_len=item.get("full_packet_len"),
                     proxy_username=item.get("proxy_username", ""),
                     summary=item.get("summary", ""),
                     ts_ms=item["ts_ms"],
@@ -485,6 +503,8 @@ def emit_lobby_packet(
     summary: str | None = None,
     ts_ms: int | None = None,
     packet_len: int | None = None,
+    full_packet_data: Any | None = None,
+    full_packet_len: int | None = None,
 ) -> None:
     """Safe no-op when runtime is disabled.
 
@@ -504,6 +524,8 @@ def emit_lobby_packet(
         summary=summary,
         ts_ms=ts_ms,
         packet_len=packet_len,
+        full_packet_data=full_packet_data,
+        full_packet_len=full_packet_len,
     )
 
 

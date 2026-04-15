@@ -289,6 +289,9 @@ function writePayloadCache(account, eventId, detail) {
   const rec = {
     detail: {
       pay,
+      full_pay: String(normalized.full_pay || ""),
+      full_len: Number.isFinite(Number(normalized.full_len)) ? Number(normalized.full_len) : undefined,
+      full_pfx: String(normalized.full_pfx || ""),
       pfx: String(normalized.pfx || ""),
       cid: String(normalized.cid || ""),
       proxy_username: String(normalized.proxy_username || ""),
@@ -297,7 +300,7 @@ function writePayloadCache(account, eventId, detail) {
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
     },
-    size: pay.length,
+    size: pay.length + String(normalized.full_pay || "").length,
   };
   payloadCache.set(key, rec);
   payloadCacheBytes += rec.size;
@@ -1460,19 +1463,42 @@ function buildEventBody(ev, hideAscii) {
   meta.textContent = metaParts.join(" ");
   body.appendChild(meta);
 
-  const dump = formatHexDump(ev.pay, hideAscii);
-  const hexShell = document.createElement("div");
-  hexShell.className = "hex-shell";
-  const hexHead = document.createElement("div");
-  hexHead.className = "hex-head";
-  hexHead.textContent = dump.header;
-  const pre = document.createElement("pre");
-  pre.className = "hex-body";
-  pre.innerHTML = renderHexBodyHtml(dump, hideAscii);
+  const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
+  const decodedPay = String(ev && ev.pay ? ev.pay : "");
+  const hasFullDump = !!fullPay;
+  const hasDecodedDump = !!decodedPay;
+  const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
 
-  hexShell.appendChild(hexHead);
-  hexShell.appendChild(pre);
-  body.appendChild(hexShell);
+  function appendDumpSection(title, base64Text, lengthValue) {
+    if (!base64Text) return;
+    const sectionTitle = document.createElement("div");
+    sectionTitle.className = "meta";
+    sectionTitle.textContent = Number.isFinite(Number(lengthValue))
+      ? `${title} [len=${Number(lengthValue)}]`
+      : title;
+    body.appendChild(sectionTitle);
+
+    const dump = formatHexDump(base64Text, hideAscii);
+    const hexShell = document.createElement("div");
+    hexShell.className = "hex-shell";
+    const hexHead = document.createElement("div");
+    hexHead.className = "hex-head";
+    hexHead.textContent = dump.header;
+    const pre = document.createElement("pre");
+    pre.className = "hex-body";
+    pre.innerHTML = renderHexBodyHtml(dump, hideAscii);
+
+    hexShell.appendChild(hexHead);
+    hexShell.appendChild(pre);
+    body.appendChild(hexShell);
+  }
+
+  if (hasFullDump && !fullDumpSameAsDecoded) {
+    appendDumpSection("full packet", fullPay, ev.full_len);
+    appendDumpSection("decoded slice", decodedPay, ev.len);
+  } else {
+    appendDumpSection("packet", decodedPay || fullPay, ev.len || ev.full_len);
+  }
 
   return body;
 }
@@ -1484,6 +1510,10 @@ function applyEventPayloadDetail(ev, detail) {
   const pay = String(detail.pay || "");
   if (!pay) return false;
   ev.pay = pay;
+  if (detail.full_pay !== undefined) ev.full_pay = String(detail.full_pay || "");
+  const fullLen = Number(detail.full_len);
+  if (Number.isFinite(fullLen)) ev.full_len = fullLen;
+  if (detail.full_pfx !== undefined) ev.full_pfx = String(detail.full_pfx || "");
   if (detail.pfx) ev.pfx = String(detail.pfx);
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
