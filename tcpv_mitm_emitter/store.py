@@ -51,6 +51,8 @@ class TcpvEventStore:
         packet_len: int | None = None,
         full_payload: bytes | bytearray | None = None,
         full_packet_len: int | None = None,
+        before_payload: bytes | bytearray | None = None,
+        before_packet_len: int | None = None,
         proxy_username: str = "",
         summary: str = "",
     ) -> str:
@@ -74,6 +76,13 @@ class TcpvEventStore:
             real_full_packet_len = len(full_payload_bytes)
         if real_full_packet_len <= 0:
             real_full_packet_len = len(full_payload_bytes)
+        before_payload_bytes = bytes(before_payload or b"")
+        try:
+            real_before_packet_len = int(before_packet_len) if before_packet_len is not None else len(before_payload_bytes)
+        except (TypeError, ValueError):
+            real_before_packet_len = len(before_payload_bytes)
+        if real_before_packet_len <= 0:
+            real_before_packet_len = len(before_payload_bytes)
         now_ms = int(ts_ms or int(time.time() * 1000))
         seq = int(self.r.incr(self.seq_key(account)))
 
@@ -99,6 +108,10 @@ class TcpvEventStore:
             fields["fpay"] = base64.b64encode(full_payload_bytes).decode("ascii")
             fields["fpfx"] = full_payload_bytes[: self.prefix_len].hex()
             fields["flen"] = str(real_full_packet_len)
+        if before_payload_bytes:
+            fields["bpay"] = base64.b64encode(before_payload_bytes).decode("ascii")
+            fields["bpfx"] = before_payload_bytes[: self.prefix_len].hex()
+            fields["blen"] = str(real_before_packet_len)
 
         pipe = self.r.pipeline()
         pipe.xadd(stream_key, fields, maxlen=self.stream_maxlen, approximate=True)
@@ -380,6 +393,9 @@ class TcpvEventStore:
             "full_len": self._to_int(decoded.get("flen"), 0),
             "full_pfx": decoded.get("fpfx", ""),
             "full_pay": decoded.get("fpay", "") if include_payload else "",
+            "before_len": self._to_int(decoded.get("blen"), 0),
+            "before_pfx": decoded.get("bpfx", ""),
+            "before_pay": decoded.get("bpay", "") if include_payload else "",
             "seq": self._to_int(decoded.get("seq"), 0),
             "msg_idx": self._to_int(decoded.get("midx"), -1),
             "chunk_idx": self._to_int(decoded.get("cidx"), -1),

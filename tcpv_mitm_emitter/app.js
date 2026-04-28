@@ -9,6 +9,7 @@ const state = {
   autoRefresh: true,
   tick: 0,
   expandedIds: new Set(),
+  collapsedIds: new Set(),
   themeMode: "github-dark",
   search: {
     active: false,
@@ -27,6 +28,7 @@ const state = {
   hitCursor: -1,
   pendingHitScroll: false,
   filteredCount: 0,
+  dumpScrollLeft: new Map(),
 };
 
 const el = {
@@ -80,19 +82,64 @@ const BODY_TONES = {
 };
 
 const MAX_FULL_SCAN_BYTES = 8192;
-const MAX_EVENTS_IN_MEMORY = 5000;
-const EVENTS_FETCH_LIMIT = 200;
+const MAX_EVENTS_IN_MEMORY = 10000;
+const EVENTS_FETCH_LIMIT = 1000;
 const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
-const WINDOW_PREFETCH_BUDGET_AUTO = 8;
-const WINDOW_PREFETCH_BUDGET_MANUAL = 24;
+const WINDOW_PREFETCH_BUDGET_AUTO = 16;
+const WINDOW_PREFETCH_BUDGET_MANUAL = 48;
+const MAX_RENDER_EVENTS_AUTO = 2000;
+const MAX_RENDER_EVENTS_MANUAL = 5000;
+const DUMP_SCROLL_CACHE_MAX = 800;
+const AUTO_EXPAND_ON_COUNT = 3;
+const AUTO_EXPAND_SMART_COUNT = 2;
+const ANALYSIS_ASCII_MIN_LEN = 4;
+const ANALYSIS_ASCII_MAX_ITEMS = 12;
+const ANALYSIS_UTF8_MIN_CHARS = 2;
+const ANALYSIS_UTF8_MAX_ITEMS = 8;
+const ANALYSIS_BASE64_MAX_ITEMS = 6;
+const ANALYSIS_BASE64_MAX_BYTES = 512;
+const ANALYSIS_XOR_SCAN_MAX_BYTES = 768;
+const PRINTABLE_RUN_ANCHOR_PATTERNS = [
+  /\d{10,24}/,
+  /(idevhw|idevsysver|iappversion|iappname|iappinfo)/i,
+  /(model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrpcs_|com\.|cn=|ou=|ip(hone|ad)\d|android)/i,
+];
+const XOR_TEXT_KEYWORDS = [
+  "/usr/sbin",
+  "dylib",
+  "springboard",
+  "backboardservices",
+  "backboardd",
+  "mediaserverd",
+  "com.apple",
+  "mobilesafari",
+  "preferences",
+  "shadowrocket",
+  "spotlight",
+  "coremotion",
+  "virtualaudio",
+];
+const TIMESTAMP_SECONDS_MIN = 1_672_531_200; // 2023-01-01
+const TIMESTAMP_SECONDS_MAX = 1_893_456_000; // 2030-01-01
+const TIMESTAMP_MAX_MARKS_PER_DUMP = 8;
+const KNOWN_0102000A_TIMESTAMP_LAYOUTS = [
+  { len: 68, innerType: 0x100a, selector0: 0x200e0002, selector1: 0x34560001, offsets: [0x40], label: "dfm-current" },
+  { len: 80, innerType: 0x1001, selector0: 0x200e0002, selector1: 0x34560001, offsets: [0x20], label: "dfm-session" },
+  { len: 68, innerType: 0x810b, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x40], label: "uagame-current" },
+  { len: 160, innerType: 0x8023, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x58], label: "uagame-current-8023" },
+  { innerType: 0x8418, selector0: 0x21650002, selector1: 0x34560001, offsetFromEnd: 0x14, label: "uagame-tail-8418" },
+  { len: 80, innerType: 0x8102, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x20], label: "uagame-session" },
+];
 
 const payloadCache = new Map();
 const payloadInFlight = new Map();
 let payloadCacheBytes = 0;
 let previewOffsetRenderTimer = 0;
+const UTF8_DECODER_FATAL =
+  typeof TextDecoder !== "undefined" ? new TextDecoder("utf-8", { fatal: true }) : null;
 
 function setStatus(text) {
   if (el.status) {
@@ -292,6 +339,9 @@ function writePayloadCache(account, eventId, detail) {
       full_pay: String(normalized.full_pay || ""),
       full_len: Number.isFinite(Number(normalized.full_len)) ? Number(normalized.full_len) : undefined,
       full_pfx: String(normalized.full_pfx || ""),
+      before_pay: String(normalized.before_pay || ""),
+      before_len: Number.isFinite(Number(normalized.before_len)) ? Number(normalized.before_len) : undefined,
+      before_pfx: String(normalized.before_pfx || ""),
       pfx: String(normalized.pfx || ""),
       cid: String(normalized.cid || ""),
       proxy_username: String(normalized.proxy_username || ""),
@@ -300,7 +350,7 @@ function writePayloadCache(account, eventId, detail) {
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
     },
-    size: pay.length + String(normalized.full_pay || "").length,
+    size: pay.length + String(normalized.full_pay || "").length + String(normalized.before_pay || "").length,
   };
   payloadCache.set(key, rec);
   payloadCacheBytes += rec.size;
@@ -370,7 +420,13 @@ function loadRules() {
     el.filterMaxLen.value = localStorage.getItem("tcpv_filter_max_len_draft") || appliedFilterMaxLen;
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
-  el.previewBytes.value = localStorage.getItem("tcpv_preview_bytes") || "32";
+  const savedPreviewBytes = String(localStorage.getItem("tcpv_preview_bytes") || "").trim();
+  const initialPreviewBytes =
+    savedPreviewBytes === "24" || savedPreviewBytes === "32" ? "16" : savedPreviewBytes || "16";
+  el.previewBytes.value = initialPreviewBytes;
+  if (savedPreviewBytes !== initialPreviewBytes) {
+    localStorage.setItem("tcpv_preview_bytes", initialPreviewBytes);
+  }
   setPreviewOffsetControls(previewOffset);
   if (el.previewOffsetRange) {
     el.previewOffsetRange.max = String(PREVIEW_OFFSET_MAX);
@@ -385,7 +441,12 @@ function loadRules() {
     el.bodyTone.value = localStorage.getItem("tcpv_body_tone") || "slate";
   }
   if (el.expandMode) {
-    el.expandMode.value = localStorage.getItem("tcpv_expand_mode") || "smart";
+    const savedExpandMode = String(localStorage.getItem("tcpv_expand_mode") || "").trim();
+    const initialExpandMode = savedExpandMode === "on" ? "smart" : savedExpandMode || "smart";
+    el.expandMode.value = initialExpandMode;
+    if (savedExpandMode !== initialExpandMode) {
+      localStorage.setItem("tcpv_expand_mode", initialExpandMode);
+    }
   }
   el.autoRefresh.value = localStorage.getItem("tcpv_auto_refresh") || "1";
   el.themeMode.value = localStorage.getItem("tcpv_theme_mode") || "github-dark";
@@ -552,7 +613,7 @@ function usePreviewSpace() {
 }
 
 function getGroupGap() {
-  return usePreviewSpace() ? "  " : " ";
+  return usePreviewSpace() ? " " : "";
 }
 
 function getHexGroupSizes(bytesPerRow) {
@@ -575,6 +636,10 @@ function getFlowRowPath(item) {
   if (cid) return cid;
   if (proxyBadge) return proxyBadge;
   return "(waiting cid)";
+}
+
+function hasOpenEventDetails() {
+  return !!(el.events && typeof el.events.querySelector === "function" && el.events.querySelector("details[data-event-id][open]"));
 }
 
 function setupWheelRouting() {
@@ -752,10 +817,12 @@ async function selectFlow(flowId) {
   if (state.flowId !== flowId) {
     state.flowId = flowId;
   }
+  state.dumpScrollLeft.clear();
   state.events = [];
   state.afterId = null;
   state.hasMore = true;
   state.expandedIds.clear();
+  state.collapsedIds.clear();
   state.hitEventIds = [];
   state.hitCursor = -1;
   state.filteredCount = 0;
@@ -861,7 +928,9 @@ async function clearCurrentFlow() {
   state.events = [];
   state.afterId = null;
   state.hasMore = true;
+  state.dumpScrollLeft.clear();
   state.expandedIds.clear();
+  state.collapsedIds.clear();
   state.hitEventIds = [];
   state.hitCursor = -1;
   state.filteredCount = 0;
@@ -957,14 +1026,152 @@ function formatTsShort(ts) {
 
 function getBytesPerRow() {
   const raw = Number(el.previewBytes.value || "16");
-  return [16, 24, 32, 48, 64, 80, 96, 128].includes(raw) ? raw : 32;
+  return [16, 24, 32, 48, 64, 80, 96, 128].includes(raw) ? raw : 16;
 }
 
-function formatHexDump(base64Text, hideAscii) {
+function normalizeDumpAnnotationText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function trimPrintableRunPrefix(start, text, minLen = ANALYSIS_ASCII_MIN_LEN) {
+  let off = Number(start || 0);
+  let current = String(text || "");
+  if (!current) return { off, text: "", kind: "" };
+
+  let anchorIndex = -1;
+  for (const pattern of PRINTABLE_RUN_ANCHOR_PATTERNS) {
+    const match = current.match(pattern);
+    if (!match || match.index == null || match.index <= 0) continue;
+    if (anchorIndex === -1 || match.index < anchorIndex) {
+      anchorIndex = match.index;
+    }
+  }
+  if (anchorIndex > 0 && anchorIndex <= 8) {
+    const prefix = current.slice(0, anchorIndex);
+    const semanticPrefix = prefix.replace(/[:=_-]+$/g, "");
+    const keepSemanticPrefix = /^[A-Za-z][A-Za-z0-9_]{3,20}$/i.test(semanticPrefix);
+    if (!keepSemanticPrefix) {
+      off += anchorIndex;
+      current = current.slice(anchorIndex);
+    }
+  }
+
+  const leadingNoise = current.match(/^[^A-Za-z0-9/]{1,4}/);
+  if (leadingNoise && current.length - leadingNoise[0].length >= minLen) {
+    off += leadingNoise[0].length;
+    current = current.slice(leadingNoise[0].length);
+  }
+
+  const accountMatch = current.match(/\d{10,24}/);
+  if (accountMatch && accountMatch.index != null && accountMatch.index > 0 && accountMatch.index <= 4) {
+    off += accountMatch.index;
+    current = accountMatch[0];
+  }
+
+  return {
+    off,
+    text: current,
+    kind: inferStringKind(current),
+  };
+}
+
+function buildDumpAnnotationIndex(items, bytesPerRow) {
+  const grouped = new Map();
+  if (!Array.isArray(items) || items.length <= 0) return grouped;
+  const width = Math.max(1, Number(bytesPerRow || 16));
+  for (const item of items) {
+    const off = Number(item && item.off);
+    const rawText = normalizeDumpAnnotationText(item && item.text ? item.text : "");
+    if (!Number.isFinite(off) || off < 0 || !rawText) continue;
+    const rowBase = Math.floor(off / width) * width;
+    const bucket = grouped.get(rowBase) || [];
+    if (bucket.includes(rawText) || bucket.length >= 2) continue;
+    bucket.push(rawText);
+    grouped.set(rowBase, bucket);
+  }
+  return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
+}
+
+function mergeDumpAnnotationIndexes(...indexes) {
+  const merged = new Map();
+  for (const index of indexes) {
+    if (!(index instanceof Map)) continue;
+    for (const [rowBase, text] of index.entries()) {
+      const normalized = normalizeDumpAnnotationText(text);
+      if (!normalized) continue;
+      const previous = normalizeDumpAnnotationText(merged.get(rowBase) || "");
+      merged.set(rowBase, previous ? `${previous}\n// ${normalized}` : normalized);
+    }
+  }
+  return merged;
+}
+
+function getDumpAnnotationIndex(ev, source) {
+  const bytesPerRow = getBytesPerRow();
+  const analysis = getEventAnalysis(ev);
+  if (!analysis) return new Map();
+  if (source !== "decoded") return new Map();
+  const items = [
+    ...(Array.isArray(analysis.decodedStrings) ? analysis.decodedStrings : []),
+    ...(Array.isArray(analysis.decodedUtf8Strings) ? analysis.decodedUtf8Strings : []),
+    ...(Array.isArray(analysis.decodedBase64Strings) ? analysis.decodedBase64Strings : []),
+  ];
+  return buildDumpAnnotationIndex(items, bytesPerRow);
+}
+
+function buildTimestampAnnotationIndex(items, bytesPerRow) {
+  const grouped = new Map();
+  if (!Array.isArray(items) || items.length <= 0) return grouped;
+  const width = Math.max(1, Number(bytesPerRow || 16));
+  for (const item of items) {
+    const off = Number(item && item.start);
+    const text = normalizeDumpAnnotationText(item && item.text ? item.text : "");
+    if (!Number.isFinite(off) || off < 0 || !text) continue;
+    const rowBase = Math.floor(off / width) * width;
+    const bucket = grouped.get(rowBase) || [];
+    if (bucket.includes(text) || bucket.length >= 3) continue;
+    bucket.push(text);
+    grouped.set(rowBase, bucket);
+  }
+  return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
+}
+
+function buildChangedOffsetSet(leftBase64, rightBase64) {
+  const left = b64ToBytes(leftBase64);
+  const right = b64ToBytes(rightBase64);
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length === 0 || right.length === 0) {
+    return null;
+  }
+  const maxLen = Math.max(left.length, right.length);
+  const changed = new Set();
+  for (let i = 0; i < maxLen; i += 1) {
+    if (left[i] !== right[i]) changed.add(i);
+  }
+  return changed.size > 0 ? changed : null;
+}
+
+function buildRangeOffsetSet(ranges) {
+  if (!Array.isArray(ranges) || ranges.length <= 0) return null;
+  const offsets = new Set();
+  for (const range of ranges) {
+    const start = Math.max(0, Math.floor(Number(range && range.start)));
+    const end = Math.max(start, Math.floor(Number(range && range.end)));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    for (let off = start; off < end; off += 1) {
+      offsets.add(off);
+    }
+  }
+  return offsets.size > 0 ? offsets : null;
+}
+
+function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = {}) {
   const bytes = b64ToBytes(base64Text);
   const bytesPerRow = getBytesPerRow();
   const groupSizes = getHexGroupSizes(bytesPerRow);
   const groupGap = getGroupGap();
+  const compactAscii = !!(options && options.compactAscii);
+  const changedOffsets = options && options.changedOffsets instanceof Set ? options.changedOffsets : null;
+  const timestampOffsets = buildRangeOffsetSet(options && Array.isArray(options.timestampRanges) ? options.timestampRanges : []);
   const groupWidths = groupSizes.map((size) => size * 3 - 1);
   const hexWidth = groupWidths.reduce((acc, width) => acc + width, 0) + groupGap.length * (groupSizes.length - 1);
 
@@ -980,7 +1187,8 @@ function formatHexDump(base64Text, hideAscii) {
     .join(groupGap);
 
   const headerCore = `offset  ${headCols}`.padEnd(8 + hexWidth, " ");
-  const header = hideAscii ? headerCore : `${headerCore}  |ascii|`;
+  const asciiHead = compactAscii ? "|asc|" : "|ascii|";
+  const header = hideAscii ? headerCore : `${headerCore}  ${asciiHead}`;
   if (bytes.length === 0) {
     return { header, rows: [] };
   }
@@ -997,14 +1205,75 @@ function formatHexDump(base64Text, hideAscii) {
     });
     const hexPadded = rowParts.join(groupGap);
     const offset = i.toString(16).padStart(6, "0");
+    const changedIndexes = changedOffsets
+      ? chunk.map((_v, idx) => changedOffsets.has(i + idx))
+      : [];
+    const timestampIndexes = timestampOffsets
+      ? chunk.map((_v, idx) => timestampOffsets.has(i + idx))
+      : [];
     if (hideAscii) {
-      rows.push({ offset, hex: hexPadded, ascii: "" });
+      rows.push({
+        offset,
+        hex: hexPadded,
+        bytes: chunk,
+        groupSizes,
+        groupWidths,
+        groupGap,
+        changedIndexes,
+        timestampIndexes,
+        ascii: "",
+        compactAscii,
+        comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
+      });
       continue;
     }
-    const ascii = chunk.map((v) => (v >= 32 && v <= 126 ? String.fromCharCode(v) : ".")).join("");
-    rows.push({ offset, hex: hexPadded, ascii });
+    let ascii = chunk.map((v) => (v >= 32 && v <= 126 ? String.fromCharCode(v) : ".")).join("");
+    if (compactAscii && ascii.length > 10) {
+      ascii = `${ascii.slice(0, 10)}…`;
+    }
+    rows.push({
+      offset,
+      hex: hexPadded,
+      bytes: chunk,
+      groupSizes,
+      groupWidths,
+      groupGap,
+      changedIndexes,
+      timestampIndexes,
+      ascii,
+      compactAscii,
+      comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
+    });
   }
   return { header, rows };
+}
+
+function renderHexBytesHtml(row) {
+  if (!row || !Array.isArray(row.bytes) || !Array.isArray(row.groupSizes)) {
+    return `<span class="hex-bytes">${escapeHtml(row && row.hex ? row.hex : "")}</span>`;
+  }
+  let offsetInChunk = 0;
+  const parts = row.groupSizes.map((size, groupIndex) => {
+    const bytes = row.bytes.slice(offsetInChunk, offsetInChunk + size);
+    const marks = Array.isArray(row.changedIndexes)
+      ? row.changedIndexes.slice(offsetInChunk, offsetInChunk + size)
+      : [];
+    const timestampMarks = Array.isArray(row.timestampIndexes)
+      ? row.timestampIndexes.slice(offsetInChunk, offsetInChunk + size)
+      : [];
+    offsetInChunk += size;
+    const html = bytes
+      .map((value, idx) => {
+        const hex = value.toString(16).padStart(2, "0");
+        if (timestampMarks[idx]) return `<span class="hex-byte-timestamp">${hex}</span>`;
+        return marks[idx] ? `<span class="hex-byte-changed">${hex}</span>` : escapeHtml(hex);
+      })
+      .join(" ");
+    const width = Array.isArray(row.groupWidths) ? Number(row.groupWidths[groupIndex]) : size * 3 - 1;
+    return html + "&nbsp;".repeat(Math.max(0, width - (bytes.length * 3 - 1)));
+  });
+  const gap = escapeHtml(String(row.groupGap || "  "));
+  return `<span class="hex-bytes">${parts.join(gap)}</span>`;
 }
 
 function renderHexBodyHtml(dump, hideAscii) {
@@ -1014,15 +1283,17 @@ function renderHexBodyHtml(dump, hideAscii) {
   return dump.rows
     .map((row) => {
       const offsetHtml = `<span class="hex-offset">${escapeHtml(row.offset)}</span>`;
-      const hexHtml = `<span class="hex-bytes">${escapeHtml(row.hex)}</span>`;
+      const hexHtml = renderHexBytesHtml(row);
       if (hideAscii) {
-        return `${offsetHtml}  ${hexHtml}`;
+        const commentHtml = row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
+        return `${offsetHtml} ${hexHtml}${commentHtml}`;
       }
       const asciiHtml =
         `<span class="hex-ascii-bar">|</span>` +
-        `<span class="hex-ascii">${escapeHtml(row.ascii)}</span>` +
+        `<span class="hex-ascii${row.compactAscii ? " hex-ascii-compact" : ""}">${escapeHtml(row.ascii)}</span>` +
         `<span class="hex-ascii-bar">|</span>`;
-      return `${offsetHtml}  ${hexHtml}  ${asciiHtml}`;
+      const commentHtml = row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
+      return `${offsetHtml} ${hexHtml} ${asciiHtml}${commentHtml}`;
     })
     .join("\n");
 }
@@ -1440,7 +1711,1505 @@ function getEventId(ev) {
   return `${ev.ts ?? 0}|${ev.cid ?? ""}|${ev.seq ?? 0}|${ev.msg_idx ?? -1}|${ev.chunk_idx ?? -1}|${ev.dir ?? -1}|${ev.len ?? -1}`;
 }
 
-function buildEventBody(ev, hideAscii) {
+function formatHexValue(value, width = 0) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  const safe = Math.max(0, Math.floor(num));
+  const hex = safe.toString(16);
+  return `0x${width > 0 ? hex.padStart(width, "0") : hex}`;
+}
+
+function readBe16(byteValues, offset) {
+  if (!Array.isArray(byteValues) || offset < 0 || offset + 1 >= byteValues.length) return null;
+  return ((byteValues[offset] & 0xff) << 8) | (byteValues[offset + 1] & 0xff);
+}
+
+function readBe32(byteValues, offset) {
+  if (!Array.isArray(byteValues) || offset < 0 || offset + 3 >= byteValues.length) return null;
+  return (
+    ((byteValues[offset] & 0xff) << 24) |
+    ((byteValues[offset + 1] & 0xff) << 16) |
+    ((byteValues[offset + 2] & 0xff) << 8) |
+    (byteValues[offset + 3] & 0xff)
+  ) >>> 0;
+}
+
+function readLe32(byteValues, offset) {
+  if (!Array.isArray(byteValues) || offset < 0 || offset + 3 >= byteValues.length) return null;
+  return (
+    (byteValues[offset] & 0xff) |
+    ((byteValues[offset + 1] & 0xff) << 8) |
+    ((byteValues[offset + 2] & 0xff) << 16) |
+    ((byteValues[offset + 3] & 0xff) << 24)
+  ) >>> 0;
+}
+
+function isPlausibleTimestampSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= TIMESTAMP_SECONDS_MIN && seconds <= TIMESTAMP_SECONDS_MAX;
+}
+
+function formatTimestampClock(seconds) {
+  if (!Number.isFinite(Number(seconds))) return "";
+  try {
+    const d = new Date(Number(seconds) * 1000);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mi}:${ss}`;
+  } catch (_e) {
+    return "";
+  }
+}
+
+function recordLayoutBaseShift(record, report) {
+  if (!report || !Array.isArray(record)) return null;
+  const shift = Number(report.offset) - 6;
+  if (!Number.isFinite(shift)) return null;
+  if (shift < -6 || shift > 8) return null;
+  return shift;
+}
+
+function read0102000aLayout(record, report) {
+  const shift = recordLayoutBaseShift(record, report);
+  if (shift === null) return null;
+  const lenOffset = shift + 4;
+  const innerTypeOffset = shift + 0x16;
+  const selector0Offset = shift + 0x18;
+  const selector1Offset = shift + 0x1c;
+  if (lenOffset < 0 || selector1Offset + 3 >= record.length) return null;
+  const declaredLen = readBe16(record, lenOffset);
+  const normalizedLen = Number.isFinite(declaredLen) && declaredLen > 0 ? declaredLen : record.length - shift;
+  return {
+    shift,
+    len: normalizedLen,
+    innerType: readBe16(record, innerTypeOffset),
+    selector0: readBe32(record, selector0Offset),
+    selector1: readBe32(record, selector1Offset),
+  };
+}
+
+function layoutMatchesKnownTimestampShape(layout, shape) {
+  if (!layout || !shape) return false;
+  const shapeLen = Number(shape.len);
+  if (Number.isFinite(shapeLen) && Number(layout.len) !== shapeLen) return false;
+  return (
+    Number(layout.innerType) === Number(shape.innerType) &&
+    Number(layout.selector0) === Number(shape.selector0) &&
+    Number(layout.selector1) === Number(shape.selector1)
+  );
+}
+
+function timestampOffsetsForKnownShape(layout, shape) {
+  const offsets = [];
+  for (const offset of shape && Array.isArray(shape.offsets) ? shape.offsets : []) {
+    offsets.push(Number(offset));
+  }
+  const offsetFromEnd = Number(shape && shape.offsetFromEnd);
+  if (Number.isFinite(offsetFromEnd) && Number.isFinite(Number(layout && layout.len))) {
+    offsets.push(Number(layout.len) - offsetFromEnd);
+  }
+  return offsets.filter((offset, index, all) => (
+    Number.isFinite(offset) && offset >= 0 && all.indexOf(offset) === index
+  ));
+}
+
+function buildTimestampRange(start, value, label) {
+  const seconds = Number(value);
+  const clock = formatTimestampClock(seconds);
+  const offsetText = formatHexValue(start);
+  const kind = String(label || "known");
+  return {
+    start,
+    end: start + 4,
+    value: seconds,
+    kind,
+    text: `时间戳 ${clock || seconds} @${offsetText}`,
+  };
+}
+
+function collectRecordTimestampRanges(record, baseOffset) {
+  if (!Array.isArray(record) || record.length < 0x24) return [];
+  const report = detectTssReport(record);
+  if (!report || Number(report.value) !== 0x0102000a) return [];
+
+  const layout = read0102000aLayout(record, report);
+  const ranges = new Map();
+  if (layout) {
+    for (const shape of KNOWN_0102000A_TIMESTAMP_LAYOUTS) {
+      if (!layoutMatchesKnownTimestampShape(layout, shape)) continue;
+      for (const fullOffset of timestampOffsetsForKnownShape(layout, shape)) {
+        const offset = Number(layout.shift) + Number(fullOffset);
+        const value = readBe32(record, offset);
+        if (!isPlausibleTimestampSeconds(value)) continue;
+        const absolute = Number(baseOffset || 0) + offset;
+        ranges.set(absolute, buildTimestampRange(absolute, value, shape.label));
+      }
+    }
+  }
+  return Array.from(ranges.values()).sort((a, b) => Number(a.start) - Number(b.start));
+}
+
+function collectTimestampHighlightsFromBytes(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length < 4) return [];
+  const ranges = new Map();
+  const addRanges = (items) => {
+    for (const item of items || []) {
+      const start = Number(item && item.start);
+      if (!Number.isFinite(start) || start < 0 || ranges.has(start)) continue;
+      ranges.set(start, item);
+      if (ranges.size >= TIMESTAMP_MAX_MARKS_PER_DUMP) break;
+    }
+  };
+
+  const parsed = parseTssChildRecords(byteValues);
+  if (parsed && Array.isArray(parsed.children) && parsed.children.length > 0) {
+    for (const child of parsed.children) {
+      if (!child || child.truncated) continue;
+      const childOffset = Number(child.offset);
+      const childLen = Number(child.len);
+      if (!Number.isFinite(childOffset) || !Number.isFinite(childLen)) continue;
+      const recordStart = childOffset + 4;
+      const record = byteValues.slice(recordStart, recordStart + childLen);
+      addRanges(collectRecordTimestampRanges(record, recordStart));
+      if (ranges.size >= TIMESTAMP_MAX_MARKS_PER_DUMP) break;
+    }
+  }
+
+  addRanges(collectRecordTimestampRanges(byteValues, 0));
+  return Array.from(ranges.values()).sort((a, b) => Number(a.start) - Number(b.start));
+}
+
+function collectTimestampHighlightsForPayload(base64Text) {
+  const bytes = b64ToBytes(base64Text);
+  return collectTimestampHighlightsFromBytes(bytes);
+}
+
+function summarizeTimestampHighlights(ranges) {
+  const items = Array.isArray(ranges) ? ranges : [];
+  if (items.length <= 0) return "";
+  const preview = items
+    .slice(0, 3)
+    .map((item) => {
+      const clock = formatTimestampClock(item.value);
+      return `${formatHexValue(item.start)}${clock ? ` ${clock}` : ""}`;
+    })
+    .join(", ");
+  return items.length > 3 ? `${preview}, ...x${items.length}` : preview;
+}
+
+function getEventTimestampHighlights(ev) {
+  const eventId = getEventId(ev);
+  const key = `${eventId}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
+  if (ev && ev.__tcpvTimestampCacheKey === key && Array.isArray(ev.__tcpvTimestampHighlights)) {
+    return ev.__tcpvTimestampHighlights;
+  }
+  const all = new Map();
+  for (const base64Text of [String(ev && ev.pay ? ev.pay : ""), String(ev && ev.before_pay ? ev.before_pay : "")]) {
+    if (!base64Text) continue;
+    for (const item of collectTimestampHighlightsForPayload(base64Text)) {
+      const start = Number(item && item.start);
+      if (!Number.isFinite(start) || all.has(start)) continue;
+      all.set(start, item);
+    }
+  }
+  const result = Array.from(all.values()).sort((a, b) => Number(a.start) - Number(b.start));
+  if (ev && typeof ev === "object") {
+    ev.__tcpvTimestampCacheKey = key;
+    ev.__tcpvTimestampHighlights = result;
+  }
+  return result;
+}
+
+function syncSummaryTimestampBadge(summaryNode, ev) {
+  if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
+  for (const node of summaryNode.querySelectorAll(".summary-timestamp")) {
+    node.remove();
+  }
+  const timestampHighlights = getEventTimestampHighlights(ev);
+  if (timestampHighlights.length <= 0) return;
+  const timestampSpan = document.createElement("span");
+  timestampSpan.className = "summary-timestamp";
+  timestampSpan.textContent = `ts×${timestampHighlights.length}`;
+  timestampSpan.title = summarizeTimestampHighlights(timestampHighlights);
+  const tail = summaryNode.querySelector(".summary-tail");
+  if (tail) {
+    summaryNode.insertBefore(timestampSpan, tail);
+  } else {
+    summaryNode.appendChild(timestampSpan);
+  }
+}
+
+function shortenText(text, maxLen = 120) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLen) return normalized;
+  return `${normalized.slice(0, maxLen - 3)}...`;
+}
+
+function trimDumpScrollCache() {
+  while (state.dumpScrollLeft.size > DUMP_SCROLL_CACHE_MAX) {
+    const oldestKey = state.dumpScrollLeft.keys().next().value;
+    if (!oldestKey) break;
+    state.dumpScrollLeft.delete(oldestKey);
+  }
+}
+
+function makeDumpScrollKey(eventId, toneClass, title) {
+  const ev = String(eventId || "").trim();
+  const tone = String(toneClass || "").trim();
+  const label = String(title || "").trim();
+  return `${ev}|${tone || label || "dump"}`;
+}
+
+function rememberDumpScrollNode(node) {
+  if (!node || typeof node !== "object") return;
+  const key = String(node.dataset.scrollKey || "").trim();
+  if (!key) return;
+  const left = Number(node.scrollLeft || 0);
+  if (!Number.isFinite(left) || left <= 0) {
+    state.dumpScrollLeft.delete(key);
+    return;
+  }
+  state.dumpScrollLeft.set(key, left);
+  trimDumpScrollCache();
+}
+
+function snapshotDumpScrollPositions(root = el.events) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  for (const node of root.querySelectorAll(".hex-shell[data-scroll-key]")) {
+    rememberDumpScrollNode(node);
+  }
+}
+
+function restoreDumpScrollNode(node) {
+  if (!node || typeof node !== "object") return;
+  const key = String(node.dataset.scrollKey || "").trim();
+  if (!key || !state.dumpScrollLeft.has(key)) return;
+  const savedLeft = Number(state.dumpScrollLeft.get(key) || 0);
+  if (!Number.isFinite(savedLeft) || savedLeft <= 0) return;
+  const apply = () => {
+    node.scrollLeft = savedLeft;
+  };
+  apply();
+  requestAnimationFrame(apply);
+}
+
+function restoreDumpScrollPositions(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  for (const node of root.querySelectorAll(".hex-shell[data-scroll-key]")) {
+    restoreDumpScrollNode(node);
+  }
+}
+
+function attachDumpScrollPersistence(node, key) {
+  if (!node || typeof node !== "object") return;
+  node.dataset.scrollKey = String(key || "");
+  node.addEventListener(
+    "scroll",
+    () => {
+      rememberDumpScrollNode(node);
+    },
+    { passive: true }
+  );
+}
+
+function inferStringKind(text) {
+  const normalized = String(text || "").trim();
+  const lower = normalized.toLowerCase();
+  if (/^\d{10,24}$/.test(normalized)) return "account";
+  if (/[\u3400-\u9fff]/u.test(normalized)) return "utf8-cjk";
+  if (/[^\u0000-\u007f]/.test(normalized)) return "utf8";
+  if (/^[A-Za-z0-9+/_-]{12,}={0,2}$/.test(normalized)) return "base64";
+  if (normalized.startsWith("com.") || normalized.split(".").length >= 3) return "bundle";
+  if (normalized.includes("/") || lower.includes(".dylib") || lower.includes("springboard")) return "path";
+  if (normalized.includes(":") && normalized.includes(";")) return "kv";
+  if (normalized.includes(":") && normalized.length <= 64) return "field";
+  return "ascii";
+}
+
+function normalizeVisibleText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function decodeUtf8Strict(byteValues) {
+  if (!UTF8_DECODER_FATAL || !Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  try {
+    return UTF8_DECODER_FATAL.decode(new Uint8Array(byteValues));
+  } catch {
+    return "";
+  }
+}
+
+function looksMeaningfulText(text, minChars = 2, requireNonAscii = false) {
+  const normalized = normalizeVisibleText(text);
+  if (normalized.length < minChars || normalized.includes("\ufffd")) return false;
+
+  const chars = Array.from(normalized);
+  if (chars.length < minChars) return false;
+
+  let visible = 0;
+  let nonAscii = 0;
+  let alphaNum = 0;
+  let cjk = 0;
+  for (const ch of chars) {
+    const code = ch.codePointAt(0) || 0;
+    if (code < 32 || (code >= 127 && code <= 159)) continue;
+    visible += 1;
+    if (code >= 32 && code < 127) {
+      if (
+        (code >= 48 && code <= 57) ||
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122)
+      ) {
+        alphaNum += 1;
+      }
+    } else {
+      nonAscii += 1;
+      if ((code >= 0x3400 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff)) {
+        cjk += 1;
+      }
+    }
+  }
+  if (visible < minChars) return false;
+  if (requireNonAscii && nonAscii <= 0) return false;
+  if (cjk >= 2) return true;
+  if (cjk === 1) return false;
+  if (alphaNum >= Math.max(3, minChars - 1)) return true;
+  if (nonAscii >= 3 && chars.length >= Math.max(4, minChars)) return true;
+  return false;
+}
+
+function isUtf8ContinuationByte(byte) {
+  return byte >= 0x80 && byte <= 0xbf;
+}
+
+function readUtf8Span(byteValues, offset) {
+  if (!Array.isArray(byteValues) || offset < 0 || offset >= byteValues.length) return 0;
+  const b0 = byteValues[offset] & 0xff;
+  if (b0 >= 32 && b0 < 127) return 1;
+  if (b0 < 0xc2) return 0;
+
+  if (b0 <= 0xdf) {
+    if (offset + 1 >= byteValues.length) return 0;
+    return isUtf8ContinuationByte(byteValues[offset + 1] & 0xff) ? 2 : 0;
+  }
+
+  if (b0 <= 0xef) {
+    if (offset + 2 >= byteValues.length) return 0;
+    const b1 = byteValues[offset + 1] & 0xff;
+    const b2 = byteValues[offset + 2] & 0xff;
+    if (!isUtf8ContinuationByte(b1) || !isUtf8ContinuationByte(b2)) return 0;
+    if (b0 === 0xe0 && b1 < 0xa0) return 0;
+    if (b0 === 0xed && b1 >= 0xa0) return 0;
+    return 3;
+  }
+
+  if (b0 <= 0xf4) {
+    if (offset + 3 >= byteValues.length) return 0;
+    const b1 = byteValues[offset + 1] & 0xff;
+    const b2 = byteValues[offset + 2] & 0xff;
+    const b3 = byteValues[offset + 3] & 0xff;
+    if (!isUtf8ContinuationByte(b1) || !isUtf8ContinuationByte(b2) || !isUtf8ContinuationByte(b3)) return 0;
+    if (b0 === 0xf0 && b1 < 0x90) return 0;
+    if (b0 === 0xf4 && b1 >= 0x90) return 0;
+    return 4;
+  }
+
+  return 0;
+}
+
+function extractUtf8Runs(byteValues, minChars = ANALYSIS_UTF8_MIN_CHARS, maxItems = ANALYSIS_UTF8_MAX_ITEMS) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const out = [];
+  const seen = new Set();
+
+  for (let i = 0; i < byteValues.length && out.length < maxItems; ) {
+    const firstSpan = readUtf8Span(byteValues, i);
+    if (firstSpan <= 1) {
+      i += 1;
+      continue;
+    }
+
+    let end = i;
+    let hasMultiByte = false;
+    while (end < byteValues.length) {
+      const span = readUtf8Span(byteValues, end);
+      if (span <= 0) break;
+      if (span > 1) hasMultiByte = true;
+      end += span;
+    }
+    if (!hasMultiByte || end <= i) {
+      i += 1;
+      continue;
+    }
+
+    const text = normalizeVisibleText(decodeUtf8Strict(byteValues.slice(i, end)));
+    if (looksMeaningfulText(text, minChars, true)) {
+      const item = {
+        off: i,
+        text: shortenText(text, 96),
+        kind: inferStringKind(text),
+      };
+      const key = `${item.off}|${item.kind}|${item.text}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(item);
+      }
+    }
+    i = end > i ? end : i + 1;
+  }
+  return out;
+}
+
+function normalizeBase64Candidate(text) {
+  const compact = String(text || "").replace(/\s+/g, "");
+  if (compact.length < 8) return "";
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(compact)) return "";
+  const noPadding = compact.replace(/=+$/, "");
+  if (noPadding.length < 8 || noPadding.length % 4 === 1) return "";
+  const standard = compact.replace(/-/g, "+").replace(/_/g, "/");
+  const padNeeded = (4 - (standard.length % 4)) % 4;
+  return `${standard}${"=".repeat(padNeeded)}`;
+}
+
+function describeDecodedBytes(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
+
+  const utf8Text = normalizeVisibleText(decodeUtf8Strict(byteValues));
+  if (looksMeaningfulText(utf8Text, 3, false)) {
+    return {
+      text: shortenText(utf8Text, 96),
+      kind: inferStringKind(utf8Text),
+    };
+  }
+
+  const utf8Runs = extractUtf8Runs(byteValues, 2, 1);
+  if (utf8Runs.length > 0) {
+    return {
+      text: shortenText(utf8Runs[0].text, 96),
+      kind: utf8Runs[0].kind || "utf8",
+    };
+  }
+
+  const asciiRuns = extractPrintableRuns(byteValues, 4, 3);
+  if (asciiRuns.length > 0) {
+    const joined = shortenText(asciiRuns.map((item) => item.text).join(" | "), 96);
+    return {
+      text: joined,
+      kind: inferStringKind(joined),
+    };
+  }
+
+  return null;
+}
+
+function extractBase64DecodedRuns(byteValues, maxItems = ANALYSIS_BASE64_MAX_ITEMS) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const asciiRuns = extractPrintableRuns(byteValues, 8, 24);
+  const out = [];
+  const seen = new Set();
+  const tokenRe = /[A-Za-z0-9+/_-]{8,}={0,2}/g;
+
+  for (const run of asciiRuns) {
+    const matches = String(run.text || "").matchAll(tokenRe);
+    for (const match of matches) {
+      const token = String(match[0] || "").trim();
+      const normalized = normalizeBase64Candidate(token);
+      if (!normalized) continue;
+
+      const decodedBytes = b64ToBytesLimited(normalized, ANALYSIS_BASE64_MAX_BYTES);
+      if (!Array.isArray(decodedBytes) || decodedBytes.length < 4) continue;
+
+      const decoded = describeDecodedBytes(decodedBytes);
+      if (!decoded || !String(decoded.text || "").trim()) continue;
+
+      const off = Number(run.off || 0) + Number(match.index || 0);
+      const rendered = `${decoded.text} <= ${shortenText(token, 44)}`;
+      const kind =
+        decoded.kind && String(decoded.kind).startsWith("utf8") ? "base64→utf8" : "base64→ascii";
+      const key = `${off}|${rendered}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        off,
+        text: rendered,
+        kind,
+      });
+      if (out.length >= maxItems) return out;
+    }
+  }
+
+  return out;
+}
+
+function extractPrintableRuns(byteValues, minLen = ANALYSIS_ASCII_MIN_LEN, maxItems = ANALYSIS_ASCII_MAX_ITEMS) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const out = [];
+  let start = -1;
+  let chars = [];
+  const flush = () => {
+    if (start >= 0 && chars.length >= minLen) {
+      const refined = trimPrintableRunPrefix(start, chars.join(""), minLen);
+      if (String(refined.text || "").length >= minLen) {
+        out.push(refined);
+      }
+    }
+    start = -1;
+    chars = [];
+  };
+  for (let i = 0; i < byteValues.length; i++) {
+    const byte = byteValues[i];
+    if (byte >= 32 && byte < 127) {
+      if (start < 0) start = i;
+      chars.push(String.fromCharCode(byte));
+    } else {
+      flush();
+    }
+  }
+  flush();
+
+  const unique = [];
+  const seen = new Set();
+  for (const item of out) {
+    const text = shortenText(item.text, 96);
+    const key = `${item.off}|${text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({
+      off: item.off,
+      text,
+      kind: item.kind,
+    });
+    if (unique.length >= maxItems) break;
+  }
+  return unique;
+}
+
+function parseTssSummary(summaryText) {
+  const raw = String(summaryText || "").trim();
+  if (!raw) return null;
+  const meta = {
+    raw,
+    code: null,
+    role: "",
+    hint: "",
+    family: "",
+    slot: "",
+    sliceOffset: null,
+    beforedumpLen: null,
+    score: "",
+    referenceLevel: "",
+    lead: "",
+    xor: null,
+  };
+  const readValue = (key) => {
+    const match = raw.match(new RegExp(`${key}=([^\\s)]+)`));
+    return match ? match[1] : "";
+  };
+  meta.code = readValue("code") || "";
+  meta.role = readValue("role") || "";
+  meta.hint = readValue("hint") || "";
+  meta.family = readValue("family") || "";
+  meta.slot = readValue("slot") || "";
+  const sliceText = readValue("slice");
+  if (sliceText && /^0x[0-9a-f]+$/i.test(sliceText)) {
+    meta.sliceOffset = Number.parseInt(sliceText, 16);
+  }
+  const beforedumpText = readValue("beforedump");
+  if (/^\d+$/.test(beforedumpText)) {
+    meta.beforedumpLen = Number.parseInt(beforedumpText, 10);
+  }
+  meta.score = readValue("score") || "";
+  meta.referenceLevel = readValue("ref") || "";
+  meta.lead = readValue("lead") || "";
+  const xorMatch = raw.match(/xor\((.+)\)$/);
+  if (xorMatch) {
+    const xorRaw = xorMatch[1] || "";
+    const keyMatch = xorRaw.match(/key=(0x[0-9a-f]+)/i);
+    const typeMatch = xorRaw.match(/type=(0x[0-9a-f]+)/i);
+    const previewMatch = xorRaw.match(/preview=(.+)$/i);
+    meta.xor = {
+      key: keyMatch ? keyMatch[1] : "",
+      type: typeMatch ? typeMatch[1] : "",
+      preview: previewMatch ? previewMatch[1].trim() : "",
+    };
+  }
+  return meta;
+}
+
+function printableStats(byteValues) {
+  const printable = [];
+  let alpha = 0;
+  let digit = 0;
+  let slashCount = 0;
+  let dotCount = 0;
+  let spaceCount = 0;
+  for (const byte of byteValues) {
+    if (byte < 32 || byte >= 127) continue;
+    printable.push(byte);
+    const ch = String.fromCharCode(byte);
+    if ((byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)) alpha += 1;
+    if (byte >= 48 && byte <= 57) digit += 1;
+    if (ch === "/") slashCount += 1;
+    if (ch === ".") dotCount += 1;
+    if (ch === " ") spaceCount += 1;
+  }
+  let maxRun = 0;
+  let curRun = 0;
+  let prev = -1;
+  for (const byte of printable) {
+    if (byte === prev) {
+      curRun += 1;
+    } else {
+      curRun = 1;
+      prev = byte;
+    }
+    if (curRun > maxRun) maxRun = curRun;
+  }
+  return {
+    printable: printable.length,
+    alpha,
+    digit,
+    slashCount,
+    dotCount,
+    spaceCount,
+    uniquePrintables: new Set(printable).size,
+    maxRun,
+  };
+}
+
+function buildAsciiPreview(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  let out = "";
+  for (const byte of byteValues) {
+    out += byte >= 32 && byte < 127 ? String.fromCharCode(byte) : ".";
+  }
+  return out;
+}
+
+function formatHexBytePreview(byteValues, limit = 16) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const max = Math.max(1, Number(limit || 16));
+  return byteValues
+    .slice(0, max)
+    .map((byte) => (byte & 0xff).toString(16).padStart(2, "0"))
+    .join(" ");
+}
+
+function formatHexSignature(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const head = formatHexBytePreview(byteValues, 16);
+  const tail = byteValues.length > 24 ? formatHexBytePreview(byteValues.slice(-8), 8) : "";
+  return tail ? `head=${head} tail=${tail}` : `head=${head}`;
+}
+
+function xorByteValues(byteValues, key) {
+  const xorKey = Number(key || 0) & 0xff;
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  return byteValues.map((byte) => (byte ^ xorKey) & 0xff);
+}
+
+function summarizeFixedXorSegment(byteValues, key = 0xb6, baseOff = 0, label = "") {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const decoded = xorByteValues(byteValues, key);
+  const extracted = extractPrintableRuns(decoded, 3, 5);
+  const runs = extracted
+    .map((item) => `${formatHexValue(Number(baseOff || 0) + Number(item.off || 0))}:${shortenText(item.text, 48)}`)
+    .filter(Boolean);
+  if (runs.length <= 0) return "";
+  const score = extracted.reduce((total, item) => total + String(item.text || "").length, 0);
+  return JSON.stringify({
+    label,
+    key,
+    score,
+    text: `key=${formatHexValue(key, 2)}${label ? ` base=${label}` : ""} ${runs.join(" | ")}`,
+  });
+}
+
+function summarizeFixedXor(record, reportCode, key = 0xb6) {
+  if (!Array.isArray(record) || record.length <= 0) return "";
+  const candidates = [];
+  if (Number(reportCode) === 0x0102000a && record.length > 36) {
+    candidates.push(summarizeFixedXorSegment(record.slice(36), key, 36, "body16"));
+    candidates.push(summarizeFixedXorSegment(record.slice(32), key, 32, "body12"));
+    candidates.push(summarizeFixedXorSegment(record.slice(20), key, 20, "payload"));
+  }
+  candidates.push(summarizeFixedXorSegment(record, key, 0, "record"));
+  let best = null;
+  for (const raw of candidates) {
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!best || Number(parsed.score || 0) > Number(best.score || 0)) {
+        best = parsed;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return best ? String(best.text || "") : "";
+}
+
+function scoreXorCandidate(decodedBytes, runs) {
+  const stats = printableStats(decodedBytes);
+  const lowerText = buildAsciiPreview(decodedBytes).toLowerCase();
+  const keywordHits = XOR_TEXT_KEYWORDS.filter((token) => lowerText.includes(token));
+
+  let score = stats.printable;
+  score += stats.alpha * 2;
+  score += stats.digit;
+  score += stats.slashCount;
+  score += stats.dotCount * 2;
+  score += stats.spaceCount;
+  score += stats.uniquePrintables * 2;
+  score += keywordHits.length * 30;
+  if (stats.alpha < 8) {
+    score -= stats.slashCount * 4;
+    score -= stats.dotCount * 2;
+    score -= stats.spaceCount;
+  }
+  if (stats.maxRun > 8) {
+    score -= (stats.maxRun - 8) * 6;
+  }
+  if (stats.uniquePrintables < 6) {
+    score -= (6 - stats.uniquePrintables) * 10;
+  }
+  if (stats.alpha === 0 && keywordHits.length === 0) {
+    score -= 80;
+  }
+  const longestRunLen = runs.reduce((maxLen, item) => Math.max(maxLen, String(item.text || "").length), 0);
+  const bestRunUnique = runs.reduce((maxLen, item) => Math.max(maxLen, new Set(String(item.text || "")).size), 0);
+  return {
+    score,
+    keywordHits,
+    stats,
+    longestRunLen,
+    bestRunUnique,
+  };
+}
+
+function pickBestSingleByteXor(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
+  let best = null;
+  const isBetterRank = (left, right) => {
+    for (let i = 0; i < left.length; i++) {
+      const a = Number(left[i] || 0);
+      const b = Number(right[i] || 0);
+      if (a > b) return true;
+      if (a < b) return false;
+    }
+    return false;
+  };
+  for (let key = 0; key < 256; key++) {
+    const decoded = byteValues.map((byte) => byte ^ key);
+    const runs = extractPrintableRuns(decoded, 3, 6);
+    if (runs.length <= 0) continue;
+    const scored = scoreXorCandidate(decoded, runs);
+    const candidate = {
+      key,
+      runs,
+      decoded,
+      ...scored,
+    };
+    if (!best) {
+      best = candidate;
+      continue;
+    }
+    const rank = [
+      candidate.score,
+      candidate.keywordHits.length,
+      candidate.longestRunLen,
+      candidate.bestRunUnique,
+      candidate.stats.alpha,
+      candidate.stats.uniquePrintables,
+    ];
+    const bestRank = [
+      best.score,
+      best.keywordHits.length,
+      best.longestRunLen,
+      best.bestRunUnique,
+      best.stats.alpha,
+      best.stats.uniquePrintables,
+    ];
+    if (isBetterRank(rank, bestRank)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function analyzeDecodedSliceXor(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length < 36) return null;
+  const recType = readBe16(byteValues, 6);
+  const subcode = readBe16(byteValues, 8);
+  if (recType !== 0x0102 || subcode !== 0x000a) {
+    return null;
+  }
+
+  const payload = byteValues.slice(20, 20 + ANALYSIS_XOR_SCAN_MAX_BYTES);
+  if (payload.length < 16) return null;
+
+  const baseInfo = {
+    recType,
+    subcode,
+    innerLen: readBe16(payload, 0),
+    innerType: readBe16(payload, 2),
+    innerConst1: readBe32(payload, 4),
+    innerConst2: readBe32(payload, 8),
+    innerField: readBe32(payload, 12),
+  };
+
+  let bestChoice = null;
+  for (const bodyRelOff of [12, 16]) {
+    if (payload.length <= bodyRelOff) continue;
+    const best = pickBestSingleByteXor(payload.slice(bodyRelOff));
+    if (!best) continue;
+    let adjustedScore = best.score;
+    if (best.keywordHits.length > 0) adjustedScore += 40;
+    if (best.stats.alpha >= 12 && best.stats.uniquePrintables >= 10) adjustedScore += 20;
+    if (best.stats.maxRun > 8) adjustedScore -= 20;
+    const candidate = {
+      bodyRelOff,
+      adjustedScore,
+      best,
+    };
+    if (!bestChoice) {
+      bestChoice = candidate;
+      continue;
+    }
+    if (
+      candidate.adjustedScore > bestChoice.adjustedScore ||
+      (candidate.adjustedScore === bestChoice.adjustedScore && candidate.bodyRelOff > bestChoice.bodyRelOff)
+    ) {
+      bestChoice = candidate;
+    }
+  }
+  if (!bestChoice) return null;
+
+  const bodyOff = 20 + bestChoice.bodyRelOff;
+  const runs = bestChoice.best.runs.map((item) => ({
+    off: bodyOff + Number(item.off || 0),
+    text: shortenText(item.text, 96),
+    kind: inferStringKind(item.text),
+  }));
+  return {
+    ...baseInfo,
+    bodyOff,
+    key: bestChoice.best.key,
+    score: bestChoice.best.score,
+    preview: shortenText(runs.map((item) => item.text).join(" | "), 120),
+    keywordHits: bestChoice.best.keywordHits,
+    runs,
+  };
+}
+
+function isLikelyTssReportCode(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return false;
+  const family = (num >>> 16) & 0xffff;
+  return family === 0x010a || family === 0x0102 || family === 0x0112;
+}
+
+function detectTssReport(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length < 4) return null;
+  for (const offset of [6, 0, 3]) {
+    const value = readBe32(byteValues, offset);
+    if (isLikelyTssReportCode(value)) {
+      return { value, offset };
+    }
+  }
+  return null;
+}
+
+function reportName(reportCode) {
+  const value = Number(reportCode);
+  const names = {
+    0x010a001b: "container",
+    0x010a0011: "response-linked",
+    0x0102000a: "leaf",
+  };
+  if (names[value]) return names[value];
+  const family = (value >>> 16) & 0xffff;
+  if (family === 0x0112) return "metadata";
+  if (family === 0x010a) return "container/meta";
+  if (family === 0x0102) return "leaf";
+  return "record";
+}
+
+function classifyRecordBytes(byteValues, reportCode) {
+  const report = Number(reportCode);
+  if (report === 0x010a0011) return "protected-response-linked";
+  if (report === 0x010a001b) return "container";
+  if (report === 0x0102000a) {
+    const runs = extractPrintableRuns(byteValues, 4, 2);
+    return runs.length > 0 ? "text/binary-leaf" : "binary-like-leaf";
+  }
+  if (((report >>> 16) & 0xffff) === 0x0112) return "structured-metadata";
+  return reportName(report);
+}
+
+function formatRecordValuePreview(byteValues, reportCode) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const runs = extractPrintableRuns(byteValues, 3, 4);
+  const text = runs
+    .map((item) => String(item.text || "").trim())
+    .filter(Boolean)
+    .join(" | ");
+  if (text) return shortenText(text, 180);
+  if (Number(reportCode) === 0x0102000a) {
+    const report = detectTssReport(byteValues);
+    if (report && report.offset !== 6) {
+      const padded = [0, 0, 0, 1, 0, byteValues.length & 0xff, ...byteValues];
+      const xor = analyzeDecodedSliceXor(padded);
+      if (xor && xor.preview) return `xor:${xor.preview}`;
+    }
+    const xor = analyzeDecodedSliceXor(byteValues);
+    if (xor && xor.preview) return `xor:${xor.preview}`;
+  }
+  return "";
+}
+
+function isBinaryLikeLeafRecord(record, reportCode) {
+  return Number(reportCode) === 0x0102000a && classifyRecordBytes(record, reportCode) === "binary-like-leaf";
+}
+
+function summarizeBinaryLikeChildren(children) {
+  const binaryChildren = (Array.isArray(children) ? children : []).filter(
+    (child) => !child.truncated && child.className === "binary-like-leaf"
+  );
+  if (binaryChildren.length <= 0) return "";
+  const byLen = new Map();
+  const byReport = new Map();
+  const signatures = [];
+  for (const child of binaryChildren) {
+    const len = Number(child.len || 0);
+    byLen.set(len, (byLen.get(len) || 0) + 1);
+    const reportText = child.reportCode !== null ? formatHexValue(child.reportCode, 8) : "-";
+    byReport.set(reportText, (byReport.get(reportText) || 0) + 1);
+    const sig = String(child.hexSignature || "").replace(/^head=/, "");
+    if (sig && signatures.length < 4) {
+      signatures.push(`child[${child.index}]:${sig}`);
+    }
+  }
+  const lenText = Array.from(byLen.entries())
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([len, count]) => `${len}x${count}`)
+    .join(",");
+  const reportText = Array.from(byReport.entries())
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .map(([report, count]) => `${report}x${count}`)
+    .join(",");
+  const sigText = signatures.length > 0 ? ` sig=${signatures.join(" ; ")}` : "";
+  return `binary_like_stats count=${binaryChildren.length} lengths=${lenText} reports=${reportText}${sigText}`;
+}
+
+function childRecordIdOffset(record, report) {
+  if (!report || !Array.isArray(record)) return 10;
+  return Number(report.offset || 0) + 4;
+}
+
+function extractTimestampCandidatesFromText(text) {
+  const matches = String(text || "").match(/\b1[5-9]\d{8}(?:\d{3})?\b/g) || [];
+  const unique = [];
+  const seen = new Set();
+  for (const raw of matches) {
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    unique.push(raw);
+    if (unique.length >= 6) break;
+  }
+  return unique;
+}
+
+function extractTimestampCandidatesFromRecord(record) {
+  if (!Array.isArray(record) || record.length === 0) return [];
+  const text = extractPrintableRuns(record, 3, 64)
+    .map((run) => String(run && run.text ? run.text : ""))
+    .join(" ");
+  return extractTimestampCandidatesFromText(text);
+}
+
+function parseTssChildrenAt(byteValues, startOffset, maxChildren = 256) {
+  const children = [];
+  let offset = Number(startOffset || 0);
+  for (let index = 0; index < maxChildren && offset < byteValues.length; index += 1) {
+    if (offset + 4 > byteValues.length) {
+      break;
+    }
+    let childLen = readLe32(byteValues, offset);
+    let lengthEndian = "le";
+    if (!Number.isFinite(childLen) || childLen <= 0 || offset + 4 + childLen > byteValues.length) {
+      const beLen = readBe32(byteValues, offset);
+      if (Number.isFinite(beLen) && beLen > 0 && offset + 4 + beLen <= byteValues.length) {
+        childLen = beLen;
+        lengthEndian = "be";
+      }
+    }
+    if (!Number.isFinite(childLen) || childLen <= 0 || offset + 4 + childLen > byteValues.length) {
+      break;
+    }
+    const record = byteValues.slice(offset + 4, offset + 4 + childLen);
+    const report = detectTssReport(record);
+    if (!report || !isLikelyTssReportCode(report.value)) {
+      break;
+    }
+    const reportCode = report.value;
+    const idValue = readBe32(record, childRecordIdOffset(record, report));
+    const valuePreview = formatRecordValuePreview(record, reportCode);
+    const className = classifyRecordBytes(record, reportCode);
+    const timestampCandidates = extractTimestampCandidatesFromRecord(record);
+    children.push({
+      index,
+      offset,
+      len: childLen,
+      lengthEndian,
+      reportCode,
+      reportOffset: report ? report.offset : -1,
+      idValue,
+      className,
+      valuePreview,
+      timestampCandidates,
+      hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
+      xorB6Preview: className === "binary-like-leaf" ? summarizeFixedXor(record, reportCode, 0xb6) : "",
+    });
+    offset += 4 + childLen;
+  }
+  return {
+    children,
+    consumed: offset - Number(startOffset || 0),
+    complete: children.length > 0 && offset === byteValues.length,
+  };
+}
+
+function parseTssChildRecords(byteValues) {
+  const root = detectTssReport(byteValues);
+  if (!root || root.value !== 0x010a001b || byteValues.length < 28) {
+    return { root, children: [] };
+  }
+  const childCount = readLe32(byteValues, 20);
+  const legacy = parseTssChildrenAt(byteValues, 16);
+  const compactCount = Number(byteValues[20]);
+  const compactCounted =
+    Number.isFinite(compactCount) && compactCount > 0 && compactCount <= 256
+      ? parseTssChildrenAt(byteValues, 21, compactCount)
+      : { children: [], complete: false };
+  if (compactCounted.children.length === compactCount) {
+    return { root, children: compactCounted.children, layout: "compact-count-u8" };
+  }
+  if (!Number.isFinite(childCount) || childCount < 0 || childCount > 256) {
+    if (compactCounted.children.length > 0) {
+      return { root, children: compactCounted.children, layout: "compact-count-u8-partial" };
+    }
+    return legacy.children.length > 0 ? { root, children: legacy.children, layout: "legacy-no-count" } : { root, children: [] };
+  }
+  if (childCount === 0 && legacy.children.length > 0) {
+    return { root, children: legacy.children, layout: "legacy-no-count" };
+  }
+
+  const children = [];
+  let offset = 24;
+  for (let index = 0; index < childCount; index += 1) {
+    if (offset + 4 > byteValues.length) {
+      children.push({ index, offset, truncated: true, reason: "missing child length" });
+      break;
+    }
+    let childLen = readLe32(byteValues, offset);
+    let lengthEndian = "le";
+    if (!Number.isFinite(childLen) || childLen < 0 || offset + 4 + childLen > byteValues.length) {
+      const beLen = readBe32(byteValues, offset);
+      if (Number.isFinite(beLen) && beLen >= 0 && offset + 4 + beLen <= byteValues.length) {
+        childLen = beLen;
+        lengthEndian = "be";
+      }
+    }
+    if (!Number.isFinite(childLen) || childLen < 0 || offset + 4 + childLen > byteValues.length) {
+      children.push({ index, offset, truncated: true, reason: `bad child length ${childLen}` });
+      break;
+    }
+    const record = byteValues.slice(offset + 4, offset + 4 + childLen);
+    const report = detectTssReport(record);
+    const reportCode = report ? report.value : null;
+    const idValue = readBe32(record, childRecordIdOffset(record, report));
+    const valuePreview = formatRecordValuePreview(record, reportCode);
+    const className = classifyRecordBytes(record, reportCode);
+    const timestampCandidates = extractTimestampCandidatesFromRecord(record);
+    children.push({
+      index,
+      offset,
+      len: childLen,
+      lengthEndian,
+      reportCode,
+      reportOffset: report ? report.offset : -1,
+      idValue,
+      className,
+      valuePreview,
+      timestampCandidates,
+      hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
+      xorB6Preview: className === "binary-like-leaf" ? summarizeFixedXor(record, reportCode, 0xb6) : "",
+    });
+    offset += 4 + childLen;
+  }
+  if (children.length === 0 && legacy.children.length > 0) {
+    return { root, children: legacy.children, layout: "legacy-no-count" };
+  }
+  return { root, children, layout: "counted" };
+}
+
+function parseLibrarySameLengthExamples(summaryText) {
+  const raw = String(summaryText || "");
+  const match = raw.match(/\bex=([^\s]+)/);
+  if (!match) return new Map();
+  const out = new Map();
+  for (const item of String(match[1] || "").split("|")) {
+    const parts = item.split(":");
+    if (parts.length < 5) continue;
+    const nodePath = `${parts[0]}:${parts[1]}`;
+    const countText = parts[4] || "";
+    const countMatch = countText.match(/^n(\d+)$/i);
+    if (!countMatch) continue;
+    out.set(nodePath, Number(countMatch[1]));
+  }
+  return out;
+}
+
+function buildTssTreeText(base64Text, options = {}) {
+  const byteValues = b64ToBytes(base64Text);
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const sameLenExamples =
+    options && options.sameLenExamples instanceof Map ? options.sameLenExamples : new Map();
+  const parsed = parseTssChildRecords(byteValues);
+  const root = parsed.root || detectTssReport(byteValues);
+  if (!root) return "";
+
+  const lines = [];
+  lines.push(`root report=${formatHexValue(root.value, 8)} type=${reportName(root.value)} len=${byteValues.length}`);
+  if (root.value !== 0x010a001b) {
+    const idValue = readBe32(byteValues, childRecordIdOffset(byteValues, root));
+    const preview = formatRecordValuePreview(byteValues, root.value);
+    const timestampCandidates = extractTimestampCandidatesFromRecord(byteValues);
+    lines.push(
+      `  node[0] report=${formatHexValue(root.value, 8)} type=${classifyRecordBytes(byteValues, root.value)} len=${byteValues.length}` +
+        (Number.isFinite(idValue) ? ` id=${formatHexValue(idValue, 4)}` : "") +
+        (timestampCandidates.length > 0 ? ` timestamps=${timestampCandidates.join(",")}` : "")
+    );
+    if (preview) lines.push(`    value=${preview}`);
+    return lines.join("\n");
+  }
+
+  lines.push(`child_count=${parsed.children.length}${parsed.layout ? ` layout=${parsed.layout}` : ""}`);
+  const binaryStats = summarizeBinaryLikeChildren(parsed.children);
+  if (binaryStats) {
+    lines.push(binaryStats);
+  }
+  for (const child of parsed.children) {
+    if (child.truncated) {
+      lines.push(`  child[${child.index}] off=${formatHexValue(child.offset)} truncated reason=${child.reason || "-"}`);
+      continue;
+    }
+    const reportText = child.reportCode !== null ? formatHexValue(child.reportCode, 8) : "-";
+    const idText = Number.isFinite(child.idValue) ? ` id=${formatHexValue(child.idValue, 4)}` : "";
+    const keepText = child.reportCode === 0x010a0011 ? " keep=target" : "";
+    const tsText = Array.isArray(child.timestampCandidates) && child.timestampCandidates.length > 0
+      ? ` timestamps=${child.timestampCandidates.join(",")}`
+      : "";
+    const sameLenCount = sameLenExamples.get(`child:${child.index}`);
+    const sameLenText = Number.isFinite(sameLenCount) ? ` lib_same_len=${sameLenCount}` : "";
+    lines.push(
+      `  child[${child.index}] off=${formatHexValue(child.offset)} report=${reportText} type=${child.className} len=${child.len}${idText}${keepText}${tsText}${sameLenText}`
+    );
+    if (child.valuePreview) {
+      lines.push(`    value=${child.valuePreview}`);
+    }
+    if (child.hexSignature) {
+      lines.push(`    hex_sig=${child.hexSignature}`);
+    }
+    if (child.xorB6Preview) {
+      lines.push(`    xor_b6=${child.xorB6Preview}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function renderTssTreeHtml(treeText) {
+  return String(treeText || "")
+    .split("\n")
+    .map((line) => {
+      const escaped = escapeHtml(line);
+      return escaped.replace(
+        /(root|child_count|binary_like_stats|child\[\d+\]|report=0x[0-9a-f]+|type=[^\s]+|len=\d+|id=0x[0-9a-f]+|keep=target|timestamps=[^\s]+|lib_same_len=\d+|value=.+|hex_sig=.+|xor_b6=.+)/gi,
+        (token) => {
+          let cls = "tree-token";
+          if (/^child\[/i.test(token) || token === "root" || token === "binary_like_stats") cls += " tree-node";
+          else if (/^report=/i.test(token)) cls += " tree-report";
+          else if (/^type=/i.test(token)) cls += " tree-type";
+          else if (/^id=/i.test(token)) cls += " tree-id";
+          else if (/^value=/i.test(token)) cls += " tree-value";
+          else if (/^(hex_sig|xor_b6|timestamps)=/i.test(token)) cls += " tree-value";
+          else if (/^lib_same_len=/i.test(token)) cls += " tree-keep";
+          else if (/^keep=/i.test(token)) cls += " tree-keep";
+          return `<span class="${cls}">${token}</span>`;
+        }
+      );
+    })
+    .join("\n");
+}
+
+function createTssTreeSummary(title, base64Text, extraClass = "", options = {}) {
+  const treeText = buildTssTreeText(base64Text, options);
+  if (!treeText) return null;
+  const shell = document.createElement("div");
+  shell.className = `tree-shell ${extraClass || ""}`.trim();
+  const head = document.createElement("div");
+  head.className = "tree-head";
+  head.textContent = title;
+  const pre = document.createElement("pre");
+  pre.className = "tree-body";
+  pre.innerHTML = renderTssTreeHtml(treeText);
+  shell.appendChild(head);
+  shell.appendChild(pre);
+  return shell;
+}
+
+function appendTssTreeSummary(panel, title, base64Text, options = {}) {
+  const shell = createTssTreeSummary(title, base64Text, "", options);
+  if (!shell) return;
+  panel.appendChild(shell);
+}
+
+function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
+  if (!beforeBase64 && !decodedBase64) return null;
+  const sameLenExamples = parseLibrarySameLengthExamples(summaryText);
+  const row = document.createElement("section");
+  row.className = "tree-compare-row";
+
+  const before = document.createElement("div");
+  before.className = "tree-compare-panel tree-compare-before";
+  const beforeTree = beforeBase64
+    ? createTssTreeSummary("修改前解析 / child tree", beforeBase64, "tree-shell-compare", { sameLenExamples })
+    : null;
+  if (beforeTree) {
+    before.appendChild(beforeTree);
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "dump-empty tree-compare-empty";
+    empty.textContent = "修改前没有可解析 child tree。";
+    before.appendChild(empty);
+  }
+
+  const after = document.createElement("div");
+  after.className = "tree-compare-panel tree-compare-after";
+  const afterTree = decodedBase64
+    ? createTssTreeSummary("修改后/当前解析 / child tree", decodedBase64, "tree-shell-compare", { sameLenExamples })
+    : null;
+  if (afterTree) {
+    after.appendChild(afterTree);
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "dump-empty tree-compare-empty";
+    empty.textContent = "修改后/当前没有可解析 child tree。";
+    after.appendChild(empty);
+  }
+
+  row.appendChild(before);
+  row.appendChild(after);
+  return row;
+}
+
+function getEventAnalysis(ev) {
+  const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
+  if (!summaryText) {
+    return null;
+  }
+  const cacheKey = `${getEventId(ev)}|${String(ev?.summary || "")}|${String(ev?.pay || "").length}|${String(ev?.full_pay || "").length}`;
+  if (ev && ev.__tcpvAnalysisKey === cacheKey && ev.__tcpvAnalysis) {
+    return ev.__tcpvAnalysis;
+  }
+  const decodedBytes = b64ToBytes(String(ev && ev.pay ? ev.pay : ""));
+  const fullBytes = b64ToBytes(String(ev && ev.full_pay ? ev.full_pay : ""));
+  const summary = parseTssSummary(ev && ev.summary ? ev.summary : "");
+  const decodedStrings = extractPrintableRuns(decodedBytes, ANALYSIS_ASCII_MIN_LEN, ANALYSIS_ASCII_MAX_ITEMS);
+  const decodedUtf8Strings = extractUtf8Runs(decodedBytes, ANALYSIS_UTF8_MIN_CHARS, ANALYSIS_UTF8_MAX_ITEMS);
+  const decodedBase64Strings = extractBase64DecodedRuns(decodedBytes, ANALYSIS_BASE64_MAX_ITEMS);
+  const fullStrings =
+    fullBytes.length > 0 && String(ev && ev.full_pay ? ev.full_pay : "") !== String(ev && ev.pay ? ev.pay : "")
+      ? extractPrintableRuns(fullBytes, 6, 6)
+      : [];
+  const fullUtf8Strings =
+    fullBytes.length > 0 && String(ev && ev.full_pay ? ev.full_pay : "") !== String(ev && ev.pay ? ev.pay : "")
+      ? extractUtf8Runs(fullBytes, 2, 4)
+      : [];
+  const xor = analyzeDecodedSliceXor(decodedBytes);
+  if (xor && summary && summary.xor) {
+    if (!xor.preview && summary.xor.preview) xor.preview = summary.xor.preview;
+  }
+  const analysis = {
+    summary,
+    decodedStrings,
+    decodedUtf8Strings,
+    decodedBase64Strings,
+    fullStrings,
+    fullUtf8Strings,
+    xor: xor || (summary && summary.xor ? summary.xor : null),
+  };
+  if (ev && typeof ev === "object") {
+    ev.__tcpvAnalysisKey = cacheKey;
+    ev.__tcpvAnalysis = analysis;
+  }
+  return analysis;
+}
+
+function createAnalysisCard(title, className = "") {
+  const card = document.createElement("section");
+  card.className = `analysis-card ${className}`.trim();
+  const head = document.createElement("div");
+  head.className = "analysis-card-head";
+  head.textContent = title;
+  const body = document.createElement("div");
+  body.className = "analysis-card-body";
+  card.appendChild(head);
+  card.appendChild(body);
+  return { card, body };
+}
+
+function appendAnalysisEmpty(container, text) {
+  const empty = document.createElement("div");
+  empty.className = "analysis-empty";
+  empty.textContent = text;
+  container.appendChild(empty);
+}
+
+function appendAnalysisRows(container, rows) {
+  const list = document.createElement("div");
+  list.className = "analysis-list";
+  for (const row of rows) {
+    if (!row || !String(row.value || "").trim()) continue;
+    const wrap = document.createElement("div");
+    wrap.className = "analysis-row";
+    const label = document.createElement("div");
+    label.className = "analysis-row-label";
+    label.textContent = row.label;
+    const value = document.createElement("div");
+    value.className = "analysis-row-value";
+    value.textContent = String(row.value || "");
+    wrap.appendChild(label);
+    wrap.appendChild(value);
+    list.appendChild(wrap);
+  }
+  if (list.childElementCount > 0) {
+    container.appendChild(list);
+  }
+}
+
+function appendAnalysisSectionTitle(container, text) {
+  const title = document.createElement("div");
+  title.className = "analysis-section-title";
+  title.textContent = text;
+  container.appendChild(title);
+}
+
+function formatAnalysisOffset(off, source = "") {
+  const base = formatHexValue(off);
+  const normalizedSource = String(source || "").trim();
+  if (!normalizedSource) return base;
+  return `${normalizedSource}+${base}`;
+}
+
+function appendAnalysisStringList(container, items, options = {}) {
+  if (!Array.isArray(items) || items.length <= 0) {
+    appendAnalysisEmpty(container, "没有识别到明显的可打印字符串。");
+    return;
+  }
+  const source = String(options.source || "").trim();
+  const list = document.createElement("div");
+  list.className = "analysis-string-list";
+  for (const item of items) {
+    const wrap = document.createElement("div");
+    wrap.className = "analysis-string-item";
+    const off = document.createElement("div");
+    off.className = "analysis-string-off";
+    off.textContent = formatAnalysisOffset(item.off, source);
+    const text = document.createElement("div");
+    text.className = "analysis-string-text";
+    const suffix = item.kind ? ` [${item.kind}]` : "";
+    text.textContent = `${String(item.text || "")}${suffix}`;
+    wrap.appendChild(off);
+    wrap.appendChild(text);
+    list.appendChild(wrap);
+  }
+  container.appendChild(list);
+}
+
+function appendAnalysisHint(container, text) {
+  const note = document.createElement("div");
+  note.className = "analysis-note";
+  note.textContent = text;
+  container.appendChild(note);
+}
+
+function buildEventAnalysisGrid(ev) {
+  const analysis = getEventAnalysis(ev);
+  if (!analysis) return null;
+
+  const grid = document.createElement("div");
+  grid.className = "analysis-grid";
+
+  const metaCard = createAnalysisCard("解密概览", "analysis-card-meta");
+  const metaChips = document.createElement("div");
+  metaChips.className = "analysis-chip-list";
+  const summary = analysis.summary;
+  const metaChipValues = [];
+  if (summary) {
+    if (summary.code) metaChipValues.push(`code ${summary.code}`);
+    if (summary.role) metaChipValues.push(`role ${summary.role}`);
+    if (summary.hint) metaChipValues.push(`hint ${summary.hint}`);
+    if (summary.family) metaChipValues.push(`family ${summary.family}`);
+    if (summary.slot) metaChipValues.push(`slot ${summary.slot}`);
+    if (Number.isFinite(summary.sliceOffset)) metaChipValues.push(`slice ${formatHexValue(summary.sliceOffset)}`);
+    if (Number.isFinite(summary.beforedumpLen)) metaChipValues.push(`len ${summary.beforedumpLen}`);
+    if (summary.score) metaChipValues.push(`score ${summary.score}`);
+    if (summary.referenceLevel) metaChipValues.push(`ref ${summary.referenceLevel}`);
+    if (summary.lead) metaChipValues.push(`lead ${summary.lead}`);
+  }
+  if (metaChipValues.length > 0) {
+    for (const text of metaChipValues) {
+      const chip = document.createElement("span");
+      chip.className = "analysis-chip";
+      chip.textContent = text;
+      metaChips.appendChild(chip);
+    }
+    metaCard.body.appendChild(metaChips);
+  } else {
+    appendAnalysisEmpty(metaCard.body, "当前包没有结构化摘要，仍可直接看下方原始封包和当前解密内容。");
+  }
+  grid.appendChild(metaCard.card);
+
+  const xorCard = createAnalysisCard("XOR / 猜测", "analysis-card-xor");
+  const xor = analysis.xor;
+  if (xor) {
+    appendAnalysisRows(xorCard.body, [
+      { label: "Key", value: xor.key !== undefined && xor.key !== "" ? formatHexValue(xor.key, 2) : String(xor.key || "") },
+      { label: "Type", value: xor.innerType !== undefined ? formatHexValue(xor.innerType, 4) : String(xor.type || "") },
+      { label: "Body", value: xor.bodyOff !== undefined ? formatHexValue(xor.bodyOff) : "" },
+      { label: "Score", value: xor.score !== undefined ? String(xor.score) : "" },
+      { label: "Preview", value: xor.preview || "" },
+      { label: "Keywords", value: Array.isArray(xor.keywordHits) ? xor.keywordHits.join(", ") : "" },
+    ]);
+    if (Array.isArray(xor.runs) && xor.runs.length > 0) {
+      const title = document.createElement("div");
+      title.className = "analysis-section-title";
+      title.textContent = "可打印 XOR 结果";
+      xorCard.body.appendChild(title);
+      appendAnalysisStringList(xorCard.body, xor.runs.slice(0, 6));
+    }
+  } else {
+    appendAnalysisEmpty(xorCard.body, "当前切片没有命中明显的单字节 XOR 文本特征。");
+  }
+  grid.appendChild(xorCard.card);
+
+  return grid;
+}
+
+function buildEventBody(ev, hideAscii, eventId = "") {
   const body = document.createElement("div");
   body.className = "body";
 
@@ -1464,30 +3233,60 @@ function buildEventBody(ev, hideAscii) {
   body.appendChild(meta);
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
+  const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
   const decodedPay = String(ev && ev.pay ? ev.pay : "");
   const hasFullDump = !!fullPay;
+  const hasBeforeDump = !!beforePay;
   const hasDecodedDump = !!decodedPay;
   const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
+  const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
+  const isRequest = Number(ev && ev.dir) === 0;
+  const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
+    ? buildChangedOffsetSet(beforePay, decodedPay)
+    : null;
 
   const dumpGrid = document.createElement("div");
-  dumpGrid.className = "dump-grid";
+  dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
   body.appendChild(dumpGrid);
 
-  function appendDumpSection(title, base64Text, lengthValue, toneClass) {
+  function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
     if (!base64Text) return;
     const panel = document.createElement("section");
     panel.className = `dump-panel ${toneClass || ""}`.trim();
+    const timestampHighlights =
+      sourceKey === "full" ? [] : collectTimestampHighlightsForPayload(base64Text);
+    const timestampSummary = summarizeTimestampHighlights(timestampHighlights);
 
     const sectionTitle = document.createElement("div");
     sectionTitle.className = "dump-label";
-    sectionTitle.textContent = Number.isFinite(Number(lengthValue))
-      ? `${title} [len=${Number(lengthValue)}]`
-      : title;
+    sectionTitle.appendChild(
+      document.createTextNode(
+        Number.isFinite(Number(lengthValue))
+          ? `${title} [len=${Number(lengthValue)}]`
+          : title
+      )
+    );
+    if (timestampHighlights.length > 0) {
+      const timestampChip = document.createElement("span");
+      timestampChip.className = "dump-label-note dump-label-timestamp";
+      timestampChip.textContent = `时间戳×${timestampHighlights.length}`;
+      timestampChip.title = timestampSummary;
+      sectionTitle.appendChild(timestampChip);
+    }
     panel.appendChild(sectionTitle);
 
-    const dump = formatHexDump(base64Text, hideAscii);
+    const annotationIndex = mergeDumpAnnotationIndexes(
+      getDumpAnnotationIndex(ev, sourceKey),
+      buildTimestampAnnotationIndex(timestampHighlights, getBytesPerRow())
+    );
+    const dump = formatHexDump(base64Text, hideAscii, annotationIndex, {
+      compactAscii: sourceKey === "full",
+      changedOffsets: dumpOptions.changedOffsets || null,
+      timestampRanges: timestampHighlights,
+    });
     const hexShell = document.createElement("div");
     hexShell.className = "hex-shell";
+    attachDumpScrollPersistence(hexShell, makeDumpScrollKey(eventId, toneClass, title));
     const hexHead = document.createElement("div");
     hexHead.className = "hex-head";
     hexHead.textContent = dump.header;
@@ -1501,11 +3300,80 @@ function buildEventBody(ev, hideAscii) {
     dumpGrid.appendChild(panel);
   }
 
-  if (hasFullDump && !fullDumpSameAsDecoded) {
-    appendDumpSection("full packet", fullPay, ev.full_len, "dump-panel-full");
-    appendDumpSection("decoded slice", decodedPay, ev.len, "dump-panel-decoded");
+  function appendEmptyDumpSection(title, note, toneClass) {
+    const panel = document.createElement("section");
+    panel.className = `dump-panel dump-panel-empty ${toneClass || ""}`.trim();
+
+    const sectionTitle = document.createElement("div");
+    sectionTitle.className = "dump-label";
+    sectionTitle.textContent = title;
+    panel.appendChild(sectionTitle);
+
+    const empty = document.createElement("div");
+    empty.className = "dump-empty";
+    empty.textContent = note;
+    panel.appendChild(empty);
+    dumpGrid.appendChild(panel);
+  }
+
+  if (isRequest) {
+    if (hasFullDump) {
+      appendDumpSection("原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
+    } else {
+      appendEmptyDumpSection("原始封包 [raw]", "当前事件没有 full_pay，无法显示完整原始封包。", "dump-panel-full");
+    }
+    if (hasBeforeDump) {
+      appendDumpSection("修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
+        changedOffsets: decodedChangedOffsets,
+      });
+    } else {
+      appendEmptyDumpSection(
+        "修改前解密 [before missing]",
+        "当前事件没有 before_pay；通常是未经过仿生改写、旧事件、或该包只记录了当前解密片段。",
+        "dump-panel-before"
+      );
+    }
+    if (hasDecodedDump) {
+      const decodedTitle = hasBeforeDump
+        ? beforeDumpSameAsDecoded
+          ? "修改后解密 [after same]"
+          : "修改后解密 [after]"
+        : "当前解密 [current]";
+      appendDumpSection(
+        decodedTitle,
+        decodedPay,
+        ev.len,
+        "dump-panel-decoded",
+        "decoded",
+        { changedOffsets: decodedChangedOffsets }
+      );
+    } else {
+      appendEmptyDumpSection("修改后解密 [after missing]", "当前事件没有 pay，无法显示修改后/当前解密内容。", "dump-panel-decoded");
+    }
+  } else if (hasFullDump && !fullDumpSameAsDecoded) {
+    appendDumpSection("响应原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
+    appendDumpSection("响应解密 [decoded]", decodedPay, ev.len, "dump-panel-decoded", "decoded");
+  } else if (hasDecodedDump) {
+    appendDumpSection("响应解密 [decoded]", decodedPay, ev.len, "dump-panel-decoded", "decoded");
   } else {
-    appendDumpSection("packet", decodedPay || fullPay, ev.len || ev.full_len, "dump-panel-single");
+    appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
+  }
+
+  if (isRequest && (hasBeforeDump || hasDecodedDump)) {
+    const treeRow = buildTreeCompareRow(beforePay, decodedPay, summaryText);
+    if (treeRow) {
+      body.appendChild(treeRow);
+    }
+  } else if (!isRequest && hasDecodedDump) {
+    const treeRow = buildTreeCompareRow("", decodedPay, summaryText);
+    if (treeRow) {
+      body.appendChild(treeRow);
+    }
+  }
+
+  const analysisGrid = buildEventAnalysisGrid(ev);
+  if (analysisGrid) {
+    body.appendChild(analysisGrid);
   }
 
   return body;
@@ -1522,6 +3390,10 @@ function applyEventPayloadDetail(ev, detail) {
   const fullLen = Number(detail.full_len);
   if (Number.isFinite(fullLen)) ev.full_len = fullLen;
   if (detail.full_pfx !== undefined) ev.full_pfx = String(detail.full_pfx || "");
+  if (detail.before_pay !== undefined) ev.before_pay = String(detail.before_pay || "");
+  const beforeLen = Number(detail.before_len);
+  if (Number.isFinite(beforeLen)) ev.before_len = beforeLen;
+  if (detail.before_pfx !== undefined) ev.before_pfx = String(detail.before_pfx || "");
   if (detail.pfx) ev.pfx = String(detail.pfx);
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
@@ -1544,7 +3416,11 @@ async function ensureEventPayload(ev, account, eventId) {
   if (!ev || typeof ev !== "object") {
     throw new Error("invalid event object");
   }
-  if (String(ev.pay || "")) {
+  const hasPayload = !!String(ev.pay || "");
+  const isRequest = Number(ev.dir) === 0;
+  const needsFullPayload = !String(ev.full_pay || "");
+  const needsBeforePayload = isRequest && !String(ev.before_pay || "") && !ev.__tcpvPayloadDetailFetched;
+  if (hasPayload && !needsFullPayload && !needsBeforePayload) {
     return ev;
   }
 
@@ -1555,14 +3431,18 @@ async function ensureEventPayload(ev, account, eventId) {
   }
 
   const cached = readPayloadCache(accountText, idText);
-  if (cached && applyEventPayloadDetail(ev, cached)) {
+  const cachedHasNeededBefore = !needsBeforePayload || !!String(cached && cached.before_pay ? cached.before_pay : "");
+  if (cached && cachedHasNeededBefore && applyEventPayloadDetail(ev, cached)) {
+    ev.__tcpvPayloadDetailFetched = true;
     return ev;
   }
 
-  const detail = await fetchEventPayload(accountText, idText);
+  const detail = needsBeforePayload ? await apiGetEvent(accountText, idText) : await fetchEventPayload(accountText, idText);
   if (!applyEventPayloadDetail(ev, detail)) {
     throw new Error("event payload is empty");
   }
+  writePayloadCache(accountText, idText, detail);
+  ev.__tcpvPayloadDetailFetched = true;
   return ev;
 }
 
@@ -1683,7 +3563,33 @@ function moveHit(step) {
   focusCurrentHit("smooth");
 }
 
+function collectAutoExpandIds(visibleEvents, expandMode) {
+  const out = new Set();
+  if (!Array.isArray(visibleEvents) || visibleEvents.length <= 0) return out;
+  if (state.autoRefresh) return out;
+
+  let count = 0;
+  if (expandMode === "on") {
+    count = AUTO_EXPAND_ON_COUNT;
+  } else if (expandMode === "smart") {
+    count = AUTO_EXPAND_SMART_COUNT;
+  }
+  if (count <= 0) return out;
+
+  for (let i = visibleEvents.length - 1; i >= 0 && out.size < count; i--) {
+    const ev = visibleEvents[i];
+    if (!String(ev && ev.summary ? ev.summary : "").trim()) {
+      continue;
+    }
+    const eventId = getEventId(ev);
+    if (!eventId || state.collapsedIds.has(eventId)) continue;
+    out.add(eventId);
+  }
+  return out;
+}
+
 function renderEvents() {
+  snapshotDumpScrollPositions(el.events);
   const openIds = new Set();
   for (const node of el.events.querySelectorAll("details[data-event-id]")) {
     const nodeId = String(node.dataset.eventId || "").trim();
@@ -1697,15 +3603,8 @@ function renderEvents() {
   const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
   const expandMode = getExpandMode();
   const highlightRules = state.search.active ? state.search.rules : [];
-  const flowHasTruncatedPayload = state.events.some((ev) => {
-    const fullLen = Number(ev && ev.len);
-    if (!Number.isFinite(fullLen) || fullLen <= 0) return false;
-    const payloadLen = estimatePayloadByteLen(ev);
-    if (payloadLen <= 0) return false;
-    return fullLen > payloadLen;
-  });
-  const flowExpandLocked = expandMode === "off" || (expandMode === "smart" && flowHasTruncatedPayload);
-  if (flowExpandLocked) {
+  const allowExpand = expandMode !== "off";
+  if (!allowExpand) {
     state.expandedIds.clear();
   }
   const prevCurrentHitId =
@@ -1739,7 +3638,16 @@ function renderEvents() {
     return;
   }
 
-  const visibleEvents = state.events.filter((ev) => eventMatchesFilters(ev));
+  const needFullScan = state.search.active && modeSpec.scope === "full";
+  const filteredEvents = state.events.filter((ev) => eventMatchesFilters(ev));
+  let visibleEvents = filteredEvents;
+  if (!needFullScan && !state.search.active) {
+    const renderLimit = state.autoRefresh ? MAX_RENDER_EVENTS_AUTO : MAX_RENDER_EVENTS_MANUAL;
+    if (filteredEvents.length > renderLimit) {
+      visibleEvents = filteredEvents.slice(-renderLimit);
+    }
+  }
+  const autoExpandIds = collectAutoExpandIds(visibleEvents, expandMode);
   state.filteredCount = visibleEvents.length;
   if (visibleEvents.length === 0) {
     state.hitEventIds = [];
@@ -1755,7 +3663,6 @@ function renderEvents() {
 
   const listFrag = document.createDocumentFragment();
   const nextHitEventIds = [];
-  const needFullScan = state.search.active && modeSpec.scope === "full";
   let windowPrefetchBudget = state.autoRefresh ? WINDOW_PREFETCH_BUDGET_AUTO : WINDOW_PREFETCH_BUDGET_MANUAL;
 
   for (const ev of visibleEvents) {
@@ -1764,10 +3671,9 @@ function renderEvents() {
     if (!needFullScan && !state.expandedIds.has(eventId)) {
       ev.pay = "";
     }
-    const allowExpand = !flowExpandLocked;
     wrap.dataset.eventId = eventId;
     wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
-    if (allowExpand && state.expandedIds.has(eventId)) {
+    if (allowExpand && (state.expandedIds.has(eventId) || autoExpandIds.has(eventId))) {
       wrap.open = true;
     }
     if (!allowExpand) {
@@ -1776,7 +3682,7 @@ function renderEvents() {
 
     const summary = document.createElement("summary");
     if (!allowExpand) {
-      summary.dataset.noExpandLabel = expandMode === "off" ? "expand-off" : "preview-only";
+      summary.dataset.noExpandLabel = "expand-off";
     }
     const isReq = ev.dir === 0;
     const dirArrow = isReq ? "->" : "<-";
@@ -1871,6 +3777,7 @@ function renderEvents() {
     tailSpan.textContent = `${seqText} ${frag}`;
     tailSpan.title = `seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
     summary.appendChild(tailSpan);
+    syncSummaryTimestampBadge(summary, ev);
 
     wrap.appendChild(summary);
     let prefetchTimer = 0;
@@ -1908,8 +3815,11 @@ function renderEvents() {
       try {
         await ensureEventPayload(ev, flowIdAtStart, eventId);
         if (!wrap.isConnected || state.flowId !== flowIdAtStart) return;
+        syncSummaryTimestampBadge(summary, ev);
         if (loading.isConnected) loading.remove();
-        wrap.appendChild(buildEventBody(ev, hideAscii));
+        const bodyNode = buildEventBody(ev, hideAscii, eventId);
+        wrap.appendChild(bodyNode);
+        restoreDumpScrollPositions(bodyNode);
         wrap.dataset.bodyReady = "1";
       } catch (e) {
         if (loading.isConnected) {
@@ -1928,10 +3838,12 @@ function renderEvents() {
         if (wrap.open) {
           clearPrefetch();
           state.expandedIds.add(eventId);
+          state.collapsedIds.delete(eventId);
           ensureBody().catch((_e) => {});
         } else {
           clearPrefetch();
           state.expandedIds.delete(eventId);
+          state.collapsedIds.add(eventId);
           for (const node of wrap.querySelectorAll(".body")) {
             node.remove();
           }
@@ -1999,7 +3911,7 @@ async function tick() {
     const line =
       `emit=${s.emit_count} write=${s.write_count} err=${s.write_error_count} drop=${s.dropped_count} ` +
       `q=${s.queue_size} local=${state.events.length} view=${state.filteredCount}/${state.events.length} ` +
-      `ofs=${getPreviewOffset()}` +
+      `ofs=${getPreviewOffset()} follow=${state.autoRefresh ? "auto" : "manual"}` +
       `${state.search.active ? ` hit=${state.hitEventIds.length}` : ""}`;
     if (s.last_write_error) {
       setStatus(`${line} | last_error=${s.last_write_error}`);
