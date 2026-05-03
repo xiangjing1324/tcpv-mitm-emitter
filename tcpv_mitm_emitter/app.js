@@ -29,6 +29,7 @@ const state = {
   pendingHitScroll: false,
   filteredCount: 0,
   dumpScrollLeft: new Map(),
+  sidebarHidden: false,
 };
 
 const el = {
@@ -36,6 +37,7 @@ const el = {
   splitter: document.getElementById("splitter"),
   leftPane: document.getElementById("leftPane"),
   rightPane: document.getElementById("rightPane"),
+  sidebarToggle: document.getElementById("toggleSidebarBtn"),
   flowList: document.getElementById("flowList"),
   flowCount: document.getElementById("flowCount"),
   selectedTitle: document.getElementById("selectedFlowTitle"),
@@ -122,6 +124,7 @@ const XOR_TEXT_KEYWORDS = [
   "coremotion",
   "virtualaudio",
 ];
+const XOR_COMMON_KEYS = [0xb6, 0x3c, 0xb3, 0x8e];
 const TIMESTAMP_SECONDS_MIN = 1_672_531_200; // 2023-01-01
 const TIMESTAMP_SECONDS_MAX = 1_893_456_000; // 2030-01-01
 const TIMESTAMP_MAX_MARKS_PER_DUMP = 8;
@@ -421,8 +424,8 @@ function loadRules() {
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   const savedPreviewBytes = String(localStorage.getItem("tcpv_preview_bytes") || "").trim();
-  const initialPreviewBytes =
-    savedPreviewBytes === "24" || savedPreviewBytes === "32" ? "16" : savedPreviewBytes || "16";
+  const allowedPreviewBytes = new Set(["16", "24", "32", "48", "64", "80", "96", "128"]);
+  const initialPreviewBytes = allowedPreviewBytes.has(savedPreviewBytes) ? savedPreviewBytes : "16";
   el.previewBytes.value = initialPreviewBytes;
   if (savedPreviewBytes !== initialPreviewBytes) {
     localStorage.setItem("tcpv_preview_bytes", initialPreviewBytes);
@@ -453,6 +456,7 @@ function loadRules() {
 
   state.autoRefresh = el.autoRefresh.value === "1";
   state.themeMode = el.themeMode.value;
+  setSidebarHidden(localStorage.getItem("tcpv_sidebar_hidden") === "1", false);
   state.search = buildAppliedSearchState(appliedSearchText, appliedSearchMode, appliedSearchColor);
   state.filters = normalizeFilterState(appliedFilterDir, appliedFilterMinLen, appliedFilterMaxLen);
   applyTheme();
@@ -515,6 +519,26 @@ function getExpandMode() {
     return mode;
   }
   return "smart";
+}
+
+function updateSidebarToggle() {
+  if (!el.sidebarToggle) return;
+  el.sidebarToggle.textContent = state.sidebarHidden ? "显示列表" : "隐藏列表";
+  el.sidebarToggle.title = state.sidebarHidden
+    ? "显示左侧连接列表。"
+    : "隐藏左侧连接列表，把宽度让给 raw / before / after。";
+  el.sidebarToggle.setAttribute("aria-pressed", state.sidebarHidden ? "true" : "false");
+}
+
+function setSidebarHidden(hidden, persist = true) {
+  state.sidebarHidden = !!hidden;
+  if (el.appRoot) {
+    el.appRoot.classList.toggle("sidebar-hidden", state.sidebarHidden);
+  }
+  updateSidebarToggle();
+  if (persist) {
+    localStorage.setItem("tcpv_sidebar_hidden", state.sidebarHidden ? "1" : "0");
+  }
 }
 
 function setSplitWidth(px, persist = true) {
@@ -1110,6 +1134,13 @@ function getDumpAnnotationIndex(ev, source) {
   const bytesPerRow = getBytesPerRow();
   const analysis = getEventAnalysis(ev);
   if (!analysis) return new Map();
+  if (source === "full") {
+    const items = [
+      ...(Array.isArray(analysis.fullStrings) ? analysis.fullStrings : []),
+      ...(Array.isArray(analysis.fullUtf8Strings) ? analysis.fullUtf8Strings : []),
+    ];
+    return buildDumpAnnotationIndex(items, bytesPerRow);
+  }
   if (source !== "decoded") return new Map();
   const items = [
     ...(Array.isArray(analysis.decodedStrings) ? analysis.decodedStrings : []),
@@ -1276,24 +1307,28 @@ function renderHexBytesHtml(row) {
   return `<span class="hex-bytes">${parts.join(gap)}</span>`;
 }
 
-function renderHexBodyHtml(dump, hideAscii) {
+function renderHexBodyHtml(dump, hideAscii, options = {}) {
   if (!dump || !Array.isArray(dump.rows) || dump.rows.length === 0) {
     return "";
   }
+  const blockComments = !!(options && options.blockComments);
   return dump.rows
     .map((row) => {
       const offsetHtml = `<span class="hex-offset">${escapeHtml(row.offset)}</span>`;
       const hexHtml = renderHexBytesHtml(row);
+      const blockCommentHtml = blockComments && row.comment
+        ? `\n<span class="hex-comment hex-comment-block">// ${escapeHtml(row.comment)}</span>`
+        : "";
       if (hideAscii) {
-        const commentHtml = row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
-        return `${offsetHtml} ${hexHtml}${commentHtml}`;
+        const commentHtml = !blockComments && row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
+        return `${offsetHtml} ${hexHtml}${commentHtml}${blockCommentHtml}`;
       }
       const asciiHtml =
         `<span class="hex-ascii-bar">|</span>` +
         `<span class="hex-ascii${row.compactAscii ? " hex-ascii-compact" : ""}">${escapeHtml(row.ascii)}</span>` +
         `<span class="hex-ascii-bar">|</span>`;
-      const commentHtml = row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
-      return `${offsetHtml} ${hexHtml} ${asciiHtml}${commentHtml}`;
+      const commentHtml = !blockComments && row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
+      return `${offsetHtml} ${hexHtml} ${asciiHtml}${commentHtml}${blockCommentHtml}`;
     })
     .join("\n");
 }
@@ -2337,6 +2372,243 @@ function parseTssSummary(summaryText) {
   return meta;
 }
 
+function escapeRegexLiteral(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function readSummaryValue(summaryText, key) {
+  const raw = String(summaryText || "");
+  const safeKey = escapeRegexLiteral(key);
+  const match = raw.match(new RegExp(`(?:^|\\s)${safeKey}=([^\\s)]+)`));
+  return match ? match[1] : "";
+}
+
+function parseSummaryKeyValues(summaryText) {
+  const raw = String(summaryText || "").trim();
+  const out = { raw };
+  for (const key of [
+    "sim",
+    "mode",
+    "match",
+    "reason",
+    "report",
+    "tpl",
+    "code",
+    "role",
+    "hint",
+    "family",
+    "slot",
+    "slice",
+    "beforedump",
+    "score",
+    "ref",
+    "lead",
+    "outer_id",
+    "outer_id_reason",
+    "inner_id",
+    "inner_id_reason",
+    "node_id",
+  ]) {
+    out[key] = readSummaryValue(raw, key);
+  }
+  return out;
+}
+
+function decodeSummaryToken(text) {
+  const raw = String(text || "").trim();
+  if (!raw || raw === "-") return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch (_e) {
+    return raw;
+  }
+}
+
+function parseReportCodeNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.floor(value);
+  const text = String(value || "").trim().toLowerCase();
+  if (!text || text === "-") return null;
+  const compact = text.startsWith("0x") ? text.slice(2) : text;
+  if (!/^[0-9a-f]{1,8}$/i.test(compact)) return null;
+  const parsed = Number.parseInt(compact, 16);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatReportCodeText(value) {
+  const parsed = parseReportCodeNumber(value);
+  return Number.isFinite(parsed) ? `0x${parsed.toString(16).padStart(8, "0")}` : "-";
+}
+
+function reportBusinessLabel(value) {
+  const parsed = parseReportCodeNumber(value);
+  if (!Number.isFinite(parsed)) return "";
+  if (parsed === 0x010a001b) return "父容器/批量上报骨架";
+  if (parsed === 0x010a0011) return "高级白名单/保护节点";
+  if (parsed === 0x0102000a) return "二进制叶子/设备字段";
+  const family = Math.floor(parsed / 0x10000) & 0xffff;
+  if (family === 0x0112) return "普通白名单/结构化节点";
+  if (family === 0x010a) return "容器/元数据节点";
+  if (family === 0x0102) return "叶子节点";
+  return "未知业务节点";
+}
+
+function translatedReasonText(reason) {
+  const raw = String(reason || "").trim();
+  if (!raw || raw === "-") return "";
+  const exact = {
+    "0102000a_already_neutral": "0102000a 已是中和/清理形态",
+    no_library_match: "没有命中可用录制源",
+    strict_unreplaced_required: "严格替换要求下仍有节点未替换",
+    strict_preserve_whitelist: "严格白名单保护",
+    same_length_source_unchanged: "同长来源与目标一致",
+    no_same_length_source: "没有同长录制源",
+    record_length_mismatch: "记录长度不匹配",
+    child_slot_length_mismatch: "child 槽位长度不匹配",
+    unsafe_beforedump_length_changed: "解密结构长度变化，不安全",
+    unsafe_packet_length_changed: "外层封包长度变化，不安全",
+    target_rebuild_same_original: "目标重建后仍等于原包",
+    target_cleanup_structure_invalid: "目标清理结构校验失败",
+    port8092_original_blocked: "8092 原包策略拦截",
+    fallback_original: "回退使用原包",
+    target_graph_unavailable: "目标包无法解析成结构图",
+    guarded_original: "保护规则要求保留原包",
+    response_isolated_original: "响应异常隔离，保留原包",
+    target_preserve: "命中保护目标策略",
+    neutralized_fallback: "无可用安全替换源，已执行兜底清理",
+  };
+  if (exact[raw]) return `${exact[raw]}（${raw}）`;
+  if (raw.includes("strict_preserve_whitelist")) return `严格白名单保护（${raw}）`;
+  if (raw.includes("account_patch_neutral_timestamp") || raw.includes("timestamp")) return `时间戳/账号时间字段保护（${raw}）`;
+  if (raw.includes("value_area_zero")) return `兜底清理 value 区域（${raw}）`;
+  if (raw.includes("neutralize")) return `兜底清理（${raw}）`;
+  if (raw.includes("blocklist")) return `命中黑名单清理规则（${raw}）`;
+  if (raw.includes("device_preserve")) return `设备字段保护（${raw}）`;
+  if (raw.includes("010a0011")) return `010a0011 保护/兜底规则（${raw}）`;
+  if (raw.includes("011223")) return `011223 普通白名单规则（${raw}）`;
+  return raw;
+}
+
+function isAlreadyNeutralReason(reason) {
+  return /already_neutral|已中和|已清理/.test(String(reason || ""));
+}
+
+function simulationStatusText(status, mode, reason) {
+  const value = String(status || "").trim();
+  const modeValue = String(mode || "").trim();
+  if (!value) return "";
+  if (value === "preserved_target_allowed") return "仿真结果：命中保护规则，允许原样保留";
+  if (value === "neutralized_fallback") return "仿真结果：无可用安全替换源，已执行兜底清理";
+  if (value === "no_library_match" && modeValue === "target_neutralize") return "仿真结果：无可用录制源，已执行兜底清理";
+  if (value === "no_library_match") return "仿真结果：无可用录制源，已执行兜底清理";
+  if (value === "simulated_changed") return "仿真结果：已按录制源重组替换";
+  if (value === "simulated_same_target") return "仿真结果：重组后与目标一致";
+  if (value === "fallback_original") return "仿真结果：回退保留原包";
+  if (value === "response_isolated_original") return "仿真结果：响应异常隔离，保留原包";
+  if (value === "guarded_original" || value === "guarded_followup_original") return "仿真结果：保护规则要求保留原包";
+  if (value === "rebuild_failed") return "仿真结果：重建失败，回退原包";
+  const reasonText = translatedReasonText(reason);
+  return reasonText ? `仿真结果：${value}，${reasonText}` : `仿真结果：${value}`;
+}
+
+function simulationModeText(mode) {
+  const value = String(mode || "").trim();
+  const labels = {
+    target: "组包模式：使用目标原文",
+    target_neutralize: "组包模式：目标原文兜底清理",
+    target_cleanup: "组包模式：目标结构清理",
+    fallback_target: "组包模式：回退目标原文",
+    same_length_copy: "组包模式：同长来源复制",
+    assembly: "组包模式：录制源重组",
+  };
+  return labels[value] || (value ? `组包模式：${value}` : "");
+}
+
+function simulationMatchText(match) {
+  const value = String(match || "").trim();
+  const labels = {
+    target_preserve: "匹配策略：保护目标，不替换",
+    target_cleanup: "匹配策略：目标清理",
+    none: "匹配策略：未命中录制源",
+  };
+  return labels[value] || (value ? `匹配策略：${value}` : "");
+}
+
+function idPatchResultText(scopeLabel, result, reason) {
+  const value = decodeSummaryToken(result);
+  if (!value || value === "none") return "";
+  const labels = {
+    patch: "已替换",
+    nochange: "计划替换但字节未变",
+    keep: "保留",
+    skip: "跳过",
+  };
+  const reasonText = translatedReasonText(decodeSummaryToken(reason)) || decodeSummaryToken(reason);
+  const resultText = labels[value] || value;
+  return reasonText ? `${scopeLabel}：${resultText}，原因 ${reasonText}` : `${scopeLabel}：${resultText}`;
+}
+
+function innerNodeIdSummaryText(rawValue) {
+  const text = decodeSummaryToken(rawValue);
+  if (!text) return "";
+  const counts = {};
+  for (const item of text.split(",")) {
+    const [key, value] = item.split(":");
+    if (!key) continue;
+    const num = Number.parseInt(value || "0", 10);
+    counts[key] = Number.isFinite(num) ? num : 0;
+  }
+  const bits = [];
+  const labels = [
+    ["replace", "替换"],
+    ["keep", "保留"],
+    ["clean", "清理"],
+    ["drop", "删除"],
+  ];
+  for (const [key, label] of labels) {
+    if (Number.isFinite(counts[key])) {
+      bits.push(`${label}${counts[key]}`);
+    }
+  }
+  return bits.length ? `内层 child/leaf：${bits.join("，")}` : "";
+}
+
+function summaryPrimaryItems(ev, summaryText) {
+  const kv = parseSummaryKeyValues(summaryText);
+  const isRequest = Number(ev && ev.dir) === 0;
+  const items = [];
+  const reportText = formatReportCodeText(kv.report || kv.code);
+  if (reportText !== "-") {
+    const label = reportBusinessLabel(reportText);
+    items.push({
+      kind: "report",
+      text: `解密 report：${reportText}${label ? `，${label}` : ""}，${isRequest ? "请求" : "响应"}`,
+    });
+  }
+  const simText = simulationStatusText(kv.sim, kv.mode, kv.reason);
+  if (simText) items.push({ kind: kv.sim === "neutralized_fallback" ? "warn" : "sim", text: simText });
+  const modeText = simulationModeText(kv.mode);
+  if (modeText) items.push({ kind: kv.mode === "target_neutralize" ? "warn" : "mode", text: modeText });
+  const matchText = simulationMatchText(kv.match);
+  if (matchText) items.push({ kind: kv.match === "target_preserve" ? "protect" : "match", text: matchText });
+  const outerText = idPatchResultText("外层ID", kv.outer_id, kv.outer_id_reason);
+  if (outerText) {
+    items.push({ kind: kv.outer_id === "patch" ? "warn" : "protect", text: outerText });
+  }
+  const innerText = idPatchResultText("内层账号ID", kv.inner_id, kv.inner_id_reason);
+  if (innerText) {
+    items.push({ kind: kv.inner_id === "patch" ? "warn" : "protect", text: innerText });
+  }
+  const nodeText = innerNodeIdSummaryText(kv.node_id);
+  if (nodeText) {
+    items.push({ kind: "match", text: nodeText });
+  }
+  const reasonText = translatedReasonText(kv.reason);
+  if (reasonText && kv.reason !== "no_library_match") {
+    items.push({ kind: "reason", text: `原因：${reasonText}` });
+  }
+  return { kv, items };
+}
+
 function printableStats(byteValues) {
   const printable = [];
   let alpha = 0;
@@ -2398,9 +2670,14 @@ function formatHexBytePreview(byteValues, limit = 16) {
 
 function formatHexSignature(byteValues) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
-  const head = formatHexBytePreview(byteValues, 16);
-  const tail = byteValues.length > 24 ? formatHexBytePreview(byteValues.slice(-8), 8) : "";
-  return tail ? `head=${head} tail=${tail}` : `head=${head}`;
+  const headLimit = 32;
+  const tailLimit = 16;
+  if (byteValues.length <= headLimit + tailLimit + 8) {
+    return `all=${formatHexBytePreview(byteValues, byteValues.length)}`;
+  }
+  const head = formatHexBytePreview(byteValues, headLimit);
+  const tail = formatHexBytePreview(byteValues.slice(-tailLimit), tailLimit);
+  return `head=${head} tail=${tail}`;
 }
 
 function xorByteValues(byteValues, key) {
@@ -2448,6 +2725,53 @@ function summarizeFixedXor(record, reportCode, key = 0xb6) {
     }
   }
   return best ? String(best.text || "") : "";
+}
+
+function summarizeCommonFixedXor(record, reportCode) {
+  const previews = [];
+  const seen = new Set();
+  for (const key of XOR_COMMON_KEYS) {
+    const preview = summarizeFixedXor(record, reportCode, key);
+    if (!preview) continue;
+    const dedupeKey = `${key}:${preview}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    previews.push(preview);
+  }
+  return previews.join(" ; ");
+}
+
+function buildCommonXorPreviewItems(payload, bodyRelOffCandidates = [12, 16]) {
+  if (!Array.isArray(payload) || payload.length <= 0) return [];
+  const items = [];
+  const seen = new Set();
+  for (const bodyRelOff of bodyRelOffCandidates) {
+    if (payload.length <= bodyRelOff) continue;
+    const body = payload.slice(bodyRelOff);
+    const bodyOff = 20 + bodyRelOff;
+    for (const key of XOR_COMMON_KEYS) {
+      const decoded = xorByteValues(body, key);
+      const runs = extractPrintableRuns(decoded, 3, 4);
+      if (!runs.length) continue;
+      const score = runs.reduce((total, item) => total + String(item.text || "").length, 0);
+      if (score < 6) continue;
+      const preview = runs
+        .slice(0, 3)
+        .map((item) => `${formatHexValue(bodyOff + Number(item.off || 0))}:${shortenText(item.text, 48)}`)
+        .join(" | ");
+      const dedupeKey = `${key}:${bodyRelOff}:${preview}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      items.push({
+        off: bodyOff,
+        text: `key=${formatHexValue(key, 2)} base=body${bodyRelOff} ${preview}`,
+        kind: "common-xor",
+        score,
+      });
+    }
+  }
+  items.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  return items.slice(0, 8);
 }
 
 function scoreXorCandidate(decodedBytes, runs) {
@@ -2587,6 +2911,7 @@ function analyzeDecodedSliceXor(byteValues) {
   if (!bestChoice) return null;
 
   const bodyOff = 20 + bestChoice.bodyRelOff;
+  const commonPreviews = buildCommonXorPreviewItems(payload, [12, 16]);
   const runs = bestChoice.best.runs.map((item) => ({
     off: bodyOff + Number(item.off || 0),
     text: shortenText(item.text, 96),
@@ -2600,6 +2925,7 @@ function analyzeDecodedSliceXor(byteValues) {
     preview: shortenText(runs.map((item) => item.text).join(" | "), 120),
     keywordHits: bestChoice.best.keywordHits,
     runs,
+    commonPreviews,
   };
 }
 
@@ -2770,7 +3096,7 @@ function parseTssChildrenAt(byteValues, startOffset, maxChildren = 256) {
       valuePreview,
       timestampCandidates,
       hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
-      xorB6Preview: className === "binary-like-leaf" ? summarizeFixedXor(record, reportCode, 0xb6) : "",
+      xorCommonPreview: className === "binary-like-leaf" ? summarizeCommonFixedXor(record, reportCode) : "",
     });
     offset += 4 + childLen;
   }
@@ -2845,7 +3171,7 @@ function parseTssChildRecords(byteValues) {
       valuePreview,
       timestampCandidates,
       hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
-      xorB6Preview: className === "binary-like-leaf" ? summarizeFixedXor(record, reportCode, 0xb6) : "",
+      xorCommonPreview: className === "binary-like-leaf" ? summarizeCommonFixedXor(record, reportCode) : "",
     });
     offset += 4 + childLen;
   }
@@ -2853,6 +3179,35 @@ function parseTssChildRecords(byteValues) {
     return { root, children: legacy.children, layout: "legacy-no-count" };
   }
   return { root, children, layout: "counted" };
+}
+
+function makeRootComparableNode(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
+  const root = detectTssReport(byteValues);
+  if (!root || !isLikelyTssReportCode(root.value)) return null;
+  const reportCode = root.value;
+  const className = classifyRecordBytes(byteValues, reportCode);
+  const valuePreview = formatRecordValuePreview(byteValues, reportCode);
+  const timestampCandidates = extractTimestampCandidatesFromRecord(byteValues);
+  return {
+    index: 0,
+    nodeLabel: "node[0]",
+    offset: 0,
+    recordStart: 0,
+    recordEnd: byteValues.length,
+    len: byteValues.length,
+    lengthEndian: "",
+    reportCode,
+    reportOffset: root.offset,
+    idValue: readBe32(byteValues, childRecordIdOffset(byteValues, root)),
+    className,
+    valuePreview,
+    timestampCandidates,
+    hexSignature: className === "binary-like-leaf" ? formatHexSignature(byteValues) : "",
+    xorCommonPreview: className === "binary-like-leaf" || Number(reportCode) === 0x0102000a
+      ? summarizeCommonFixedXor(byteValues, reportCode)
+      : "",
+  };
 }
 
 function parseLibrarySameLengthExamples(summaryText) {
@@ -2923,8 +3278,8 @@ function buildTssTreeText(base64Text, options = {}) {
     if (child.hexSignature) {
       lines.push(`    hex_sig=${child.hexSignature}`);
     }
-    if (child.xorB6Preview) {
-      lines.push(`    xor_b6=${child.xorB6Preview}`);
+    if (child.xorCommonPreview) {
+      lines.push(`    xor_common=${child.xorCommonPreview}`);
     }
   }
   return lines.join("\n");
@@ -2936,7 +3291,7 @@ function renderTssTreeHtml(treeText) {
     .map((line) => {
       const escaped = escapeHtml(line);
       return escaped.replace(
-        /(root|child_count|binary_like_stats|child\[\d+\]|report=0x[0-9a-f]+|type=[^\s]+|len=\d+|id=0x[0-9a-f]+|keep=target|timestamps=[^\s]+|lib_same_len=\d+|value=.+|hex_sig=.+|xor_b6=.+)/gi,
+        /(root|child_count|binary_like_stats|child\[\d+\]|report=0x[0-9a-f]+|type=[^\s]+|len=\d+|id=0x[0-9a-f]+|keep=target|timestamps=[^\s]+|lib_same_len=\d+|value=.+|hex_sig=.+|xor_common=.+)/gi,
         (token) => {
           let cls = "tree-token";
           if (/^child\[/i.test(token) || token === "root" || token === "binary_like_stats") cls += " tree-node";
@@ -2944,7 +3299,7 @@ function renderTssTreeHtml(treeText) {
           else if (/^type=/i.test(token)) cls += " tree-type";
           else if (/^id=/i.test(token)) cls += " tree-id";
           else if (/^value=/i.test(token)) cls += " tree-value";
-          else if (/^(hex_sig|xor_b6|timestamps)=/i.test(token)) cls += " tree-value";
+          else if (/^(hex_sig|xor_common|timestamps)=/i.test(token)) cls += " tree-value";
           else if (/^lib_same_len=/i.test(token)) cls += " tree-keep";
           else if (/^keep=/i.test(token)) cls += " tree-keep";
           return `<span class="${cls}">${token}</span>`;
@@ -2974,6 +3329,658 @@ function appendTssTreeSummary(panel, title, base64Text, options = {}) {
   const shell = createTssTreeSummary(title, base64Text, "", options);
   if (!shell) return;
   panel.appendChild(shell);
+}
+
+function childBytesFromParsed(byteValues, child) {
+  if (!Array.isArray(byteValues) || !child || child.truncated) return [];
+  const recordStart = Number(child.recordStart);
+  const recordEnd = Number(child.recordEnd);
+  if (Number.isFinite(recordStart)) {
+    const end = Number.isFinite(recordEnd) ? recordEnd : recordStart + Number(child.len || 0);
+    if (recordStart < 0 || end > byteValues.length || end < recordStart) return [];
+    return byteValues.slice(recordStart, end);
+  }
+  const offset = Number(child.offset);
+  const len = Number(child.len);
+  if (!Number.isFinite(offset) || !Number.isFinite(len) || len < 0) return [];
+  const start = offset + 4;
+  const end = start + len;
+  if (start < 0 || end > byteValues.length || end < start) return [];
+  return byteValues.slice(start, end);
+}
+
+function countChangedBytes(left, right) {
+  const leftBytes = Array.isArray(left) ? left : [];
+  const rightBytes = Array.isArray(right) ? right : [];
+  const commonLen = Math.min(leftBytes.length, rightBytes.length);
+  let changed = 0;
+  for (let i = 0; i < commonLen; i += 1) {
+    if (leftBytes[i] !== rightBytes[i]) changed += 1;
+  }
+  return {
+    commonLen,
+    changed,
+    lenDelta: rightBytes.length - leftBytes.length,
+    leftLen: leftBytes.length,
+    rightLen: rightBytes.length,
+  };
+}
+
+function parseChildActionDetails(summaryText) {
+  const raw = String(summaryText || "");
+  const out = new Map();
+  const match = raw.match(/\bchild_detail=([^\s]+)/);
+  if (match) {
+    for (const item of String(match[1] || "").split(";")) {
+      const parts = item.split(":");
+      if (parts.length < 3) continue;
+      const index = Number.parseInt(parts[0], 10);
+      if (!Number.isFinite(index)) continue;
+      out.set(index, {
+        index,
+        action: parts[1] || "",
+        report: parts[2] || "",
+        len: parts[3] || "",
+        source: parts[4] || "",
+        reason: "",
+      });
+    }
+  }
+  const reasonMatch = raw.match(/\bchild_reason=([^\s]+)/);
+  if (reasonMatch) {
+    for (const item of String(reasonMatch[1] || "").split(";")) {
+      const sep = item.indexOf(":");
+      if (sep <= 0) continue;
+      const index = Number.parseInt(item.slice(0, sep), 10);
+      if (!Number.isFinite(index)) continue;
+      const encoded = item.slice(sep + 1);
+      let reason = encoded;
+      try {
+        reason = decodeURIComponent(encoded);
+      } catch (_e) {
+        reason = encoded;
+      }
+      const previous = out.get(index) || { index, action: "", report: "", len: "", source: "" };
+      previous.reason = reason;
+      out.set(index, previous);
+    }
+  }
+  return out;
+}
+
+function parseChildSummaryCounts(summaryText) {
+  const raw = String(summaryText || "");
+  const read = (key) => {
+    const match = raw.match(new RegExp(`\\b${key}=([^\\s]+)`));
+    return match ? match[1] : "";
+  };
+  return {
+    total: read("child_total"),
+    changed: read("child_changed"),
+    sameLength: read("child_same_len"),
+    forced: read("child_forced"),
+    fallback: read("child_fb11"),
+    kept: read("child_keep"),
+    noop: read("child_noop"),
+    clean: read("child_clean"),
+  };
+}
+
+function childActionLabel(action) {
+  const value = String(action || "").trim();
+  const labels = {
+    SL: "同长复制",
+    FS: "强制同类",
+    VL: "变长替换",
+    F11: "兜底010a0011",
+    CR: "跨类型",
+    BLK: "清理黑名单",
+    ND: "清理设备叶子",
+    R11: "稀有叶子",
+    KEEP: "保留目标",
+    CLEAN: "兜底清理",
+    DROP: "删除目标",
+  };
+  return labels[value] || value || "-";
+}
+
+function compactReportToDisplay(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "-") return "-";
+  return formatReportCodeText(text);
+}
+
+function childSemanticLines(child) {
+  if (!child || child.truncated) return [];
+  const lines = [];
+  if (child.valuePreview) lines.push(`value=${child.valuePreview}`);
+  if (Array.isArray(child.timestampCandidates) && child.timestampCandidates.length > 0) {
+    lines.push(`timestamps=${child.timestampCandidates.join(",")}`);
+  }
+  if (child.xorCommonPreview) lines.push(`xor=${child.xorCommonPreview}`);
+  if (child.hexSignature) lines.push(`hex_sig=${child.hexSignature}`);
+  return lines;
+}
+
+function semanticValueText(line, prefix) {
+  const text = String(line || "");
+  return text.startsWith(prefix) ? text.slice(prefix.length).trim() : "";
+}
+
+function compactSemanticSignal(text) {
+  const raw = String(text || "");
+  const matches = [];
+  const add = (label) => {
+    if (label && !matches.includes(label)) matches.push(label);
+  };
+  for (const match of raw.matchAll(/(?:mrpcs?|mrcp)[\w.-]*|tersafe|config2\.dat|config3\.dat|comm\.zip/gi)) {
+    add(match[0]);
+  }
+  if (matches.length > 0) return matches.slice(0, 6).join(" | ");
+  return "";
+}
+
+function splitChildSemanticRows(child) {
+  const primaryRows = [];
+  const debugLines = [];
+  for (const line of childSemanticLines(child)) {
+    if (line.startsWith("value=")) {
+      const value = semanticValueText(line, "value=");
+      if (value.startsWith("xor:")) {
+        primaryRows.push(["可打印XOR", value.slice(4), "child-card-line-long child-card-parse"]);
+      } else {
+        primaryRows.push(["解析", value, "child-card-line-long child-card-parse"]);
+      }
+      continue;
+    }
+    if (line.startsWith("timestamps=")) {
+      primaryRows.push(["时间戳", semanticValueText(line, "timestamps="), "child-card-line-long child-card-parse"]);
+      continue;
+    }
+    if (line.startsWith("xor=")) {
+      const signal = compactSemanticSignal(semanticValueText(line, "xor="));
+      if (signal) {
+        primaryRows.push(["XOR命中", signal, "child-card-line-long child-card-parse"]);
+      }
+      debugLines.push(line);
+      continue;
+    }
+    debugLines.push(line);
+  }
+  return { primaryRows, debugLines };
+}
+
+function childOffsetText(child) {
+  if (!child || child.truncated || !Number.isFinite(Number(child.offset))) return "-";
+  return formatHexValue(Number(child.offset));
+}
+
+function childTypeText(child) {
+  if (!child || child.truncated) return "-";
+  return String(child.className || reportBusinessLabel(child.reportCode) || "-");
+}
+
+function childNodeName(child) {
+  if (!child || child.truncated) return "node[-]";
+  if (child.nodeLabel) return String(child.nodeLabel);
+  return `child[${child.index}]`;
+}
+
+function mergedChildSemanticText(beforeChild, afterChild) {
+  const seen = new Set();
+  const lines = [];
+  for (const child of [afterChild, beforeChild]) {
+    for (const line of childSemanticLines(child)) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      lines.push(line);
+      if (lines.length >= 4) break;
+    }
+    if (lines.length >= 4) break;
+  }
+  return lines.join("\n");
+}
+
+function childRuleAnnotations(beforeChild, afterChild, action) {
+  const rules = [];
+  const add = (text) => {
+    if (text && !rules.includes(text)) rules.push(text);
+  };
+  const candidates = [afterChild, beforeChild].filter(Boolean);
+  for (const child of candidates) {
+    const report = parseReportCodeNumber(child.reportCode);
+    if (!Number.isFinite(report)) continue;
+    if (Math.floor(report / 0x100) === 0x011223) add("011223xx：普通白名单节点");
+    if (report === 0x010a0011) add("010a0011：高级白名单/保护节点");
+    if (report === 0x0102000a) add("0102000a：设备字段/叶子节点");
+  }
+  const actionReport = compactReportToDisplay(action && action.report);
+  const sourceReport = compactReportToDisplay(action && action.source);
+  if (actionReport.startsWith("0x011223") || sourceReport.startsWith("0x011223")) add("011223xx：普通白名单节点");
+  if (actionReport === "0x010a0011" || sourceReport === "0x010a0011") add("010a0011：高级白名单/保护节点");
+
+  const semanticText = [mergedChildSemanticText(beforeChild, afterChild), action && action.reason]
+    .join(" ")
+    .toLowerCase();
+  if (/\bmrp\b|\bmrpcs\b|\bmrcp\b|mrpcs_i\.data/.test(semanticText)) add("mrp/mrpcs/mrcp：高级白名单规则");
+  if (/tersafe|config2\.dat|config3\.dat|comm\.zip/.test(semanticText)) {
+    add("tersafe/config2.dat/config3.dat/comm.zip：高级白名单规则");
+  }
+  if (/account_patch_neutral_timestamp|timestamps=|timestamp|时间戳/.test(semanticText)) {
+    add("三时间戳 / account_patch_neutral_timestamp：时间戳保护规则");
+  }
+  if (/strict_preserve_whitelist/.test(semanticText)) add("strict_preserve_whitelist：严格白名单保护");
+  if (/no_library_match/.test(semanticText)) add("未命中录制源");
+  const actionCode = String(action && action.action ? action.action : "");
+  const alreadyNeutral = isAlreadyNeutralReason(action && action.reason);
+  if (alreadyNeutral) add("已是中和/清理形态，不重复修改");
+  if (actionCode === "KEEP" && !alreadyNeutral) add("保护目标，不替换");
+  if (actionCode === "CLEAN" || actionCode === "BLK" || actionCode === "ND") add("兜底清理/黑名单清理");
+  return rules.join("\n");
+}
+
+function appendChildCardLine(card, label, value, className = "") {
+  const text = String(value || "").trim();
+  if (!text) return;
+  const line = document.createElement("div");
+  line.className = `child-card-line ${className}`.trim();
+  const strong = document.createElement("strong");
+  strong.textContent = label;
+  line.appendChild(strong);
+  line.appendChild(document.createTextNode(` ${text}`));
+  card.appendChild(line);
+}
+
+function appendChildSideLine(side, label, value, className = "") {
+  appendChildCardLine(side, label, value, className);
+}
+
+function appendChildDebugDetails(side, lines) {
+  const cleanLines = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+  if (!cleanLines.length) return;
+  const details = document.createElement("div");
+  details.className = "child-debug-details child-debug-details-open";
+  const summary = document.createElement("div");
+  summary.className = "child-debug-title";
+  summary.textContent = "调试细节";
+  const pre = document.createElement("pre");
+  pre.textContent = cleanLines.join("\n");
+  details.appendChild(summary);
+  details.appendChild(pre);
+  side.appendChild(details);
+}
+
+function compactRuleText(ruleText) {
+  return String(ruleText || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("；");
+}
+
+function childActionKind(actionCode, reason = "") {
+  if (isAlreadyNeutralReason(reason)) return "neutral";
+  const value = String(actionCode || "").trim();
+  if (value === "KEEP") return "keep";
+  if (value === "CLEAN" || value === "BLK" || value === "ND") return "clean";
+  if (value === "DROP") return "drop";
+  if (value === "SL" || value === "FS" || value === "VL" || value === "F11" || value === "CR" || value === "R11") {
+    return "replace";
+  }
+  return "";
+}
+
+function childActionObservation(action, result) {
+  const actionCode = action && action.action;
+  const kind = childActionKind(actionCode, action && action.reason);
+  const resultText = result && result.label ? result.label : "";
+  if (kind === "neutral") return `观察：目标已是中和/清理形态，before/after ${resultText || "一致"}，不需要重复修改`;
+  if (kind === "keep") return `观察：命中保护/白名单，保留目标；字节结果 ${resultText || "未变化"}`;
+  if (kind === "clean") return `观察：命中清理/兜底规则，已清理高风险字段；字节结果 ${resultText || "已处理"}`;
+  if (kind === "drop") return "观察：规则判断为删除该 child";
+  if (kind === "replace") return `观察：命中可用录制源，执行替换/重组；字节结果 ${resultText || "已处理"}`;
+  return resultText ? `观察：${resultText}` : "";
+}
+
+function childActionBadgeText(action, result) {
+  const kind = childActionKind(action && action.action, action && action.reason);
+  if (kind === "neutral") return "已清理形态";
+  if (kind === "keep") return "保护保留";
+  if (kind === "clean") return "兜底清理";
+  if (kind === "drop") return "删除";
+  if (kind === "replace") return "替换";
+  return result && result.label ? result.label : "观察";
+}
+
+function makeChildSide(child, sideLabel, sideClass, extraRows = []) {
+  const side = document.createElement("div");
+  side.className = `child-side child-side-${sideClass}`.trim();
+
+  const title = document.createElement("div");
+  title.className = "child-side-title";
+  const name = document.createElement("span");
+  name.textContent = childNodeName(child);
+  const label = document.createElement("span");
+  label.className = "child-side-label";
+  label.textContent = sideLabel;
+  title.appendChild(name);
+  title.appendChild(label);
+  side.appendChild(title);
+
+  appendChildSideLine(side, "report", childReportText(child));
+  appendChildSideLine(side, "类型", childTypeText(child));
+  appendChildSideLine(side, "长度", child && Number.isFinite(child.len) ? String(child.len) : "-");
+  appendChildSideLine(side, "ID", childIdText(child));
+
+  const semanticRows = splitChildSemanticRows(child);
+  for (const [rowLabel, value, className] of semanticRows.primaryRows) {
+    appendChildSideLine(side, rowLabel, value, className || "");
+  }
+
+  for (const [rowLabel, value, className] of extraRows) {
+    appendChildSideLine(side, rowLabel, value, className || "");
+  }
+
+  const debugLines = [];
+  const offsetText = childOffsetText(child);
+  if (offsetText && offsetText !== "-") debugLines.push(`offset=${offsetText}`);
+  debugLines.push(...semanticRows.debugLines);
+  appendChildDebugDetails(side, debugLines);
+
+  return side;
+}
+
+function inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild) {
+  const kv = summaryKv && typeof summaryKv === "object" ? summaryKv : {};
+  const sim = String(kv.sim || "").trim();
+  const mode = String(kv.mode || "").trim();
+  const match = String(kv.match || "").trim();
+  const reason = String(kv.reason || "").trim();
+  if (sim === "preserved_target_allowed" || match === "target_preserve") {
+    return {
+      action: "KEEP",
+      reason: reason || "target_preserve",
+      source: "",
+      report: "",
+    };
+  }
+  if (sim === "neutralized_fallback" || mode === "target_neutralize") {
+    const same = result && result.kind === "same";
+    const ruleText = childRuleAnnotations(beforeChild, afterChild, { reason });
+    const protectedSame = same && /白名单|保护/.test(ruleText);
+    return {
+      action: protectedSame ? "KEEP" : "CLEAN",
+      reason: reason || "neutralized_fallback",
+      source: "",
+      report: "",
+    };
+  }
+  if (sim === "no_library_match") {
+    const same = result && result.kind === "same";
+    const ruleText = childRuleAnnotations(beforeChild, afterChild, { reason: reason || "no_library_match" });
+    const protectedSame = same && /白名单|保护/.test(ruleText);
+    return {
+      action: protectedSame ? "KEEP" : "CLEAN",
+      reason: reason || "no_library_match",
+      source: "",
+      report: "",
+    };
+  }
+  return null;
+}
+
+function childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes) {
+  if (!beforeChild && !afterChild) {
+    return { label: "无解析", kind: "struct" };
+  }
+  if (beforeChild && !afterChild) {
+    return { label: "已删除", kind: "struct" };
+  }
+  if (!beforeChild && afterChild) {
+    return { label: "新增", kind: "struct" };
+  }
+
+  const beforeReport = beforeChild.reportCode;
+  const afterReport = afterChild.reportCode;
+  const beforeId = beforeChild.idValue;
+  const afterId = afterChild.idValue;
+  const diff = countChangedBytes(beforeBytes, afterBytes);
+  if (Number(beforeReport) !== Number(afterReport)) {
+    return { label: "类型变化", kind: "struct", diff };
+  }
+  if (diff.lenDelta !== 0) {
+    return { label: "长度变化", kind: "struct", diff };
+  }
+  if (diff.changed > 0) {
+    return { label: "已变化", kind: "changed", diff };
+  }
+  if (Number.isFinite(beforeId) && Number.isFinite(afterId) && Number(beforeId) !== Number(afterId)) {
+    return { label: "ID变化", kind: "changed", diff };
+  }
+  return { label: "结果一样", kind: "same", diff };
+}
+
+function childReportText(child) {
+  if (!child || child.truncated || child.reportCode === null || child.reportCode === undefined) return "-";
+  return formatHexValue(child.reportCode, 8);
+}
+
+function childIdText(child) {
+  if (!child || child.truncated || !Number.isFinite(child.idValue)) return "-";
+  return formatHexValue(child.idValue, 4);
+}
+
+function childDiffText(diff) {
+  if (!diff) return "-";
+  if (Number(diff.lenDelta || 0) === 0) {
+    return `${diff.changed}/${diff.commonLen}`;
+  }
+  const sign = diff.lenDelta > 0 ? "+" : "";
+  return `${diff.changed}/${diff.commonLen} 长度${sign}${diff.lenDelta}`;
+}
+
+function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytesAll, index, actionMap, summaryKv = null) {
+  const beforeChild = beforeChildren[index] || null;
+  const afterChild = afterChildren[index] || null;
+  const beforeBytes = childBytesFromParsed(beforeBytesAll, beforeChild);
+  const afterBytes = childBytesFromParsed(afterBytesAll, afterChild);
+  const result = childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes);
+  const action = (actionMap instanceof Map ? actionMap.get(index) : null)
+    || inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild);
+
+  const card = document.createElement("div");
+  card.className = `child-pair-card child-card-result-${result.kind}`;
+
+  const title = document.createElement("div");
+  title.className = "child-pair-title";
+  const name = document.createElement("span");
+  name.textContent = childNodeName(afterChild || beforeChild || { index });
+  const badges = document.createElement("span");
+  badges.className = "child-title-badges";
+  const status = document.createElement("span");
+  status.className = `child-status child-status-${result.kind}`;
+  status.textContent = result.label;
+  badges.appendChild(status);
+  const actionStatus = document.createElement("span");
+  actionStatus.className = `child-status child-action-status child-action-status-${childActionKind(action && action.action, action && action.reason) || "observe"}`;
+  actionStatus.textContent = childActionBadgeText(action, result);
+  badges.appendChild(actionStatus);
+  title.appendChild(name);
+  title.appendChild(badges);
+  card.appendChild(title);
+
+  const afterRows = [
+    ["差异", childDiffText(result.diff)],
+    ["动作", childActionLabel(action && action.action)],
+  ];
+  if (action && action.source && action.source !== "-") {
+    afterRows.push(["来源 report", compactReportToDisplay(action.source)]);
+  }
+  if (action && action.reason) {
+    afterRows.push(["原因", translatedReasonText(action.reason) || action.reason, "child-card-line-long"]);
+  }
+  const ruleText = childRuleAnnotations(beforeChild, afterChild, action);
+  const ruleCompact = compactRuleText(ruleText);
+  const observation = childActionObservation(action, result);
+
+  const sides = document.createElement("div");
+  sides.className = "child-pair-sides";
+  const beforeExtraRows = [];
+  const afterExtraRows = [];
+  if (ruleCompact) {
+    beforeExtraRows.push(["规则适配", ruleCompact, "child-card-line-long child-card-rule"]);
+    afterExtraRows.push(["规则适配", ruleCompact, "child-card-line-long child-card-rule"]);
+  }
+  if (observation) {
+    afterExtraRows.unshift(["观察", observation, "child-card-line-long child-card-observation"]);
+  }
+  sides.appendChild(makeChildSide(beforeChild, "修改前", "before", beforeExtraRows));
+  sides.appendChild(makeChildSide(afterChild, "修改后", "after", [...afterRows, ...afterExtraRows]));
+  card.appendChild(sides);
+
+  return card;
+}
+
+function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
+  if (!beforeBase64 && !decodedBase64) return null;
+  const beforeBytes = b64ToBytes(beforeBase64);
+  const afterBytes = b64ToBytes(decodedBase64);
+  const beforeParsed = parseTssChildRecords(beforeBytes);
+  const afterParsed = parseTssChildRecords(afterBytes);
+  const parsedBeforeChildren = Array.isArray(beforeParsed.children) ? beforeParsed.children : [];
+  const parsedAfterChildren = Array.isArray(afterParsed.children) ? afterParsed.children : [];
+  const hasChildRecords = parsedBeforeChildren.length > 0 || parsedAfterChildren.length > 0;
+  const beforeRootNode = !hasChildRecords ? makeRootComparableNode(beforeBytes) : null;
+  const afterRootNode = !hasChildRecords ? makeRootComparableNode(afterBytes) : null;
+  const beforeChildren = hasChildRecords ? parsedBeforeChildren : (beforeRootNode ? [beforeRootNode] : []);
+  const afterChildren = hasChildRecords ? parsedAfterChildren : (afterRootNode ? [afterRootNode] : []);
+  const total = Math.max(beforeChildren.length, afterChildren.length);
+  if (total <= 0) return null;
+
+  const actionMap = parseChildActionDetails(summaryText);
+  const summaryKv = parseSummaryKeyValues(summaryText);
+  const counts = parseChildSummaryCounts(summaryText);
+  const visible = Math.min(total, 8);
+  const panel = document.createElement("section");
+  panel.className = "child-compare";
+
+  const head = document.createElement("div");
+  head.className = "child-compare-head";
+  const title = document.createElement("span");
+  title.textContent = hasChildRecords ? "子节点替换观察" : "叶子节点替换观察";
+  const meta = document.createElement("small");
+  const countBits = [];
+  const addCount = (label, value, always = false) => {
+    const number = Number.parseInt(value, 10);
+    if (!Number.isFinite(number)) return;
+    if (!always && number <= 0) return;
+    countBits.push(`${label}${number}`);
+  };
+  addCount("总数", counts.total, true);
+  addCount("变化", counts.changed);
+  addCount("同长替换", counts.sameLength);
+  addCount("强制替换", counts.forced);
+  addCount("兜底010a0011", counts.fallback);
+  addCount("保留", counts.kept);
+  addCount("未动", counts.noop);
+  addCount("清理", counts.clean);
+  meta.textContent = countBits.length > 0
+    ? `${countBits.join("，")}；显示 ${visible}/${total}`
+    : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`;
+  head.appendChild(title);
+  head.appendChild(meta);
+  panel.appendChild(head);
+
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  for (let i = 0; i < visible; i += 1) {
+    grid.appendChild(makeChildCard(beforeChildren, afterChildren, beforeBytes, afterBytes, i, actionMap, summaryKv));
+  }
+  panel.appendChild(grid);
+
+  if (total > visible) {
+    const note = document.createElement("div");
+    note.className = "child-compare-note";
+    note.textContent = `还有 ${total - visible} 个节点未展开显示；当前视图优先展示前 8 个用于快速判断。`;
+    panel.appendChild(note);
+  }
+
+  return panel;
+}
+
+function comparableNodesFromBytes(byteValues) {
+  const parsed = parseTssChildRecords(byteValues);
+  const children = Array.isArray(parsed.children) ? parsed.children : [];
+  if (children.length > 0) return children;
+  const rootNode = makeRootComparableNode(byteValues);
+  return rootNode ? [rootNode] : [];
+}
+
+function stringRowsForComparableNodes(byteValues, summaryText, side = "before") {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const nodes = comparableNodesFromBytes(byteValues);
+  if (!nodes.length) return [];
+  const actionMap = parseChildActionDetails(summaryText);
+  const summaryKv = parseSummaryKeyValues(summaryText);
+  const rows = [];
+  for (let i = 0; i < Math.min(nodes.length, 8); i += 1) {
+    const node = nodes[i];
+    if (!node || node.truncated) continue;
+    const semanticRows = splitChildSemanticRows(node).primaryRows;
+    const semanticText = semanticRows
+      .map(([label, value]) => `${label} ${value}`)
+      .filter(Boolean)
+      .join("；");
+    const action = side === "after"
+      ? (actionMap instanceof Map ? actionMap.get(i) : null) || inferChildActionFromSummary(summaryKv, null, null, node)
+      : null;
+    const actionText = side === "after" && action
+      ? `；${childActionBadgeText(action, { label: "" })}${action.reason ? `，${translatedReasonText(action.reason) || action.reason}` : ""}`
+      : "";
+    const ruleText = compactRuleText(childRuleAnnotations(side === "before" ? node : null, side === "after" ? node : null, action));
+    const parts = [
+      childNodeName(node),
+      childReportText(node),
+      childIdText(node) !== "-" ? `ID ${childIdText(node)}` : "",
+      semanticText,
+      ruleText ? `规则 ${ruleText}` : "",
+    ].filter(Boolean);
+    rows.push(`${parts.join(" | ")}${actionText}`);
+  }
+  return rows;
+}
+
+function buildStringResultPanel(beforeBase64, decodedBase64, summaryText = "") {
+  const beforeRows = stringRowsForComparableNodes(b64ToBytes(beforeBase64), summaryText, "before");
+  const afterRows = stringRowsForComparableNodes(b64ToBytes(decodedBase64), summaryText, "after");
+  if (!beforeRows.length && !afterRows.length) return null;
+  const panel = document.createElement("section");
+  panel.className = "string-result-panel";
+  const head = document.createElement("div");
+  head.className = "string-result-head";
+  head.textContent = "字符串 / 规则结果";
+  panel.appendChild(head);
+  const grid = document.createElement("div");
+  grid.className = "string-result-grid";
+  for (const [title, rows, sideClass] of [
+    ["修改前字符串", beforeRows, "before"],
+    ["修改后字符串", afterRows, "after"],
+  ]) {
+    const side = document.createElement("div");
+    side.className = `string-result-side string-result-side-${sideClass}`;
+    const label = document.createElement("div");
+    label.className = "string-result-label";
+    label.textContent = title;
+    const pre = document.createElement("pre");
+    pre.textContent = rows.length ? rows.join("\n") : "-";
+    side.appendChild(label);
+    side.appendChild(pre);
+    grid.appendChild(side);
+  }
+  panel.appendChild(grid);
+  return panel;
 }
 
 function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
@@ -3157,18 +4164,15 @@ function buildEventAnalysisGrid(ev) {
   const metaChips = document.createElement("div");
   metaChips.className = "analysis-chip-list";
   const summary = analysis.summary;
+  const summaryKv = parseSummaryKeyValues(ev && ev.summary ? ev.summary : "");
   const metaChipValues = [];
+  const reportText = formatReportCodeText(summaryKv.report || (summary && summary.code));
+  if (reportText !== "-") metaChipValues.push(`report ${reportText}`);
   if (summary) {
     if (summary.code) metaChipValues.push(`code ${summary.code}`);
     if (summary.role) metaChipValues.push(`role ${summary.role}`);
     if (summary.hint) metaChipValues.push(`hint ${summary.hint}`);
-    if (summary.family) metaChipValues.push(`family ${summary.family}`);
-    if (summary.slot) metaChipValues.push(`slot ${summary.slot}`);
-    if (Number.isFinite(summary.sliceOffset)) metaChipValues.push(`slice ${formatHexValue(summary.sliceOffset)}`);
     if (Number.isFinite(summary.beforedumpLen)) metaChipValues.push(`len ${summary.beforedumpLen}`);
-    if (summary.score) metaChipValues.push(`score ${summary.score}`);
-    if (summary.referenceLevel) metaChipValues.push(`ref ${summary.referenceLevel}`);
-    if (summary.lead) metaChipValues.push(`lead ${summary.lead}`);
   }
   if (metaChipValues.length > 0) {
     for (const text of metaChipValues) {
@@ -3201,6 +4205,10 @@ function buildEventAnalysisGrid(ev) {
       xorCard.body.appendChild(title);
       appendAnalysisStringList(xorCard.body, xor.runs.slice(0, 6));
     }
+    if (Array.isArray(xor.commonPreviews) && xor.commonPreviews.length > 0) {
+      appendAnalysisSectionTitle(xorCard.body, "常见 Key XOR 结果");
+      appendAnalysisStringList(xorCard.body, xor.commonPreviews.slice(0, 8));
+    }
   } else {
     appendAnalysisEmpty(xorCard.body, "当前切片没有命中明显的单字节 XOR 文本特征。");
   }
@@ -3209,28 +4217,75 @@ function buildEventAnalysisGrid(ev) {
   return grid;
 }
 
+function buildEventReadableSummary(ev, summaryText) {
+  const block = document.createElement("div");
+  block.className = "event-readable-summary";
+
+  const { kv, items } = summaryPrimaryItems(ev, summaryText);
+  const primary = document.createElement("div");
+  primary.className = "event-summary-primary";
+  if (items.length > 0) {
+    for (const item of items.slice(0, 6)) {
+      const chip = document.createElement("div");
+      chip.className = `event-summary-chip event-summary-chip-${item.kind || "info"}`;
+      chip.textContent = item.text;
+      primary.appendChild(chip);
+    }
+  } else {
+    const chip = document.createElement("div");
+    chip.className = "event-summary-chip event-summary-chip-info";
+    chip.textContent = "当前包没有结构化仿真摘要，可直接看 raw / before / after 字节视图";
+    primary.appendChild(chip);
+  }
+  block.appendChild(primary);
+
+  const transport = document.createElement("div");
+  transport.className = "event-summary-transport";
+  const proxyUsername = getProxyUsername(ev && ev.proxy_username);
+  const transportBits = [
+    `id=${ev && ev.id !== undefined ? ev.id : "-"}`,
+    proxyUsername ? `kp=${proxyUsername}` : `cid=${stripDecoratorsFromCid(ev && ev.cid)}`,
+    `seq=${ev && ev.seq !== undefined ? ev.seq : "-"}`,
+    `msg=${ev && ev.msg_idx !== undefined ? ev.msg_idx : "-"}`,
+    `chunk=${ev && ev.chunk_idx !== undefined ? ev.chunk_idx : "-"}`,
+  ];
+  for (const text of transportBits) {
+    const node = document.createElement("span");
+    node.textContent = text;
+    transport.appendChild(node);
+  }
+  block.appendChild(transport);
+
+  if (summaryText) {
+    const details = document.createElement("details");
+    details.className = "event-summary-debug";
+    const summary = document.createElement("summary");
+    summary.textContent = "调试详情";
+    details.appendChild(summary);
+    const debug = document.createElement("pre");
+    const debugBits = [];
+    if (kv.family) debugBits.push(`family=${kv.family}`);
+    if (kv.slot) debugBits.push(`slot=${kv.slot}`);
+    if (kv.slice) debugBits.push(`slice=${kv.slice}`);
+    if (kv.score) debugBits.push(`score=${kv.score}`);
+    if (kv.ref) debugBits.push(`ref=${kv.ref}`);
+    if (kv.lead) debugBits.push(`lead=${kv.lead}`);
+    if (kv.tpl) debugBits.push(`tpl=${kv.tpl}`);
+    debugBits.push(`summary=${summaryText}`);
+    debug.textContent = debugBits.join("\n");
+    details.appendChild(debug);
+    block.appendChild(details);
+  }
+
+  return block;
+}
+
 function buildEventBody(ev, hideAscii, eventId = "") {
   const body = document.createElement("div");
   body.className = "body";
 
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  const metaParts = [`id=${ev.id}`];
-  const proxyUsername = getProxyUsername(ev && ev.proxy_username);
-  if (proxyUsername) {
-    metaParts.push(`kp=${proxyUsername}`);
-  }
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
-  if (summaryText) {
-    metaParts.push(summaryText);
-  } else {
-    metaParts.push(`cid=${stripDecoratorsFromCid(ev && ev.cid)}`);
-  }
-  metaParts.push(`seq=${ev.seq}`);
-  metaParts.push(`msg_idx=${ev.msg_idx}`);
-  metaParts.push(`chunk_idx=${ev.chunk_idx}`);
-  meta.textContent = metaParts.join(" ");
-  body.appendChild(meta);
+  body.appendChild(buildEventReadableSummary(ev, summaryText));
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
@@ -3248,6 +4303,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const dumpGrid = document.createElement("div");
   dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
   body.appendChild(dumpGrid);
+  let semanticCompareAdded = false;
 
   function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
     if (!base64Text) return;
@@ -3292,7 +4348,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     hexHead.textContent = dump.header;
     const pre = document.createElement("pre");
     pre.className = "hex-body";
-    pre.innerHTML = renderHexBodyHtml(dump, hideAscii);
+    pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: sourceKey === "full" });
 
     hexShell.appendChild(hexHead);
     hexShell.appendChild(pre);
@@ -3360,20 +4416,52 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   }
 
   if (isRequest && (hasBeforeDump || hasDecodedDump)) {
-    const treeRow = buildTreeCompareRow(beforePay, decodedPay, summaryText);
-    if (treeRow) {
-      body.appendChild(treeRow);
+    const stringResult = buildStringResultPanel(beforePay, decodedPay, summaryText);
+    if (stringResult) {
+      stringResult.classList.add("string-result-inline");
+      dumpGrid.classList.add("has-string-results");
+      dumpGrid.appendChild(stringResult);
+    }
+  }
+
+  if (isRequest && (hasBeforeDump || hasDecodedDump)) {
+    const childCompare = buildChildComparePanel(beforePay, decodedPay, summaryText);
+    if (childCompare) {
+      childCompare.classList.add("child-compare-inline");
+      dumpGrid.appendChild(childCompare);
+      semanticCompareAdded = true;
+    } else {
+      const treeRow = buildTreeCompareRow(beforePay, decodedPay, summaryText);
+      if (treeRow) {
+        body.appendChild(treeRow);
+      }
     }
   } else if (!isRequest && hasDecodedDump) {
-    const treeRow = buildTreeCompareRow("", decodedPay, summaryText);
-    if (treeRow) {
-      body.appendChild(treeRow);
+    const childCompare = buildChildComparePanel("", decodedPay, summaryText);
+    if (childCompare) {
+      body.appendChild(childCompare);
+      semanticCompareAdded = true;
+    } else {
+      const treeRow = buildTreeCompareRow("", decodedPay, summaryText);
+      if (treeRow) {
+        body.appendChild(treeRow);
+      }
     }
   }
 
   const analysisGrid = buildEventAnalysisGrid(ev);
   if (analysisGrid) {
-    body.appendChild(analysisGrid);
+    if (semanticCompareAdded) {
+      const details = document.createElement("details");
+      details.className = "analysis-debug-details";
+      const summary = document.createElement("summary");
+      summary.textContent = "更多解析 / XOR / 字符串";
+      details.appendChild(summary);
+      details.appendChild(analysisGrid);
+      body.appendChild(details);
+    } else {
+      body.appendChild(analysisGrid);
+    }
   }
 
   return body;
@@ -3564,28 +4652,11 @@ function moveHit(step) {
 }
 
 function collectAutoExpandIds(visibleEvents, expandMode) {
-  const out = new Set();
-  if (!Array.isArray(visibleEvents) || visibleEvents.length <= 0) return out;
-  if (state.autoRefresh) return out;
-
-  let count = 0;
-  if (expandMode === "on") {
-    count = AUTO_EXPAND_ON_COUNT;
-  } else if (expandMode === "smart") {
-    count = AUTO_EXPAND_SMART_COUNT;
-  }
-  if (count <= 0) return out;
-
-  for (let i = visibleEvents.length - 1; i >= 0 && out.size < count; i--) {
-    const ev = visibleEvents[i];
-    if (!String(ev && ev.summary ? ev.summary : "").trim()) {
-      continue;
-    }
-    const eventId = getEventId(ev);
-    if (!eventId || state.collapsedIds.has(eventId)) continue;
-    out.add(eventId);
-  }
-  return out;
+  // Keep expansion state tied to explicit user toggles; preview/payload prefetch
+  // rerenders should not open packets on their own.
+  void visibleEvents;
+  void expandMode;
+  return new Set();
 }
 
 function renderEvents() {
@@ -3944,6 +5015,12 @@ if (el.deleteFlow) {
     } catch (e) {
       setStatus(`delete flow error: ${e.message}`);
     }
+  });
+}
+
+if (el.sidebarToggle) {
+  el.sidebarToggle.addEventListener("click", () => {
+    setSidebarHidden(!state.sidebarHidden, true);
   });
 }
 

@@ -4,7 +4,7 @@ INDEX_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TCP Flow Viewer</title>
+  <title>TCP 包查看器</title>
   <style>
     :root {
       --left-width: 380px;
@@ -97,6 +97,15 @@ INDEX_HTML = """
       grid-template-columns: minmax(260px, var(--left-width)) 8px 1fr;
       min-width: 0;
       overflow: hidden;
+    }
+
+    .app.sidebar-hidden {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .app.sidebar-hidden .left,
+    .app.sidebar-hidden .splitter {
+      display: none;
     }
 
     .left {
@@ -273,7 +282,7 @@ INDEX_HTML = """
     .toolbar {
       border-bottom: 1px solid var(--line);
       display: grid;
-      grid-template-columns: minmax(300px, 1fr) 78px 88px 232px 96px 106px 92px 88px 118px;
+      grid-template-columns: 76px minmax(260px, 1fr) 78px 88px 232px 96px 106px 92px 88px 118px;
       gap: 8px;
       align-items: center;
       padding: 8px 10px;
@@ -296,6 +305,10 @@ INDEX_HTML = """
       white-space: nowrap;
       font-weight: 700;
       min-width: 0;
+    }
+
+    .sidebar-toggle {
+      white-space: nowrap;
     }
 
     input, select, button {
@@ -615,12 +628,111 @@ INDEX_HTML = """
       margin-bottom: 6px;
     }
 
+    .event-readable-summary {
+      margin-bottom: 8px;
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .event-summary-primary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .event-summary-chip {
+      max-width: 100%;
+      min-width: 0;
+      padding: 5px 8px;
+      border: 1px solid var(--chip-line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--chip-bg) 88%, transparent);
+      color: var(--text);
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .event-summary-chip-report,
+    .event-summary-chip-protect {
+      border-color: color-mix(in srgb, var(--accent) 58%, var(--line));
+    }
+
+    .event-summary-chip-sim,
+    .event-summary-chip-mode,
+    .event-summary-chip-match {
+      color: color-mix(in srgb, var(--text) 88%, var(--accent));
+    }
+
+    .event-summary-chip-warn {
+      border-color: color-mix(in srgb, #f59e0b 62%, var(--line));
+      background: color-mix(in srgb, #f59e0b 12%, var(--panel));
+      color: color-mix(in srgb, #f59e0b 78%, var(--text));
+    }
+
+    .event-summary-transport {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px 10px;
+      color: var(--muted);
+      font-size: 11px;
+      min-width: 0;
+    }
+
+    .event-summary-debug {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .event-summary-debug summary {
+      cursor: pointer;
+      width: fit-content;
+    }
+
+    .event-summary-debug pre {
+      margin: 5px 0 0;
+      padding: 7px 8px;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--dump-bg) 78%, var(--panel));
+      color: var(--muted);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .analysis-grid {
       margin-top: 10px;
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 10px;
       align-items: start;
+    }
+
+    .analysis-debug-details {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+      overflow: hidden;
+    }
+
+    .analysis-debug-details > summary {
+      cursor: pointer;
+      user-select: none;
+      padding: 7px 10px;
+      font-weight: 700;
+      color: var(--muted);
+      border-bottom: 1px solid transparent;
+    }
+
+    .analysis-debug-details[open] > summary {
+      border-bottom-color: var(--line);
+    }
+
+    .analysis-debug-details .analysis-grid {
+      margin: 0;
+      padding: 10px;
     }
 
     .analysis-card {
@@ -657,13 +769,13 @@ INDEX_HTML = """
       display: grid;
       gap: 8px;
       min-width: 0;
-      max-height: 260px;
+      max-height: min(520px, 56vh);
       overflow: auto;
       overscroll-behavior: contain;
     }
 
     .analysis-card-strings .analysis-card-body {
-      max-height: 320px;
+      max-height: min(620px, 62vh);
     }
 
     .analysis-chip-list {
@@ -952,11 +1064,18 @@ INDEX_HTML = """
     .hex-comment {
       color: color-mix(in srgb, var(--accent) 76%, var(--text));
       display: inline-block;
-      max-width: clamp(28ch, 34vw, 88ch);
+      max-width: clamp(18ch, 22vw, 48ch);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
       vertical-align: top;
+    }
+
+    .hex-comment-block {
+      display: inline-block;
+      margin-left: 8ch;
+      margin-top: 1px;
+      max-width: min(52ch, 100%);
     }
 
     .tree-shell {
@@ -965,7 +1084,7 @@ INDEX_HTML = """
       border-radius: 6px;
       background: color-mix(in srgb, var(--dump-bg) 88%, var(--panel));
       overflow: auto;
-      max-height: 360px;
+      max-height: min(720px, 70vh);
     }
 
     .tree-compare-row {
@@ -982,7 +1101,298 @@ INDEX_HTML = """
 
     .tree-shell-compare {
       margin-top: 0;
-      max-height: 420px;
+      max-height: min(760px, 72vh);
+    }
+
+    .child-compare {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--dump-bg) 96%, var(--panel));
+      overflow: hidden;
+    }
+
+    .child-compare-head {
+      padding: 6px 9px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--chip-bg) 72%, transparent);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-weight: 700;
+    }
+
+    .child-compare-head small {
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .child-compare-grid {
+      padding: 6px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(760px, 100%), 1fr));
+      gap: 6px;
+      align-items: start;
+    }
+
+    .child-pair-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--dump-bg) 98%, var(--panel));
+      padding: 0;
+      display: grid;
+      gap: 0;
+      line-height: 1.35;
+      overflow: hidden;
+    }
+
+    .child-card-result-changed {
+      border-color: color-mix(in srgb, #22c55e 44%, var(--line));
+      background: color-mix(in srgb, #22c55e 2%, var(--dump-bg));
+    }
+
+    .child-card-result-same {
+      border-color: color-mix(in srgb, #f59e0b 48%, var(--line));
+      background: color-mix(in srgb, #f59e0b 3%, var(--dump-bg));
+    }
+
+    .child-card-result-struct {
+      border-color: color-mix(in srgb, var(--resp) 46%, var(--line));
+      background: color-mix(in srgb, var(--resp) 3%, var(--dump-bg));
+    }
+
+    .child-pair-title,
+    .child-side-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      font-weight: 700;
+    }
+
+    .child-pair-title {
+      padding: 5px 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      background: color-mix(in srgb, var(--chip-bg) 54%, transparent);
+    }
+
+    .child-title-badges {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .child-pair-sides {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      min-width: 0;
+      align-items: start;
+      padding: 6px;
+    }
+
+    .child-side {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--dump-bg) 90%, var(--panel));
+      padding: 6px 7px;
+      display: grid;
+      align-content: start;
+      gap: 4px;
+    }
+
+    .string-result-panel {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+      overflow: hidden;
+      min-width: 0;
+      max-height: 150px;
+    }
+
+    .string-result-head {
+      padding: 4px 9px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--chip-bg) 84%, transparent);
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .string-result-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      padding: 6px 8px;
+      max-height: 122px;
+      overflow: auto;
+    }
+
+    .string-result-side {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--dump-bg) 82%, var(--panel));
+      padding: 5px 7px;
+    }
+
+    .string-result-side-before {
+      border-color: color-mix(in srgb, #f59e0b 42%, var(--line));
+    }
+
+    .string-result-side-after {
+      border-color: color-mix(in srgb, var(--resp) 42%, var(--line));
+    }
+
+    .string-result-label {
+      margin-bottom: 3px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .string-result-side pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: color-mix(in srgb, var(--muted) 86%, var(--text));
+      line-height: 1.35;
+      font-size: 11px;
+    }
+
+    .child-side-before {
+      border-color: color-mix(in srgb, #f59e0b 42%, var(--line));
+      background: color-mix(in srgb, #f59e0b 4%, var(--dump-bg));
+    }
+
+    .child-side-after {
+      border-color: color-mix(in srgb, var(--resp) 42%, var(--line));
+      background: color-mix(in srgb, var(--resp) 4%, var(--dump-bg));
+    }
+
+    .child-side-label {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 11px;
+      border: 1px solid var(--chip-line);
+      border-radius: 999px;
+      padding: 1px 7px;
+      background: color-mix(in srgb, var(--chip-bg) 80%, transparent);
+    }
+
+    .child-status {
+      flex: 0 0 auto;
+      border: 1px solid var(--chip-line);
+      border-radius: 999px;
+      padding: 1px 7px;
+      font-size: 11px;
+      color: var(--text);
+      background: color-mix(in srgb, var(--chip-bg) 82%, transparent);
+      white-space: nowrap;
+    }
+
+    .child-status-changed {
+      border-color: color-mix(in srgb, #22c55e 58%, var(--line));
+      color: color-mix(in srgb, #22c55e 78%, var(--text));
+    }
+
+    .child-status-same {
+      border-color: color-mix(in srgb, #f59e0b 58%, var(--line));
+      color: color-mix(in srgb, #f59e0b 82%, var(--text));
+    }
+
+    .child-status-struct {
+      border-color: color-mix(in srgb, var(--resp) 58%, var(--line));
+      color: color-mix(in srgb, var(--resp) 76%, var(--text));
+    }
+
+    .child-action-status-keep {
+      border-color: color-mix(in srgb, #22c55e 62%, var(--line));
+      color: color-mix(in srgb, #22c55e 82%, var(--text));
+    }
+
+    .child-action-status-clean,
+    .child-action-status-drop,
+    .child-action-status-neutral {
+      border-color: color-mix(in srgb, #f97316 64%, var(--line));
+      color: color-mix(in srgb, #f97316 86%, var(--text));
+    }
+
+    .child-action-status-replace {
+      border-color: color-mix(in srgb, var(--resp) 68%, var(--line));
+      color: color-mix(in srgb, var(--resp) 82%, var(--text));
+    }
+
+    .child-action-status-observe {
+      border-color: color-mix(in srgb, var(--muted) 58%, var(--line));
+      color: var(--muted);
+    }
+
+    .child-card-line {
+      color: var(--muted);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+
+    .child-card-line-long {
+      white-space: pre-wrap;
+      overflow: visible;
+      text-overflow: clip;
+      overflow-wrap: anywhere;
+    }
+
+    .child-card-rule {
+      color: color-mix(in srgb, var(--accent) 76%, var(--text));
+    }
+
+    .child-card-parse {
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+    }
+
+    .child-card-observation {
+      color: color-mix(in srgb, #22c55e 76%, var(--text));
+      font-weight: 600;
+    }
+
+    .child-card-line strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .child-debug-details {
+      border-top: 1px dashed color-mix(in srgb, var(--line) 75%, transparent);
+      margin-top: 1px;
+      padding-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .child-debug-title {
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .child-debug-details pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+    }
+
+    .child-compare-note {
+      padding: 0 10px 9px;
+      color: var(--muted);
+      line-height: 1.45;
     }
 
     .tree-compare-before .tree-shell {
@@ -1057,6 +1467,9 @@ INDEX_HTML = """
         grid-template-columns: 1fr;
         grid-template-rows: 42% 58%;
       }
+      .app.sidebar-hidden {
+        grid-template-rows: 1fr;
+      }
       .splitter { display: none; }
       .left {
         border-right: 0;
@@ -1067,6 +1480,15 @@ INDEX_HTML = """
         grid-template-columns: 1fr 1fr;
       }
       .tree-compare-row {
+        grid-template-columns: 1fr;
+      }
+      .child-compare-grid {
+        grid-template-columns: 1fr;
+      }
+      .child-pair-sides {
+        grid-template-columns: 1fr;
+      }
+      .string-result-grid {
         grid-template-columns: 1fr;
       }
     }
@@ -1084,7 +1506,60 @@ INDEX_HTML = """
       }
 
       .dump-grid-request {
-        grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+        grid-template-columns: fit-content(720px) minmax(560px, 1fr) minmax(560px, 1fr);
+        grid-template-rows: auto auto auto;
+        align-items: start;
+      }
+
+      .dump-grid-request .dump-panel-full {
+        grid-column: 1;
+        grid-row: 1 / span 2;
+        width: max-content;
+        max-width: min(720px, 36vw);
+      }
+
+      .dump-grid-request.has-string-results .dump-panel-full {
+        grid-row: 1 / span 2;
+      }
+
+      .dump-grid-request .dump-panel-full .hex-shell {
+        width: max-content;
+        max-width: 100%;
+        max-height: min(760px, 72vh);
+      }
+
+      .dump-grid-request .dump-panel-before {
+        grid-column: 2;
+        grid-row: 1;
+      }
+
+      .dump-grid-request .dump-panel-decoded {
+        grid-column: 3;
+        grid-row: 1;
+      }
+
+      .dump-grid-request .dump-panel-before .hex-shell,
+      .dump-grid-request .dump-panel-decoded .hex-shell {
+        max-height: min(760px, 72vh);
+        min-width: 560px;
+      }
+
+      .dump-grid-request .string-result-inline {
+        grid-column: 2 / 4;
+        grid-row: 2;
+        margin-top: 0;
+      }
+
+      .dump-grid-request .child-compare-inline {
+        grid-column: 1 / 4;
+        grid-row: 2;
+        margin-top: 0;
+        overflow-x: hidden;
+      }
+
+      .dump-grid-request.has-string-results .child-compare-inline {
+        grid-column: 1 / 4;
+        grid-row: 3;
       }
     }
   </style>
@@ -1093,18 +1568,18 @@ INDEX_HTML = """
   <div class="app" id="appRoot">
     <section class="left" id="leftPane">
       <div class="left-head">
-        <div class="left-title">Flows</div>
+        <div class="left-title">连接列表</div>
         <div class="left-tools">
           <span id="flowCount" class="count">0</span>
-          <button id="reloadBtn">Reload</button>
-          <button id="deleteFlowBtn">Delete Flow</button>
+          <button id="reloadBtn">刷新</button>
+          <button id="deleteFlowBtn">删除连接</button>
         </div>
       </div>
       <div class="flow-cols">
-        <div>Path</div>
-        <div>Type</div>
-        <div>Size</div>
-        <div>Time</div>
+        <div>路径</div>
+        <div>类型</div>
+        <div>大小</div>
+        <div>时长</div>
       </div>
       <div id="flowList"></div>
     </section>
@@ -1113,16 +1588,17 @@ INDEX_HTML = """
 
     <section class="right" id="rightPane">
       <div class="tabs">
-        <span class="tab active">Stream Data</span>
-        <span class="tab">Connection</span>
-        <span class="tab">Timing</span>
-        <span class="tab">Comment</span>
+        <span class="tab active">数据流</span>
+        <span class="tab">连接</span>
+        <span class="tab">时间</span>
+        <span class="tab">备注</span>
       </div>
       <div class="toolbar">
-        <div id="selectedFlowTitle" class="headline">No flow selected</div>
+        <button id="toggleSidebarBtn" class="sidebar-toggle" type="button" title="隐藏左侧连接列表，把宽度让给包视图。">隐藏列表</button>
+        <div id="selectedFlowTitle" class="headline">未选择连接</div>
         <select id="hideAscii">
           <option value="0">ASCII</option>
-          <option value="1">NoASCII</option>
+          <option value="1">隐藏ASCII</option>
         </select>
         <select id="previewBytes">
           <option value="16">16 byte</option>
@@ -1135,32 +1611,32 @@ INDEX_HTML = """
           <option value="128">128 byte</option>
         </select>
         <div class="preview-offset-group" title="Preview window offset. Shift preview window forward without expanding body.">
-          <span class="preview-offset-label">ofs</span>
+          <span class="preview-offset-label">偏移</span>
           <button id="previewOffsetPrev" class="mini-btn" type="button" title="Shift preview window backward.">-</button>
           <input id="previewOffsetRange" class="preview-offset-range" type="range" min="0" max="4096" step="1" value="0" />
           <button id="previewOffsetNext" class="mini-btn" type="button" title="Shift preview window forward.">+</button>
           <input id="previewOffsetInput" class="preview-offset-input" type="number" min="0" max="65535" step="1" value="0" />
         </div>
         <select id="previewSpace" title="Insert an extra separator every 16 bytes in preview and hex body.">
-          <option value="1">Gap16 On</option>
-          <option value="0">Gap16 Off</option>
+          <option value="1">16字节分隔 开</option>
+          <option value="0">16字节分隔 关</option>
         </select>
         <select id="bodyTone">
-          <option value="slate">Body Slate</option>
-          <option value="cyan">Body Cyan</option>
-          <option value="mint">Body Mint</option>
-          <option value="amber">Body Amber</option>
-          <option value="rose">Body Rose</option>
-          <option value="violet">Body Violet</option>
+          <option value="slate">正文 灰蓝</option>
+          <option value="cyan">正文 青色</option>
+          <option value="mint">正文 绿色</option>
+          <option value="amber">正文 琥珀</option>
+          <option value="rose">正文 玫红</option>
+          <option value="violet">正文 紫色</option>
         </select>
-        <select id="expandMode" title="Expand behavior for packet body details.">
-          <option value="smart">展开 智能</option>
-          <option value="on">展开 开</option>
+        <select id="expandMode" title="包体只会因手动点击或已记录展开状态打开；预览/悬停预取不会自动展开。">
+          <option value="smart">展开 手动</option>
+          <option value="on">展开 手动</option>
           <option value="off">展开 关</option>
         </select>
         <select id="autoRefresh" title="Auto Follow: continuously pull latest packets. Manual: pause updates.">
-          <option value="1">Auto Follow</option>
-          <option value="0">Manual</option>
+          <option value="1">自动跟随</option>
+          <option value="0">手动暂停</option>
         </select>
         <select id="themeMode">
           <option value="github-dark">GitHub Dark</option>
@@ -1185,19 +1661,19 @@ INDEX_HTML = """
           <option value="full_exact">全包 完全 (8KB)</option>
         </select>
         <input id="ruleColor" type="color" value="#ffd166" />
-        <button id="searchApplyBtn" title="Apply highlight search.">Search</button>
-        <button id="searchPrevBtn" title="Jump to previous hit.">Prev</button>
-        <button id="searchNextBtn" title="Jump to next hit.">Next</button>
+        <button id="searchApplyBtn" title="Apply highlight search.">搜索</button>
+        <button id="searchPrevBtn" title="Jump to previous hit.">上一个</button>
+        <button id="searchNextBtn" title="Jump to next hit.">下一个</button>
         <div id="searchHitStat" class="tool-stat" title="current hit / total hit">--/--</div>
         <select id="filterDir" title="Filter by request or response direction.">
-          <option value="all">Dir All</option>
-          <option value="req">Req Only</option>
-          <option value="resp">Resp Only</option>
+          <option value="all">全部方向</option>
+          <option value="req">只看请求</option>
+          <option value="resp">只看响应</option>
         </select>
-        <input id="filterMinLen" type="number" min="0" step="1" placeholder="Min Len" />
-        <input id="filterMaxLen" type="number" min="0" step="1" placeholder="Max Len" />
-        <button id="filterApplyBtn" title="Apply current filters.">Filter</button>
-        <button id="filterClearBtn" title="Clear all filters.">Clear</button>
+        <input id="filterMinLen" type="number" min="0" step="1" placeholder="最小长度" />
+        <input id="filterMaxLen" type="number" min="0" step="1" placeholder="最大长度" />
+        <button id="filterApplyBtn" title="Apply current filters.">过滤</button>
+        <button id="filterClearBtn" title="Clear all filters.">清空</button>
       </div>
       <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB'。输入后点 Search 或按 Enter；Prev/Next 跳命中。Filter 可叠加方向 + 长度范围。ofs 可平移预览窗口做纵向对比。展开体会额外显示解密概览、字符串段和 XOR 猜测。</div>
       <div class="status" id="status">__STATUS_BOOT__</div>
