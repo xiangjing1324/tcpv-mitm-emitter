@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import html
+import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from .web import INDEX_HTML
 
@@ -59,6 +60,7 @@ def create_app(runtime) -> FastAPI:
         page = page.replace("__INITIAL_EVENTS__", events_html)
         page = page.replace("__STATUS_BOOT__", f"preload accounts={len(accounts)} events={event_count}")
         page = page.replace("__APP_JS_VERSION__", runtime.instance_id or "dev")
+        page = page.replace("__APP_CONFIG__", json.dumps(runtime.get_config(), ensure_ascii=False))
         return page
 
     @app.get("/", response_class=HTMLResponse)
@@ -88,7 +90,7 @@ def create_app(runtime) -> FastAPI:
     def events(
         account: str = Query(..., min_length=1),
         after_id: str | None = Query(None),
-        limit: int = Query(200, ge=1, le=1000),
+        limit: int = Query(200, ge=1, le=100000),
         include_payload: bool = Query(True),
     ) -> dict:
         items, last_id, has_more = runtime.get_events(
@@ -134,6 +136,63 @@ def create_app(runtime) -> FastAPI:
     @app.get("/stats")
     def stats() -> dict:
         return runtime.get_stats()
+
+    @app.get("/config")
+    def config() -> dict:
+        return runtime.get_config()
+
+    @app.post("/imports")
+    async def imports(
+        request: Request,
+        filename: str = Query("import.txt", min_length=1),
+    ) -> dict:
+        data = await request.body()
+        if not data:
+            raise HTTPException(status_code=400, detail="empty import body")
+        try:
+            return runtime.import_flow_bytes(data, filename)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/flows/export")
+    def export_flow(account: str = Query(..., min_length=1)) -> FileResponse:
+        try:
+            path, _info = runtime.export_flow(account)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return FileResponse(
+            path=str(path),
+            filename=path.name,
+            media_type="application/gzip",
+        )
+
+    @app.post("/flows/save")
+    def save_flow(account: str = Query(..., min_length=1)) -> dict:
+        try:
+            return runtime.save_flow(account)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/archives")
+    def archives() -> list[dict]:
+        return runtime.list_archives()
+
+    @app.post("/archives/replay")
+    def replay_archive(name: str = Query(..., min_length=1)) -> dict:
+        try:
+            return runtime.replay_archive(name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/app.js")
     def app_js() -> PlainTextResponse:

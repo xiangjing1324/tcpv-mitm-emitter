@@ -41,6 +41,10 @@ const el = {
   flowList: document.getElementById("flowList"),
   flowCount: document.getElementById("flowCount"),
   selectedTitle: document.getElementById("selectedFlowTitle"),
+  importFile: document.getElementById("importFileInput"),
+  importFlow: document.getElementById("importFlowBtn"),
+  saveFlow: document.getElementById("saveFlowBtn"),
+  exportFlow: document.getElementById("exportFlowBtn"),
   reload: document.getElementById("reloadBtn"),
   deleteFlow: document.getElementById("deleteFlowBtn"),
   prefix: document.getElementById("prefixRule"),
@@ -83,9 +87,14 @@ const BODY_TONES = {
   violet: { body: "#e2d4ff", offset: "#8b5cf6", ascii: "#b6a1d8", accent: "#a78bfa" },
 };
 
+const TCPV_CONFIG = window.TCPV_CONFIG && typeof window.TCPV_CONFIG === "object" ? window.TCPV_CONFIG : {};
+const cfgNumber = (key, fallback) => {
+  const value = Number(TCPV_CONFIG[key]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+};
 const MAX_FULL_SCAN_BYTES = 8192;
-const MAX_EVENTS_IN_MEMORY = 10000;
-const EVENTS_FETCH_LIMIT = 1000;
+const MAX_EVENTS_IN_MEMORY = cfgNumber("max_events_in_memory", 50000);
+const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 2000);
 const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
@@ -123,14 +132,32 @@ const XOR_TEXT_KEYWORDS = [
   "spotlight",
   "coremotion",
   "virtualaudio",
+  "uiwindow",
+  "uitransitionview",
+  "uidropshadowview",
+  "uiview",
+  "uiviewcontroller",
+  "uiapplication",
+  "airdrop",
+  "airdropalertui",
+  "sharing",
 ];
 const XOR_COMMON_KEYS = [0xb6, 0x3c, 0xb3, 0x8e];
+const XOR_KEY_PRIORITY = new Map([
+  [0xb6, 4],
+  [0x3c, 3],
+  [0xb3, 2],
+  [0x8e, 1],
+]);
 const TIMESTAMP_SECONDS_MIN = 1_672_531_200; // 2023-01-01
 const TIMESTAMP_SECONDS_MAX = 1_893_456_000; // 2030-01-01
 const TIMESTAMP_MAX_MARKS_PER_DUMP = 8;
+const TSS_PARENT_TRAILER_MAGIC_HEX = "1234567887654321";
 const KNOWN_0102000A_TIMESTAMP_LAYOUTS = [
   { len: 68, innerType: 0x100a, selector0: 0x200e0002, selector1: 0x34560001, offsets: [0x40], label: "dfm-current" },
   { len: 80, innerType: 0x1001, selector0: 0x200e0002, selector1: 0x34560001, offsets: [0x20], label: "dfm-session" },
+  { len: 68, innerType: 0x100a, selector0: 0x200d0002, selector1: 0x34560001, offsets: [0x40], label: "dfm-current-200d" },
+  { len: 80, innerType: 0x1001, selector0: 0x200d0002, selector1: 0x34560001, offsets: [0x20], label: "dfm-session-200d" },
   { len: 68, innerType: 0x810b, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x40], label: "uagame-current" },
   { len: 160, innerType: 0x8023, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x58], label: "uagame-current-8023" },
   { innerType: 0x8418, selector0: 0x21650002, selector1: 0x34560001, offsetFromEnd: 0x14, label: "uagame-tail-8418" },
@@ -282,6 +309,20 @@ async function apiJson(url) {
 
 async function apiPost(url) {
   const resp = await fetch(url, { method: "POST", cache: "no-store" });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${body.slice(0, 200)}`);
+  }
+  return resp.json();
+}
+
+async function apiPostBytes(url, bytes) {
+  const resp = await fetch(url, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: bytes,
+  });
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${body.slice(0, 200)}`);
@@ -728,6 +769,12 @@ function updateActionButtons() {
   if (el.deleteFlow) {
     el.deleteFlow.disabled = !state.flowId;
   }
+  if (el.saveFlow) {
+    el.saveFlow.disabled = !state.flowId;
+  }
+  if (el.exportFlow) {
+    el.exportFlow.disabled = !state.flowId;
+  }
 }
 
 function renderFlowList() {
@@ -966,6 +1013,48 @@ async function clearCurrentFlow() {
     renderEvents();
   }
   setStatus("selected flow cleared");
+}
+
+async function importFlowFile(file) {
+  if (!file) return;
+  const bytes = await file.arrayBuffer();
+  const result = await apiPostBytes(`/imports?filename=${encodeURIComponent(file.name || "import.txt")}`, bytes);
+  const account = String(result.account || "");
+  await loadFlows(true, account);
+  if (account) {
+    await selectFlow(account);
+  }
+  setStatus(`imported ${result.events || 0} packets from ${file.name || "file"}`);
+}
+
+async function saveCurrentFlow() {
+  const flowId = String(state.flowId || "").trim();
+  if (!flowId) return;
+  const result = await apiPost(`/flows/save?account=${encodeURIComponent(flowId)}`);
+  setStatus(`saved ${result.events || 0} packets -> ${result.filename || result.path || "archive"}`);
+}
+
+async function exportCurrentFlow() {
+  const flowId = String(state.flowId || "").trim();
+  if (!flowId) return;
+  const resp = await fetch(`/flows/export?account=${encodeURIComponent(flowId)}`, { cache: "no-store" });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${body.slice(0, 200)}`);
+  }
+  const blob = await resp.blob();
+  const disposition = resp.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  const filename = match ? match[1] : `${flowId.replace(/[^a-z0-9_.-]+/gi, "_")}.tcpvflow.jsonl.gz`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  setStatus(`exported ${filename}`);
 }
 
 function b64ToBytes(base64Text) {
@@ -1849,17 +1938,34 @@ function timestampOffsetsForKnownShape(layout, shape) {
   ));
 }
 
+function timestampShapeDisplay(label) {
+  const value = String(label || "").trim();
+  const labels = {
+    "dfm-current": "DFM当前秒",
+    "dfm-session": "DFM会话基准秒",
+    "dfm-current-200d": "DFM当前秒/200D分支",
+    "dfm-session-200d": "DFM会话基准秒/200D分支",
+    "uagame-current": "UAGame当前秒",
+    "uagame-current-8023": "UAGame当前秒/8023",
+    "uagame-tail-8418": "UAGame尾部当前秒/8418",
+    "uagame-session": "UAGame会话基准秒",
+  };
+  return labels[value] || value;
+}
+
 function buildTimestampRange(start, value, label) {
   const seconds = Number(value);
   const clock = formatTimestampClock(seconds);
   const offsetText = formatHexValue(start);
   const kind = String(label || "known");
+  const display = timestampShapeDisplay(kind);
+  const labelText = display && display !== "known" ? `[${display}] ` : "";
   return {
     start,
     end: start + 4,
     value: seconds,
     kind,
-    text: `时间戳 ${clock || seconds} @${offsetText}`,
+    text: `时间戳 ${labelText}${clock || seconds} @${offsetText}`,
   };
 }
 
@@ -2444,7 +2550,7 @@ function reportBusinessLabel(value) {
   if (!Number.isFinite(parsed)) return "";
   if (parsed === 0x010a001b) return "父容器/批量上报骨架";
   if (parsed === 0x010a0011) return "高级白名单/保护节点";
-  if (parsed === 0x0102000a) return "二进制叶子/设备字段";
+  if (parsed === 0x0102000a) return "二进制叶子/运行态字段";
   const family = Math.floor(parsed / 0x10000) & 0xffff;
   if (family === 0x0112) return "普通白名单/结构化节点";
   if (family === 0x010a) return "容器/元数据节点";
@@ -2666,6 +2772,11 @@ function formatHexBytePreview(byteValues, limit = 16) {
     .slice(0, max)
     .map((byte) => (byte & 0xff).toString(16).padStart(2, "0"))
     .join(" ");
+}
+
+function formatHexBytesCompact(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  return byteValues.map((byte) => (byte & 0xff).toString(16).padStart(2, "0")).join("");
 }
 
 function formatHexSignature(byteValues) {
@@ -3103,7 +3214,40 @@ function parseTssChildrenAt(byteValues, startOffset, maxChildren = 256) {
   return {
     children,
     consumed: offset - Number(startOffset || 0),
+    endOffset: offset,
     complete: children.length > 0 && offset === byteValues.length,
+  };
+}
+
+function buildParentContainerInfo(byteValues, parsedChildren, options = {}) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
+  const childStartOffset = Math.max(0, Math.floor(Number(options.childStartOffset || 0)));
+  const countOffset = Math.max(0, Math.floor(Number(options.countOffset || 0)));
+  const declaredCount = Math.max(0, Math.floor(Number(options.declaredCount || 0)));
+  const parsed = parsedChildren && typeof parsedChildren === "object" ? parsedChildren : {};
+  const rawChildrenEndOffset = Number(parsed.endOffset);
+  const childrenEndOffset = Number.isFinite(rawChildrenEndOffset)
+    ? Math.max(0, Math.min(byteValues.length, Math.floor(rawChildrenEndOffset)))
+    : childStartOffset;
+  const tailBytes = byteValues.slice(childrenEndOffset);
+  const tailHex = formatHexBytesCompact(tailBytes);
+  return {
+    layout: String(options.layout || ""),
+    countOffset,
+    childCount: declaredCount,
+    headerLen: childStartOffset,
+    childStartOffset,
+    childrenEndOffset,
+    childBytesLen: Math.max(0, childrenEndOffset - childStartOffset),
+    tailOffset: childrenEndOffset,
+    tailLen: tailBytes.length,
+    tailHex,
+    tailMagicOk: tailHex === TSS_PARENT_TRAILER_MAGIC_HEX,
+    tailRole: tailBytes.length === 0
+      ? "empty"
+      : tailHex === TSS_PARENT_TRAILER_MAGIC_HEX
+        ? "fixed-parent-trailer"
+        : "unknown-trailer",
   };
 }
 
@@ -3120,11 +3264,33 @@ function parseTssChildRecords(byteValues) {
       ? parseTssChildrenAt(byteValues, 21, compactCount)
       : { children: [], complete: false };
   if (compactCounted.children.length === compactCount) {
-    return { root, children: compactCounted.children, layout: "compact-count-u8" };
+    const layout = "compact-count-u8";
+    return {
+      root,
+      children: compactCounted.children,
+      layout,
+      parent: buildParentContainerInfo(byteValues, compactCounted, {
+        layout,
+        countOffset: 20,
+        childStartOffset: 21,
+        declaredCount: compactCount,
+      }),
+    };
   }
   if (!Number.isFinite(childCount) || childCount < 0 || childCount > 256) {
     if (compactCounted.children.length > 0) {
-      return { root, children: compactCounted.children, layout: "compact-count-u8-partial" };
+      const layout = "compact-count-u8-partial";
+      return {
+        root,
+        children: compactCounted.children,
+        layout,
+        parent: buildParentContainerInfo(byteValues, compactCounted, {
+          layout,
+          countOffset: 20,
+          childStartOffset: 21,
+          declaredCount: compactCount,
+        }),
+      };
     }
     return legacy.children.length > 0 ? { root, children: legacy.children, layout: "legacy-no-count" } : { root, children: [] };
   }
@@ -3178,7 +3344,18 @@ function parseTssChildRecords(byteValues) {
   if (children.length === 0 && legacy.children.length > 0) {
     return { root, children: legacy.children, layout: "legacy-no-count" };
   }
-  return { root, children, layout: "counted" };
+  const countedParsed = { children, endOffset: offset, consumed: offset - 24 };
+  return {
+    root,
+    children,
+    layout: "counted",
+    parent: buildParentContainerInfo(byteValues, countedParsed, {
+      layout: "counted",
+      countOffset: 20,
+      childStartOffset: 24,
+      declaredCount: childCount,
+    }),
+  };
 }
 
 function makeRootComparableNode(byteValues) {
@@ -3252,6 +3429,15 @@ function buildTssTreeText(base64Text, options = {}) {
   }
 
   lines.push(`child_count=${parsed.children.length}${parsed.layout ? ` layout=${parsed.layout}` : ""}`);
+  if (parsed.parent) {
+    const parent = parsed.parent;
+    lines.push(
+      `  parent:header len=${Number(parent.headerLen || 0)} count=${Number(parent.childCount || 0)} count_off=${formatHexValue(parent.countOffset)} child_start=${formatHexValue(parent.childStartOffset)} layout=${parent.layout || "-"}`
+    );
+    lines.push(
+      `  parent:tail off=${formatHexValue(parent.tailOffset)} len=${Number(parent.tailLen || 0)} magic=${parent.tailHex || "-"} magic_ok=${parent.tailMagicOk ? 1 : 0} role=${parent.tailRole || "-"}`
+    );
+  }
   const binaryStats = summarizeBinaryLikeChildren(parsed.children);
   if (binaryStats) {
     lines.push(binaryStats);
@@ -3291,17 +3477,17 @@ function renderTssTreeHtml(treeText) {
     .map((line) => {
       const escaped = escapeHtml(line);
       return escaped.replace(
-        /(root|child_count|binary_like_stats|child\[\d+\]|report=0x[0-9a-f]+|type=[^\s]+|len=\d+|id=0x[0-9a-f]+|keep=target|timestamps=[^\s]+|lib_same_len=\d+|value=.+|hex_sig=.+|xor_common=.+)/gi,
+        /(root|child_count|parent:header|parent:tail|binary_like_stats|child\[\d+\]|report=0x[0-9a-f]+|type=[^\s]+|len=\d+|id=0x[0-9a-f]+|count=\d+|count_off=0x[0-9a-f]+|child_start=0x[0-9a-f]+|off=0x[0-9a-f]+|magic=[0-9a-f-]+|magic_ok=[01]|role=[^\s]+|keep=target|timestamps=[^\s]+|lib_same_len=\d+|value=.+|hex_sig=.+|xor_common=.+)/gi,
         (token) => {
           let cls = "tree-token";
-          if (/^child\[/i.test(token) || token === "root" || token === "binary_like_stats") cls += " tree-node";
+          if (/^(child\[|parent:)/i.test(token) || token === "root" || token === "binary_like_stats") cls += " tree-node";
           else if (/^report=/i.test(token)) cls += " tree-report";
           else if (/^type=/i.test(token)) cls += " tree-type";
           else if (/^id=/i.test(token)) cls += " tree-id";
           else if (/^value=/i.test(token)) cls += " tree-value";
-          else if (/^(hex_sig|xor_common|timestamps)=/i.test(token)) cls += " tree-value";
+          else if (/^(hex_sig|xor_common|timestamps|magic|role)=/i.test(token)) cls += " tree-value";
           else if (/^lib_same_len=/i.test(token)) cls += " tree-keep";
-          else if (/^keep=/i.test(token)) cls += " tree-keep";
+          else if (/^(keep=|magic_ok=1)/i.test(token)) cls += " tree-keep";
           return `<span class="${cls}">${token}</span>`;
         }
       );
@@ -3434,8 +3620,8 @@ function childActionLabel(action) {
     VL: "变长替换",
     F11: "兜底010a0011",
     CR: "跨类型",
-    BLK: "清理黑名单",
-    ND: "清理设备叶子",
+    BLK: "黑名单安全替换",
+    ND: "非设备安全替换",
     R11: "稀有叶子",
     KEEP: "保留目标",
     CLEAN: "兜底清理",
@@ -3473,6 +3659,13 @@ function compactSemanticSignal(text) {
   const add = (label) => {
     if (label && !matches.includes(label)) matches.push(label);
   };
+  for (const match of raw.matchAll(/(?:\/(?:usr|private|system|var|applications|library)[^\s|;]{3,}|[\w.+-]+\.(?:dylib|framework|so)\b|(?:framework|privateframework)[^\s|;]*)/gi)) {
+    add(match[0]);
+  }
+  if (/dylib|framework|usr\/lib|privateframework|\.so\b/i.test(raw) && matches.length <= 0) {
+    const idx = raw.search(/dylib|framework|usr\/lib|privateframework|\.so\b/i);
+    if (idx >= 0) add(shortenText(raw.slice(Math.max(0, idx - 36), idx + 84), 120));
+  }
   for (const match of raw.matchAll(/(?:mrpcs?|mrcp)[\w.-]*|tersafe|config2\.dat|config3\.dat|comm\.zip/gi)) {
     add(match[0]);
   }
@@ -3500,7 +3693,8 @@ function splitChildSemanticRows(child) {
     if (line.startsWith("xor=")) {
       const signal = compactSemanticSignal(semanticValueText(line, "xor="));
       if (signal) {
-        primaryRows.push(["XOR命中", signal, "child-card-line-long child-card-parse"]);
+        const label = /dylib|framework|usr\/lib|privateframework|\.so\b/i.test(signal) ? "路径候选" : "XOR命中";
+        primaryRows.push([label, signal, "child-card-line-long child-card-parse"]);
       }
       debugLines.push(line);
       continue;
@@ -3552,7 +3746,7 @@ function childRuleAnnotations(beforeChild, afterChild, action) {
     if (!Number.isFinite(report)) continue;
     if (Math.floor(report / 0x100) === 0x011223) add("011223xx：普通白名单节点");
     if (report === 0x010a0011) add("010a0011：高级白名单/保护节点");
-    if (report === 0x0102000a) add("0102000a：设备字段/叶子节点");
+    if (report === 0x0102000a) add("0102000a：二进制叶子/运行态字段，不等于设备保护");
   }
   const actionReport = compactReportToDisplay(action && action.report);
   const sourceReport = compactReportToDisplay(action && action.source);
@@ -3575,7 +3769,9 @@ function childRuleAnnotations(beforeChild, afterChild, action) {
   const alreadyNeutral = isAlreadyNeutralReason(action && action.reason);
   if (alreadyNeutral) add("已是中和/清理形态，不重复修改");
   if (actionCode === "KEEP" && !alreadyNeutral) add("保护目标，不替换");
-  if (actionCode === "CLEAN" || actionCode === "BLK" || actionCode === "ND") add("兜底清理/黑名单清理");
+  if (actionCode === "BLK") add("命中黑名单风险，但已找到 source，执行安全替换");
+  if (actionCode === "ND") add("非设备风险 leaf，已找到 source，执行安全替换");
+  if (actionCode === "CLEAN") add("无可用安全 source，执行兜底清理");
   return rules.join("\n");
 }
 
@@ -3584,6 +3780,7 @@ function appendChildCardLine(card, label, value, className = "") {
   if (!text) return;
   const line = document.createElement("div");
   line.className = `child-card-line ${className}`.trim();
+  line.title = `${label} ${text}`;
   const strong = document.createElement("strong");
   strong.textContent = label;
   line.appendChild(strong);
@@ -3600,16 +3797,32 @@ function appendChildDebugDetails(side, lines) {
     .map((line) => String(line || "").trim())
     .filter(Boolean);
   if (!cleanLines.length) return;
-  const details = document.createElement("div");
-  details.className = "child-debug-details child-debug-details-open";
-  const summary = document.createElement("div");
+  const details = document.createElement("details");
+  details.className = "child-debug-details";
+  const summary = document.createElement("summary");
   summary.className = "child-debug-title";
-  summary.textContent = "调试细节";
+  summary.textContent = `调试细节 ${cleanLines.length}`;
   const pre = document.createElement("pre");
   pre.textContent = cleanLines.join("\n");
   details.appendChild(summary);
   details.appendChild(pre);
   side.appendChild(details);
+}
+
+function compactText(text, maxLen = 90) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (raw.length <= maxLen) return raw;
+  return `${raw.slice(0, Math.max(0, maxLen - 1))}…`;
+}
+
+function childDecisionText(kind, result) {
+  const resultText = result && result.label ? result.label : "";
+  if (kind === "replace") return `找到 source，执行安全替换${resultText ? ` / ${resultText}` : ""}`;
+  if (kind === "clean") return `未找到安全 source，执行兜底清理${resultText ? ` / ${resultText}` : ""}`;
+  if (kind === "keep") return `保护保留${resultText ? ` / ${resultText}` : ""}`;
+  if (kind === "drop") return "删除该 child";
+  if (kind === "neutral") return "已是中和形态";
+  return resultText || "观察";
 }
 
 function compactRuleText(ruleText) {
@@ -3624,9 +3837,18 @@ function childActionKind(actionCode, reason = "") {
   if (isAlreadyNeutralReason(reason)) return "neutral";
   const value = String(actionCode || "").trim();
   if (value === "KEEP") return "keep";
-  if (value === "CLEAN" || value === "BLK" || value === "ND") return "clean";
+  if (value === "CLEAN") return "clean";
   if (value === "DROP") return "drop";
-  if (value === "SL" || value === "FS" || value === "VL" || value === "F11" || value === "CR" || value === "R11") {
+  if (
+    value === "SL"
+    || value === "FS"
+    || value === "VL"
+    || value === "F11"
+    || value === "CR"
+    || value === "R11"
+    || value === "BLK"
+    || value === "ND"
+  ) {
     return "replace";
   }
   return "";
@@ -3654,9 +3876,1157 @@ function childActionBadgeText(action, result) {
   return result && result.label ? result.label : "观察";
 }
 
-function makeChildSide(child, sideLabel, sideClass, extraRows = []) {
+function ensureChildCommonStyles() {
+  if (document.getElementById("tcpv-child-common-style")) return;
+  const style = document.createElement("style");
+  style.id = "tcpv-child-common-style";
+  style.textContent = `
+    .child-common-strip {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      margin: 5px 6px 0;
+      background: color-mix(in srgb, var(--panel) 82%, var(--chip-bg));
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .parent-structure-strip {
+      border: 1px solid color-mix(in srgb, #38bdf8 56%, var(--line));
+      border-radius: 6px;
+      padding: 7px 8px;
+      margin: 6px 6px 0;
+      background: color-mix(in srgb, #38bdf8 7%, var(--dump-bg));
+      display: grid;
+      gap: 5px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .parent-structure-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: color-mix(in srgb, #38bdf8 78%, var(--text));
+      font-weight: 900;
+    }
+    .parent-structure-title small {
+      color: var(--muted);
+      font-weight: 700;
+      text-align: right;
+    }
+    .parent-structure-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .parent-structure-side {
+      min-width: 0;
+      border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+      border-radius: 5px;
+      padding: 5px 6px;
+      background: color-mix(in srgb, var(--panel) 72%, var(--dump-bg));
+      color: color-mix(in srgb, var(--text) 86%, var(--muted));
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+    .parent-structure-side strong {
+      color: var(--text);
+      display: block;
+      margin-bottom: 2px;
+    }
+    .parent-structure-magic-ok {
+      color: color-mix(in srgb, #22c55e 82%, var(--text));
+      font-weight: 850;
+    }
+    .parent-structure-magic-bad {
+      color: color-mix(in srgb, #ef4444 86%, var(--text));
+      font-weight: 900;
+    }
+    .child-compare-grid {
+      grid-template-columns: repeat(2, minmax(460px, 1fr));
+      gap: 8px;
+      align-items: stretch;
+    }
+    .child-pair-card {
+      display: grid;
+      grid-template-columns: 136px minmax(0, 1fr);
+      min-height: 218px;
+      padding: 0;
+      gap: 0;
+      overflow: hidden;
+    }
+    .child-card-same-merged {
+      min-height: 168px;
+    }
+    .child-pair-title {
+      min-width: 0;
+      border-bottom: 0;
+      border-right: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      padding: 9px 8px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 7px;
+      background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--chip-bg) 66%, transparent),
+        color-mix(in srgb, var(--dump-bg) 72%, var(--panel))
+      );
+    }
+    .child-rail-name {
+      display: block;
+      color: var(--text);
+      font-weight: 850;
+      font-size: 14px;
+      line-height: 1.2;
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+    .child-rail-label {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      text-align: center;
+    }
+    .child-title-badges {
+      justify-content: center;
+      gap: 4px;
+    }
+    .child-rail-action {
+      border: 1px solid var(--chip-line);
+      border-radius: 999px;
+      padding: 2px 6px;
+      max-width: 100%;
+      font-size: 11px;
+      font-weight: 850;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      background: color-mix(in srgb, var(--chip-bg) 82%, transparent);
+    }
+    .child-rail-copy {
+      color: color-mix(in srgb, var(--text) 88%, var(--muted));
+      font-size: 11px;
+      line-height: 1.3;
+      text-align: center;
+      overflow-wrap: anywhere;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .child-risk-badge {
+      border: 1px solid color-mix(in srgb, #ef4444 72%, var(--line));
+      border-radius: 999px;
+      padding: 2px 6px;
+      max-width: 100%;
+      color: color-mix(in srgb, #ef4444 86%, var(--text));
+      background: color-mix(in srgb, #ef4444 10%, var(--dump-bg));
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .child-rail-meta-grid {
+      display: grid;
+      gap: 3px;
+    }
+    .child-rail-meta {
+      min-width: 0;
+      border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      border-radius: 4px;
+      padding: 2px 4px;
+      background: color-mix(in srgb, var(--dump-bg) 74%, var(--panel));
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+      font-size: 10px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+    .child-rail-meta strong {
+      color: var(--text);
+      margin-right: 3px;
+      font-weight: 800;
+    }
+    .child-decision-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .child-decision-pill {
+      border: 1px solid var(--chip-line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-weight: 800;
+      white-space: nowrap;
+      background: color-mix(in srgb, var(--chip-bg) 82%, transparent);
+    }
+    .child-decision-replace {
+      border-color: color-mix(in srgb, #22c55e 62%, var(--line));
+      color: color-mix(in srgb, #22c55e 82%, var(--text));
+    }
+    .child-decision-clean,
+    .child-decision-drop,
+    .child-decision-neutral {
+      border-color: color-mix(in srgb, #f97316 64%, var(--line));
+      color: color-mix(in srgb, #f97316 86%, var(--text));
+    }
+    .child-decision-keep {
+      border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+      color: color-mix(in srgb, var(--accent) 82%, var(--text));
+    }
+    .child-decision-copy {
+      min-width: 0;
+      flex: 1 1 220px;
+      color: var(--text);
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .child-metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+      gap: 4px;
+    }
+    .child-common-chip {
+      border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+      border-radius: 5px;
+      background: color-mix(in srgb, var(--dump-bg) 78%, var(--panel));
+      padding: 3px 5px;
+      color: var(--text);
+      min-width: 0;
+      overflow-wrap: anywhere;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 4px;
+      align-items: baseline;
+    }
+    .child-common-chip strong {
+      color: var(--muted);
+      font-weight: 700;
+      white-space: nowrap;
+      font-size: 11px;
+    }
+    .child-common-chip code {
+      color: color-mix(in srgb, var(--text) 88%, var(--accent));
+      font: inherit;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+    .child-context-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 4px;
+      margin-top: 4px;
+      padding-top: 4px;
+      border-top: 1px dashed color-mix(in srgb, var(--line) 72%, transparent);
+    }
+    .child-context-chip {
+      min-width: 0;
+      border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      border-radius: 5px;
+      padding: 3px 5px;
+      background: color-mix(in srgb, var(--dump-bg) 76%, var(--panel));
+      color: color-mix(in srgb, var(--muted) 80%, var(--text));
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .child-context-chip strong {
+      color: var(--text);
+      margin-right: 4px;
+    }
+    .child-side-compact .child-side-title {
+      margin-bottom: 4px;
+    }
+    .child-side-compact .child-card-parse {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .child-side-compact .child-debug-details {
+      margin-top: 2px;
+      padding-top: 2px;
+    }
+    .child-preview-row {
+      margin: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0;
+      min-width: 0;
+      min-height: 0;
+    }
+    .child-preview-row-single {
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .child-preview-box {
+      min-width: 0;
+      border: 0;
+      border-radius: 0;
+      padding: 9px 11px;
+      background: color-mix(in srgb, var(--dump-bg) 88%, var(--panel));
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      min-height: 0;
+    }
+    .child-preview-before {
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      background: color-mix(in srgb, #f59e0b 4%, var(--dump-bg));
+    }
+    .child-preview-after {
+      background: color-mix(in srgb, var(--resp) 4%, var(--dump-bg));
+    }
+    .child-preview-same {
+      background: color-mix(in srgb, #f59e0b 3%, var(--dump-bg));
+    }
+    .child-preview-label {
+      display: inline-block;
+      margin-bottom: 5px;
+      color: var(--text);
+      font-weight: 800;
+      font-size: 13px;
+    }
+    .child-preview-line {
+      color: color-mix(in srgb, var(--muted) 80%, var(--text));
+      overflow-wrap: anywhere;
+      white-space: normal;
+      font-size: 12px;
+      line-height: 1.35;
+      margin-top: 2px;
+    }
+    .child-preview-line-meta {
+      color: color-mix(in srgb, var(--text) 88%, var(--muted));
+      font-weight: 650;
+    }
+    .child-preview-line-hex {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: color-mix(in srgb, var(--accent) 72%, var(--muted));
+    }
+    .child-preview-line-risk {
+      color: color-mix(in srgb, #ef4444 86%, var(--text));
+      font-weight: 800;
+    }
+    .child-hex-table {
+      margin-top: 7px;
+      border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      border-radius: 5px;
+      overflow: hidden;
+      background: color-mix(in srgb, var(--dump-bg) 84%, #000);
+    }
+    .child-hex-title {
+      padding: 4px 6px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
+      color: color-mix(in srgb, var(--text) 88%, var(--muted));
+      font-size: 11px;
+      font-weight: 850;
+    }
+    .child-hex-body {
+      display: grid;
+      gap: 0;
+      padding: 3px 0;
+    }
+    .child-hex-row {
+      display: grid;
+      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
+      gap: 8px;
+      align-items: baseline;
+      padding: 1px 6px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .child-hex-row-marked {
+      background: color-mix(in srgb, var(--accent) 7%, transparent);
+    }
+    .child-hex-row-report,
+    .child-hex-row-id {
+      background: color-mix(in srgb, #38bdf8 8%, transparent);
+    }
+    .child-hex-row-len,
+    .child-hex-row-innerType,
+    .child-hex-row-selector,
+    .child-hex-row-innerField {
+      background: color-mix(in srgb, #a78bfa 8%, transparent);
+    }
+    .child-hex-row-report .child-hex-note,
+    .child-hex-row-id .child-hex-note {
+      color: color-mix(in srgb, #38bdf8 84%, var(--text));
+      font-weight: 800;
+    }
+    .child-hex-row-len .child-hex-note,
+    .child-hex-row-innerType .child-hex-note,
+    .child-hex-row-selector .child-hex-note,
+    .child-hex-row-innerField .child-hex-note {
+      color: color-mix(in srgb, #c4b5fd 80%, var(--text));
+      font-weight: 800;
+    }
+    .child-hex-offset,
+    .child-hex-bytes,
+    .child-hex-string-label,
+    .child-hex-string-cells {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+    .child-hex-offset {
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+    }
+    .child-hex-bytes,
+    .child-hex-byte-grid {
+      color: color-mix(in srgb, var(--accent) 80%, var(--text));
+    }
+    .child-hex-byte-grid,
+    .child-hex-char-grid {
+      display: inline-grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 2ch;
+      column-gap: 1ch;
+      align-items: baseline;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+    .child-hex-byte-cell,
+    .child-hex-char-cell {
+      text-align: center;
+    }
+    .child-hex-string-row {
+      display: grid;
+      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
+      gap: 8px;
+      align-items: baseline;
+      padding: 1px 6px 3px;
+      font-size: 11px;
+      line-height: 1.35;
+      background: color-mix(in srgb, #22c55e 6%, transparent);
+      border-left: 2px solid color-mix(in srgb, #22c55e 70%, transparent);
+    }
+    .child-hex-string-label,
+    .child-hex-string-cells {
+      color: color-mix(in srgb, #22c55e 78%, var(--text));
+    }
+    .child-hex-string-note {
+      color: color-mix(in srgb, #22c55e 70%, var(--muted));
+      overflow-wrap: anywhere;
+    }
+    .child-hex-note {
+      min-width: 0;
+      color: color-mix(in srgb, var(--text) 78%, var(--muted));
+      overflow-wrap: anywhere;
+    }
+    .child-hex-row-time {
+      background: color-mix(in srgb, #f59e0b 10%, transparent);
+      border-left: 2px solid color-mix(in srgb, #f59e0b 72%, transparent);
+    }
+    .child-hex-row-time .child-hex-note {
+      color: color-mix(in srgb, #f59e0b 82%, var(--text));
+      font-weight: 800;
+    }
+    .child-hex-insights {
+      border-top: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
+      padding: 5px 6px 6px;
+      display: grid;
+      gap: 3px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .child-hex-insight {
+      display: grid;
+      grid-template-columns: 86px minmax(0, 1fr);
+      gap: 8px;
+      color: color-mix(in srgb, var(--text) 82%, var(--muted));
+    }
+    .child-hex-insight strong {
+      color: var(--text);
+      font-weight: 850;
+    }
+    .child-hex-insight-string strong,
+    .child-hex-insight-string span {
+      color: color-mix(in srgb, #22c55e 78%, var(--text));
+    }
+    .child-hex-insight-time strong,
+    .child-hex-insight-time span {
+      color: color-mix(in srgb, #f59e0b 82%, var(--text));
+    }
+    .child-preview-empty {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    @media (max-width: 900px) {
+      .child-compare-grid {
+        grid-template-columns: 1fr;
+      }
+      .parent-structure-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 720px) {
+      .child-pair-card {
+        grid-template-columns: 112px minmax(0, 1fr);
+      }
+      .child-pair-title {
+        padding: 8px 6px;
+      }
+      .child-rail-name {
+        font-size: 13px;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function sameTextValue(left, right) {
+  return String(left || "") === String(right || "");
+}
+
+function pairText(label, beforeValue, afterValue) {
+  const beforeText = String(beforeValue || "-");
+  const afterText = String(afterValue || "-");
+  if (beforeText === "-" && afterText === "-") return "";
+  if (sameTextValue(beforeText, afterText)) return `${label} ${beforeText}`;
+  return `${label} ${beforeText} -> ${afterText}`;
+}
+
+function appendChildCommonChip(strip, label, value, className = "") {
+  const text = String(value || "").trim();
+  if (!text) return;
+  const chip = document.createElement("span");
+  chip.className = `child-common-chip ${className}`.trim();
+  const strong = document.createElement("strong");
+  strong.textContent = label;
+  chip.appendChild(strong);
+  const code = document.createElement("code");
+  code.textContent = text;
+  chip.appendChild(code);
+  strip.appendChild(chip);
+}
+
+function appendChildRailMeta(container, label, value) {
+  const text = String(value || "").trim();
+  if (!text || text === "-") return;
+  const row = document.createElement("div");
+  row.className = "child-rail-meta";
+  row.title = `${label} ${text}`;
+  const strong = document.createElement("strong");
+  strong.textContent = label;
+  row.appendChild(strong);
+  row.appendChild(document.createTextNode(text));
+  container.appendChild(row);
+}
+
+function childUiTerm(term) {
+  const labels = {
+    idx: "idx(索引)",
+    report: "report(报告码)",
+    type: "type(类型)",
+    ID: "leaf_id?(候选ID/序号)",
+    len: "len(长度)",
+    diff: "diff(差异)",
+    offset: "offset(偏移)",
+    source: "source(来源)",
+    hex: "hex(十六进制)",
+    head: "head(头)",
+    tail: "tail(尾)",
+    all: "all(全部)",
+  };
+  return labels[term] || term;
+}
+
+function annotateHexSignature(signature) {
+  return String(signature || "")
+    .replace(/\ball=/g, `${childUiTerm("all")}=`)
+    .replace(/\bhead=/g, `${childUiTerm("head")}=`)
+    .replace(/\btail=/g, `${childUiTerm("tail")}=`);
+}
+
+function hexOffsetText(offset) {
+  const value = Number(offset);
+  if (!Number.isFinite(value)) return "+0x?";
+  return `+0x${Math.max(0, value).toString(16).padStart(2, "0")}`;
+}
+
+function childHexByteText(byte) {
+  return (Number(byte || 0) & 0xff).toString(16).padStart(2, "0");
+}
+
+function childDecodedChar(byte) {
+  const value = Number(byte || 0) & 0xff;
+  if (value === 32) return "␠";
+  if (value >= 33 && value < 127) return String.fromCharCode(value);
+  return "·";
+}
+
+function formatTimestampDateTime(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return "";
+  try {
+    const d = new Date(value * 1000);
+    const yyyy = String(d.getFullYear()).padStart(4, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+  } catch (_e) {
+    return "";
+  }
+}
+
+function addChildHexAnnotation(map, offset, text) {
+  const pos = Number(offset);
+  const value = String(text || "").trim();
+  if (!Number.isFinite(pos) || pos < 0 || !value) return;
+  const existing = map.get(pos) || [];
+  if (!existing.includes(value)) existing.push(value);
+  map.set(pos, existing);
+}
+
+function addChildHexField(fields, offset, length, note, kind = "field") {
+  const start = Number(offset);
+  const size = Number(length);
+  const text = String(note || "").trim();
+  if (!Number.isFinite(start) || start < 0 || !Number.isFinite(size) || size <= 0) return;
+  fields.push({
+    offset: Math.floor(start),
+    length: Math.floor(size),
+    note: text,
+    kind,
+  });
+}
+
+function childBestDecodedOverlay(childBytes) {
+  if (!Array.isArray(childBytes) || childBytes.length <= 0) return null;
+
+  const makeXorCandidate = (start, key, source = "common") => {
+    const safeStart = Math.max(0, Math.floor(Number(start)));
+    const xorKey = Number(key) & 0xff;
+    if (!Number.isFinite(safeStart) || safeStart >= childBytes.length) return null;
+    const decoded = xorByteValues(childBytes.slice(safeStart), xorKey);
+    const runsRaw = extractPrintableRuns(decoded, 3, 48);
+    if (runsRaw.length <= 0) return null;
+    const scored = scoreXorCandidate(decoded, runsRaw);
+    const meaningfulRunLen = runsRaw.reduce((maxLen, item) => Math.max(maxLen, String(item.text || "").length), 0);
+    const totalTextLen = runsRaw.reduce((total, item) => total + String(item.text || "").length, 0);
+    const strongWithoutKeyword =
+      meaningfulRunLen >= 8
+      && Number(scored.stats && scored.stats.alpha) >= 6
+      && Number(scored.stats && scored.stats.uniquePrintables) >= 8
+      && Number(scored.bestRunUnique || 0) >= 6
+      && Number(scored.stats && scored.stats.maxRun) <= 8;
+    if (scored.keywordHits.length <= 0 && !strongWithoutKeyword) return null;
+    const runs = runsRaw.map((item) => {
+        const runStart = safeStart + Number(item.off || 0);
+        const text = String(item.text || "");
+        return {
+          start: runStart,
+          end: runStart + text.length,
+          text,
+          kind: inferStringKind(text),
+        };
+      });
+    return {
+      mode: "xor",
+      key: xorKey,
+      label: `xor ${formatHexValue(xorKey, 2)}`,
+      source,
+      start: safeStart,
+      decoded,
+      runs,
+      score: Number(scored.score || 0),
+      keywordHits: scored.keywordHits,
+      longestRunLen: meaningfulRunLen,
+      totalTextLen,
+    };
+  };
+
+  const candidates = [];
+  const detected = detectTssReport(childBytes);
+  const layout = detected && Number(detected.value) === 0x0102000a ? read0102000aLayout(childBytes, detected) : null;
+  const layoutValueStart = layout ? Number(layout.shift) + 0x24 : NaN;
+  const starts = [
+    layoutValueStart,
+    Number.isFinite(layoutValueStart) ? layoutValueStart + 4 : NaN,
+    Number.isFinite(layoutValueStart) ? layoutValueStart + 8 : NaN,
+    36,
+    32,
+    20,
+  ].filter((value, index, all) => Number.isFinite(value) && value >= 0 && value < childBytes.length && all.indexOf(value) === index);
+
+  for (const start of starts) {
+    for (const key of XOR_COMMON_KEYS) {
+      const candidate = makeXorCandidate(start, key, "common-key");
+      if (candidate) candidates.push(candidate);
+    }
+  }
+
+  const analysis = analyzeDecodedSliceXor(childBytes);
+  if (
+    analysis
+    && Number.isFinite(Number(analysis.key))
+    && Number.isFinite(Number(analysis.bodyOff))
+    && Array.isArray(analysis.keywordHits)
+    && analysis.keywordHits.length > 0
+  ) {
+    const candidate = makeXorCandidate(Number(analysis.bodyOff), Number(analysis.key), "keyword-scan");
+    if (candidate) candidates.push(candidate);
+  }
+
+  const keyPriority = (item) => Number(XOR_KEY_PRIORITY.get(Number(item && item.key) & 0xff) || 0);
+  candidates.sort((a, b) => (
+    (Number(b.keywordHits && b.keywordHits.length) - Number(a.keywordHits && a.keywordHits.length))
+    || (Number(b.longestRunLen || 0) - Number(a.longestRunLen || 0))
+    || (Number(b.totalTextLen || 0) - Number(a.totalTextLen || 0))
+    || (keyPriority(b) - keyPriority(a))
+    || (Number(b.score || 0) - Number(a.score || 0))
+  ));
+  if (candidates.length > 0) {
+    return candidates[0];
+  }
+
+  const rawRuns = extractPrintableRuns(childBytes, 4, 48).map((item) => {
+    const start = Number(item.off || 0);
+    const text = String(item.text || "");
+    return {
+      start,
+      end: start + text.length,
+      text,
+      kind: inferStringKind(text),
+    };
+  });
+  if (rawRuns.length <= 0 || rawRuns.every((run) => String(run.text || "").length < 8)) return null;
+  return {
+    mode: "ascii",
+    key: null,
+    label: "ascii",
+    start: 0,
+    decoded: childBytes.slice(),
+    runs: rawRuns,
+  };
+}
+
+function childDecodedCellsForRange(overlay, offset, end) {
+  if (!overlay || !Array.isArray(overlay.decoded)) return null;
+  const start = Number(offset);
+  const stop = Number(end);
+  if (!Number.isFinite(start) || !Number.isFinite(stop) || stop <= start) return null;
+  const runs = (Array.isArray(overlay.runs) ? overlay.runs : []).filter((run) => (
+    Number(run.start) < stop && Number(run.end) > start
+  ));
+  if (runs.length <= 0) return null;
+  const cells = [];
+  for (let pos = start; pos < stop; pos += 1) {
+    const decodedIndex = pos - Number(overlay.start || 0);
+    const inRun = runs.some((run) => pos >= Number(run.start) && pos < Number(run.end));
+    if (decodedIndex < 0 || decodedIndex >= overlay.decoded.length || !inRun) {
+      cells.push(" ");
+    } else {
+      cells.push(childDecodedChar(overlay.decoded[decodedIndex]));
+    }
+  }
+  const notes = [];
+  for (const run of runs) {
+    const runStart = Number(run.start);
+    const runEnd = Number(run.end);
+    if (runStart >= start && runStart < stop) {
+      notes.push(`string ${hexOffsetText(runStart)}-${hexOffsetText(Math.max(runStart, runEnd - 1))} "${shortenText(run.text, 80)}"`);
+    } else if (runEnd > start && runEnd <= stop) {
+      notes.push(`string end ${hexOffsetText(Math.max(runStart, runEnd - 1))}`);
+    }
+  }
+  return {
+    cells,
+    note: notes.join("；"),
+  };
+}
+
+function collectChildTimestampItems(childBytes, valueStart) {
+  if (!Array.isArray(childBytes) || childBytes.length < 4) return [];
+  const out = [];
+  const seen = new Set();
+  const add = (start, value, source, label = "") => {
+    const offset = Number(start);
+    const seconds = Number(value);
+    if (!Number.isFinite(offset) || offset < 0 || offset + 3 >= childBytes.length) return;
+    if (!isPlausibleTimestampSeconds(seconds) || seen.has(offset)) return;
+    seen.add(offset);
+    const clock = formatTimestampDateTime(seconds) || formatTimestampClock(seconds) || String(seconds);
+    const display = timestampShapeDisplay(label);
+    const labelText = source === "known" && display ? `[${display}] ` : "";
+    out.push({
+      start: offset,
+      end: offset + 4,
+      value: seconds,
+      source,
+      label,
+      text: `${source === "known" ? "时间戳" : "候选时间戳"} ${labelText}${clock} @${hexOffsetText(offset)} BE秒=${seconds}`,
+    });
+  };
+
+  for (const item of collectRecordTimestampRanges(childBytes, 0)) {
+    add(Number(item && item.start), Number(item && item.value), "known", item && item.kind);
+  }
+
+  const rawStart = Number(valueStart);
+  const scanStart = Number.isFinite(rawStart) && rawStart >= 0 ? Math.ceil(rawStart / 4) * 4 : 0;
+  const generic = [];
+  for (let offset = scanStart; offset + 3 < childBytes.length && out.length < 12; offset += 4) {
+    const value = readBe32(childBytes, offset);
+    if (isPlausibleTimestampSeconds(value)) {
+      generic.push({ offset, value });
+    }
+  }
+  if (generic.length >= 2) {
+    generic.sort((a, b) => Number(a.value) - Number(b.value));
+    let bestGroup = [];
+    for (let i = 0; i < generic.length; i += 1) {
+      const group = [];
+      for (let j = i; j < generic.length; j += 1) {
+        if (Number(generic[j].value) - Number(generic[i].value) > 12 * 60 * 60) break;
+        group.push(generic[j]);
+      }
+      if (group.length > bestGroup.length) bestGroup = group;
+    }
+    if (bestGroup.length >= 2) {
+      for (const item of bestGroup.slice(0, 12)) {
+        add(item.offset, item.value, "candidate");
+      }
+    }
+  }
+  return out.sort((a, b) => Number(a.start) - Number(b.start));
+}
+
+function childHexStructure(child, childBytes) {
+  const annotations = new Map();
+  const fields = [];
+  let valueStart = null;
+  if (!Array.isArray(childBytes) || childBytes.length <= 0) return { annotations, fields, valueStart };
+  addChildHexAnnotation(annotations, 0, "record start(记录起点)");
+
+  const detected = detectTssReport(childBytes);
+  const fallbackReport = parseReportCodeNumber(child && child.reportCode);
+  const fallbackOffset = Number(child && child.reportOffset);
+  const report = detected || (
+    Number.isFinite(fallbackReport) && Number.isFinite(fallbackOffset) && fallbackOffset >= 0
+      ? { value: fallbackReport, offset: fallbackOffset }
+      : null
+  );
+
+  if (report && Number.isFinite(Number(report.offset))) {
+    const reportOffset = Number(report.offset);
+    addChildHexField(
+      fields,
+      reportOffset,
+      4,
+      `${childUiTerm("report")} @${hexOffsetText(reportOffset)} ${formatHexValue(report.value, 8)}`,
+      "report",
+    );
+    const idOffset = childRecordIdOffset(childBytes, report);
+    if (Number.isFinite(idOffset) && idOffset >= 0 && idOffset + 3 < childBytes.length) {
+      addChildHexField(
+        fields,
+        idOffset,
+        4,
+        `${childUiTerm("ID")} @${hexOffsetText(idOffset)} ${formatHexValue(readBe32(childBytes, idOffset), 4)}`,
+        "id",
+      );
+    }
+
+    if (Number(report.value) === 0x0102000a) {
+      const layout = read0102000aLayout(childBytes, report);
+      if (layout) {
+        const lenOffset = Number(layout.shift) + 4;
+        const innerTypeOffset = Number(layout.shift) + 0x16;
+        const selector0Offset = Number(layout.shift) + 0x18;
+        const selector1Offset = Number(layout.shift) + 0x1c;
+        const innerFieldOffset = Number(layout.shift) + 0x20;
+        valueStart = Number(layout.shift) + 0x24;
+        addChildHexField(fields, lenOffset, 2, `total len(总长度) ${Number(layout.len)}，confirmed`, "len");
+        addChildHexField(fields, innerTypeOffset, 2, `inner type(shape字段) ${formatHexValue(layout.innerType, 4)}`, "innerType");
+        addChildHexField(fields, selector0Offset, 4, `selector0(shape选择字0) ${formatHexValue(layout.selector0, 8)}`, "selector");
+        addChildHexField(fields, selector1Offset, 4, `selector1(shape选择字1) ${formatHexValue(layout.selector1, 8)}`, "selector");
+        if (innerFieldOffset >= 0 && innerFieldOffset + 3 < childBytes.length) {
+          addChildHexField(fields, innerFieldOffset, 4, `inner field/body[0] ${formatHexValue(readBe32(childBytes, innerFieldOffset), 8)}，shape-specific`, "innerField");
+        }
+        if (valueStart >= 0 && valueStart < childBytes.length) {
+          addChildHexAnnotation(annotations, valueStart, `body candidate(值区候选) @${hexOffsetText(valueStart)}；XOR解析可从+0x20或+0x24择优，以下按16字节分行`);
+        }
+      }
+    }
+  }
+
+  const timestamps = collectChildTimestampItems(childBytes, valueStart);
+  for (const item of timestamps) {
+    const start = Number(item && item.start);
+    if (!Number.isFinite(start) || start < 0 || start + 3 >= childBytes.length) continue;
+    addChildHexField(fields, start, 4, item.text || "时间戳", "timestamp");
+  }
+
+  return { annotations, fields, valueStart, timestamps };
+}
+
+function buildChildHexModel(child, childBytes) {
+  if (!Array.isArray(childBytes) || childBytes.length <= 0) return { rows: [], overlay: null, timestamps: [] };
+  const { annotations, fields, valueStart, timestamps } = childHexStructure(child, childBytes);
+  const overlay = childBestDecodedOverlay(childBytes);
+  const bodyStart = Number.isFinite(Number(valueStart)) ? Number(valueStart) : Math.min(16, childBytes.length);
+  const normalizedFields = (Array.isArray(fields) ? fields : [])
+    .map((field) => {
+      const offset = Math.max(0, Math.floor(Number(field && field.offset)));
+      const length = Math.max(0, Math.floor(Number(field && field.length)));
+      return {
+        offset,
+        length: Math.min(length, Math.max(0, childBytes.length - offset)),
+        note: String(field && field.note ? field.note : "").trim(),
+        kind: String(field && field.kind ? field.kind : "field"),
+      };
+    })
+    .filter((field) => Number.isFinite(field.offset) && field.length > 0 && field.offset < childBytes.length)
+    .sort((a, b) => (a.offset - b.offset) || (b.length - a.length));
+
+  const rows = [];
+  const appendRow = (offset, length, notes = [], kind = "") => {
+    const safeOffset = Math.max(0, Math.floor(Number(offset)));
+    const safeLength = Math.max(0, Math.floor(Number(length)));
+    if (!Number.isFinite(safeOffset) || !Number.isFinite(safeLength) || safeLength <= 0) return;
+    if (safeOffset >= childBytes.length) return;
+    const end = Math.min(childBytes.length, safeOffset + safeLength);
+    const chunk = childBytes.slice(safeOffset, end);
+    const mergedNotes = [
+      ...(annotations.get(safeOffset) || []),
+      ...notes,
+    ].map((note) => String(note || "").trim()).filter(Boolean);
+    const uniqueNotes = [];
+    for (const note of mergedNotes) {
+      if (!uniqueNotes.includes(note)) uniqueNotes.push(note);
+    }
+    rows.push({
+      offset: safeOffset,
+      bytes: chunk.map(childHexByteText).join(" "),
+      byteValues: chunk,
+      decoded: childDecodedCellsForRange(overlay, safeOffset, end),
+      note: uniqueNotes.join("；"),
+      kind: uniqueNotes.some((note) => /时间戳/.test(note)) ? "timestamp" : String(kind || ""),
+    });
+  };
+  const emitGapRows = (start, end) => {
+    let cursor = Math.max(0, Math.floor(Number(start)));
+    const stop = Math.min(childBytes.length, Math.max(cursor, Math.floor(Number(end))));
+    while (cursor < stop) {
+      const width = cursor >= bodyStart ? 16 : 4;
+      const length = Math.min(width, stop - cursor);
+      appendRow(cursor, length);
+      cursor += length;
+    }
+  };
+
+  let cursor = 0;
+  for (const field of normalizedFields) {
+    if (field.offset < cursor) {
+      addChildHexAnnotation(annotations, field.offset, field.note);
+      continue;
+    }
+    emitGapRows(cursor, field.offset);
+    appendRow(field.offset, field.length, [field.note], field.kind);
+    cursor = field.offset + field.length;
+  }
+  emitGapRows(cursor, childBytes.length);
+  return { rows, overlay, timestamps };
+}
+
+function childHexRowKindClass(kind) {
+  const value = String(kind || "").trim();
+  if (!value) return "";
+  if (!["report", "id", "len", "innerType", "selector", "innerField", "timestamp"].includes(value)) return "";
+  return ` child-hex-row-${value}`;
+}
+
+function appendChildFullHexTable(box, child, childBytes) {
+  const model = buildChildHexModel(child, childBytes);
+  const rows = model.rows;
+  if (!rows.length) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "child-hex-table";
+  const title = document.createElement("div");
+  title.className = "child-hex-title";
+  const len = Array.isArray(childBytes) ? childBytes.length : 0;
+  title.textContent = `${childUiTerm("hex")} 完整 child bytes / ${childUiTerm("len")} ${len}`;
+  wrap.appendChild(title);
+
+  const body = document.createElement("div");
+  body.className = "child-hex-body";
+  for (const row of rows) {
+    const line = document.createElement("div");
+    line.className = `child-hex-row${row.note ? " child-hex-row-marked" : ""}${row.kind === "timestamp" ? " child-hex-row-time" : ""}${childHexRowKindClass(row.kind)}`;
+
+    const offset = document.createElement("code");
+    offset.className = "child-hex-offset";
+    offset.textContent = hexOffsetText(row.offset);
+
+    const bytes = document.createElement("code");
+    bytes.className = "child-hex-bytes child-hex-byte-grid";
+    const byteValues = Array.isArray(row.byteValues) ? row.byteValues : [];
+    for (const byte of byteValues) {
+      const span = document.createElement("span");
+      span.className = "child-hex-byte-cell";
+      span.textContent = childHexByteText(byte);
+      bytes.appendChild(span);
+    }
+
+    const note = document.createElement("span");
+    note.className = "child-hex-note";
+    note.textContent = row.note || "";
+
+    line.appendChild(offset);
+    line.appendChild(bytes);
+    line.appendChild(note);
+    body.appendChild(line);
+
+    if (row.decoded && Array.isArray(row.decoded.cells) && row.decoded.cells.length > 0) {
+      const stringLine = document.createElement("div");
+      stringLine.className = "child-hex-string-row";
+
+      const label = document.createElement("code");
+      label.className = "child-hex-string-label";
+      label.textContent = "string";
+
+      const chars = document.createElement("code");
+      chars.className = "child-hex-string-cells child-hex-char-grid";
+      for (const ch of row.decoded.cells) {
+        const span = document.createElement("span");
+        span.className = "child-hex-char-cell";
+        span.textContent = ch;
+        chars.appendChild(span);
+      }
+
+      const stringNote = document.createElement("span");
+      stringNote.className = "child-hex-string-note";
+      const decodeLabel = model.overlay && model.overlay.label ? model.overlay.label : "";
+      stringNote.textContent = [decodeLabel, row.decoded.note].filter(Boolean).join("；");
+
+      stringLine.appendChild(label);
+      stringLine.appendChild(chars);
+      stringLine.appendChild(stringNote);
+      body.appendChild(stringLine);
+    }
+  }
+  wrap.appendChild(body);
+
+  const insights = [];
+  if (model.overlay && Array.isArray(model.overlay.runs) && model.overlay.runs.length > 0) {
+    for (const run of model.overlay.runs.slice(0, 8)) {
+      insights.push({
+        kind: "string",
+        label: model.overlay.label || "string",
+        value: `${hexOffsetText(run.start)}-${hexOffsetText(Math.max(Number(run.start), Number(run.end) - 1))} ${run.kind ? `${run.kind} ` : ""}"${shortenText(run.text, 120)}"`,
+      });
+    }
+  }
+  if (Array.isArray(model.timestamps) && model.timestamps.length > 0) {
+    for (const ts of model.timestamps.slice(0, 8)) {
+      insights.push({
+        kind: "time",
+        label: ts.source === "known" ? "时间戳" : "候选时间戳",
+        value: ts.text,
+      });
+    }
+  }
+  if (insights.length > 0) {
+    const insightBox = document.createElement("div");
+    insightBox.className = "child-hex-insights";
+    for (const insight of insights) {
+      const item = document.createElement("div");
+      item.className = `child-hex-insight child-hex-insight-${insight.kind || "field"}`;
+      const label = document.createElement("strong");
+      label.textContent = insight.label || "";
+      const value = document.createElement("span");
+      value.textContent = insight.value || "";
+      item.appendChild(label);
+      item.appendChild(value);
+      insightBox.appendChild(item);
+    }
+    wrap.appendChild(insightBox);
+  }
+
+  box.appendChild(wrap);
+}
+
+function makeChildCommonStrip(beforeChild, afterChild, action, result, ruleCompact, observation) {
+  ensureChildCommonStyles();
+  const strip = document.createElement("div");
+  strip.className = "child-common-strip";
+  const kind = childActionKind(action && action.action, action && action.reason) || "observe";
+
+  const decision = document.createElement("div");
+  decision.className = "child-decision-row";
+  const pill = document.createElement("span");
+  pill.className = `child-decision-pill child-decision-${kind}`;
+  pill.textContent = childActionBadgeText(action, result);
+  const copy = document.createElement("span");
+  copy.className = "child-decision-copy";
+  copy.textContent = childDecisionText(kind, result);
+  decision.appendChild(pill);
+  decision.appendChild(copy);
+  strip.appendChild(decision);
+
+  const primary = document.createElement("div");
+  primary.className = "child-metric-grid";
+
+  appendChildCommonChip(primary, "report", pairText("", childReportText(beforeChild), childReportText(afterChild)).trim());
+  appendChildCommonChip(primary, "类型", pairText("", childTypeText(beforeChild), childTypeText(afterChild)).trim());
+  appendChildCommonChip(
+    primary,
+    "长度",
+    pairText(
+      "",
+      beforeChild && Number.isFinite(beforeChild.len) ? String(beforeChild.len) : "-",
+      afterChild && Number.isFinite(afterChild.len) ? String(afterChild.len) : "-",
+    ).trim(),
+  );
+  appendChildCommonChip(primary, "ID", pairText("", childIdText(beforeChild), childIdText(afterChild)).trim());
+  appendChildCommonChip(primary, "差异", childDiffText(result && result.diff));
+  appendChildCommonChip(primary, "动作", childActionLabel(action && action.action));
+  if (action && action.source && action.source !== "-") {
+    appendChildCommonChip(primary, "来源", compactReportToDisplay(action.source));
+  }
+  strip.appendChild(primary);
+
+  const detailRows = [];
+  if (action && action.reason) {
+    detailRows.push(["原因", translatedReasonText(action.reason) || action.reason]);
+  }
+  if (ruleCompact) {
+    detailRows.push(["规则", ruleCompact]);
+  }
+  if (observation) {
+    detailRows.push(["观察", observation]);
+  }
+  if (detailRows.length) {
+    const rowWrap = document.createElement("div");
+    rowWrap.className = "child-context-row";
+    for (const [label, value] of detailRows) {
+      const row = document.createElement("div");
+      row.className = "child-context-chip";
+      row.title = `${label} ${value}`;
+      const strong = document.createElement("strong");
+      strong.textContent = `${label} `;
+      row.appendChild(strong);
+      row.appendChild(document.createTextNode(compactText(value, 110)));
+      rowWrap.appendChild(row);
+    }
+    strip.appendChild(rowWrap);
+  }
+
+  return strip.childNodes.length ? strip : null;
+}
+
+function makeChildSide(child, sideLabel, sideClass, extraRows = [], options = {}) {
   const side = document.createElement("div");
-  side.className = `child-side child-side-${sideClass}`.trim();
+  side.className = `child-side child-side-${sideClass}${options.compactMeta ? " child-side-compact" : ""}`.trim();
 
   const title = document.createElement("div");
   title.className = "child-side-title";
@@ -3669,10 +5039,12 @@ function makeChildSide(child, sideLabel, sideClass, extraRows = []) {
   title.appendChild(label);
   side.appendChild(title);
 
-  appendChildSideLine(side, "report", childReportText(child));
-  appendChildSideLine(side, "类型", childTypeText(child));
-  appendChildSideLine(side, "长度", child && Number.isFinite(child.len) ? String(child.len) : "-");
-  appendChildSideLine(side, "ID", childIdText(child));
+  if (!options.compactMeta) {
+    appendChildSideLine(side, "report", childReportText(child));
+    appendChildSideLine(side, "类型", childTypeText(child));
+    appendChildSideLine(side, "长度", child && Number.isFinite(child.len) ? String(child.len) : "-");
+    appendChildSideLine(side, "ID", childIdText(child));
+  }
 
   const semanticRows = splitChildSemanticRows(child);
   for (const [rowLabel, value, className] of semanticRows.primaryRows) {
@@ -3690,6 +5062,174 @@ function makeChildSide(child, sideLabel, sideClass, extraRows = []) {
   appendChildDebugDetails(side, debugLines);
 
   return side;
+}
+
+function childPreviewLines(child, maxLines = 2) {
+  if (!child || child.truncated) return [];
+  const semanticRows = splitChildSemanticRows(child);
+  const lines = [];
+  for (const [label, value] of semanticRows.primaryRows) {
+    const text = compactText(value, 120);
+    if (text) lines.push(`${label} ${text}`);
+    if (lines.length >= maxLines) break;
+  }
+  if (lines.length < maxLines) {
+    const offsetText = childOffsetText(child);
+    if (offsetText && offsetText !== "-") lines.push(`offset=${offsetText}`);
+  }
+  return lines.slice(0, maxLines);
+}
+
+function childIndexText(child) {
+  if (!child || child.truncated || !Number.isFinite(Number(child.index))) return "-";
+  return String(Number(child.index));
+}
+
+function childSemanticRoleText(child) {
+  if (!child || child.truncated) return "";
+  const report = parseReportCodeNumber(child.reportCode);
+  const text = [
+    child.valuePreview,
+    child.xorCommonPreview,
+    child.hexSignature,
+    childTypeText(child),
+  ].join(" ").toLowerCase();
+  if (/uiwindow|uiview|uicontroller|uitransition|backboard|spotlight/.test(text)) {
+    return "ui-hierarchy / UI层级与前台服务链";
+  }
+  if (/dylib|framework|usr\/lib|privateframework|\.so\b/.test(text)) {
+    return "dylib-path? / 动态库路径候选";
+  }
+  if (/process|backboardservices|springboard|spotlight|com\.apple/.test(text)) {
+    return "process-chain / 系统进程链";
+  }
+  if (/mrpcs|mrcp|mrp|\.data|documents-dir|files-dir|main_module_path|\/var\/|\/documents|\/library/.test(text)) {
+    return "file_reference / 路径或同步文件引用";
+  }
+  if (/model|ver|iphone|ipad|ios|language|screen|vpn/.test(text)) {
+    return "device_profile / 设备与运行环境画像";
+  }
+  if (/inc_id|obf_id|account|open_id|openid|uin/.test(text)) {
+    return "account_metadata / 账号与会话索引";
+  }
+  if (/\bstate\b|<state:|cnt:|counter|status/.test(text)) {
+    return "state_snapshot / 状态快照";
+  }
+  if (Number(report) === 0x0102000a) return "xor-text / 运行态二进制叶子";
+  if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) return "structured-metadata / 结构化元数据";
+  return "";
+}
+
+function childRichTypeText(child) {
+  if (!child || child.truncated) return "-";
+  const report = parseReportCodeNumber(child.reportCode);
+  const rawType = String(child.className || "").trim();
+  const role = childSemanticRoleText(child);
+  if (Number(report) === 0x0102000a) {
+    return role || "0102000a / 运行态二进制叶子";
+  }
+  if (Number(report) === 0x010a0011) return "010a0011 / 高级白名单保护节点";
+  if (Number(report) === 0x010a001b) return "010a001b / 父容器批量上报骨架";
+  if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) {
+    return role || "0112xxxx / 结构化元数据叶子";
+  }
+  if (rawType === "text/binary-leaf") return "文本混合叶子 / ASCII+二进制";
+  if (rawType === "binary-like-leaf") return "二进制叶子 / 不透明运行态字段";
+  if (rawType === "binary-like") return "二进制块 / 未解析结构";
+  if (rawType === "structured") return "结构化记录";
+  if (rawType === "structured-metadata") return "结构化元数据";
+  return rawType || reportBusinessLabel(report) || "-";
+}
+
+function childFullMetaLine(child) {
+  if (!child || child.truncated) return "";
+  const parts = [
+    `索引 ${childIndexText(child)}`,
+    `${childUiTerm("report")} ${childReportText(child)}`,
+    `${childUiTerm("type")} ${childRichTypeText(child)}`,
+    `${childUiTerm("ID")} ${childIdText(child)}`,
+    Number.isFinite(child.len) ? `${childUiTerm("len")} ${child.len}` : "",
+    `${childUiTerm("offset")} ${childOffsetText(child)}`,
+  ].filter((part) => part && !part.endsWith(" -"));
+  return parts.join(" | ");
+}
+
+function childHexLine(child, childBytes) {
+  if (child && child.hexSignature) return `${childUiTerm("hex")} ${annotateHexSignature(child.hexSignature)}`;
+  if (Array.isArray(childBytes) && childBytes.length > 0) {
+    const head = formatHexBytePreview(childBytes, Math.min(32, childBytes.length));
+    return `${childUiTerm("hex")} ${childUiTerm("head")}=${head}${childBytes.length > 32 ? " ..." : ""}`;
+  }
+  return "";
+}
+
+function childPreviewRichLines(child, childBytes, options = {}) {
+  if (!child || child.truncated) return [];
+  const lines = [];
+  const meta = childFullMetaLine(child);
+  if (meta) lines.push({ text: meta, className: "child-preview-line-meta" });
+  const semanticRows = splitChildSemanticRows(child);
+  const semanticLimit = options.merged ? 4 : 3;
+  for (const [label, value] of semanticRows.primaryRows) {
+    const text = String(value || "").trim();
+    if (text) lines.push({ text: `${label} ${text}`, className: "" });
+    if (lines.length >= semanticLimit + 1) break;
+  }
+  for (const extra of Array.isArray(options.extraLines) ? options.extraLines : []) {
+    const text = typeof extra === "object" ? String(extra.text || "").trim() : String(extra || "").trim();
+    const className = typeof extra === "object" && extra.className ? String(extra.className) : "child-preview-line-meta";
+    if (text) lines.push({ text, className });
+  }
+  return lines;
+}
+
+function makeChildPreviewBox(child, label, sideClass, childBytes = [], options = {}) {
+  const box = document.createElement("div");
+  box.className = `child-preview-box child-preview-${sideClass}`;
+  const title = document.createElement("div");
+  title.className = "child-preview-label";
+  title.textContent = label;
+  box.appendChild(title);
+  const lines = childPreviewRichLines(child, childBytes, options);
+  if (!lines.length) {
+    const empty = document.createElement("div");
+    empty.className = "child-preview-empty";
+    empty.textContent = "-";
+    box.appendChild(empty);
+    return box;
+  }
+  for (const entry of lines) {
+    const line = document.createElement("div");
+    line.className = `child-preview-line ${entry.className || ""}`.trim();
+    line.title = entry.text;
+    line.textContent = entry.text;
+    box.appendChild(line);
+  }
+  appendChildFullHexTable(box, child, childBytes);
+  return box;
+}
+
+function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", beforeBytes = [], afterBytes = [], result = null, action = null, ruleCompact = "", risk = null) {
+  const row = document.createElement("div");
+  row.className = "child-preview-row";
+  if (result && result.kind === "same") {
+    row.classList.add("child-preview-row-single");
+    row.appendChild(makeChildPreviewBox(afterChild || beforeChild, `${labelBase} 未修改`, "same", afterBytes.length ? afterBytes : beforeBytes, { merged: true }));
+    return row;
+  }
+  row.appendChild(makeChildPreviewBox(beforeChild, `${labelBase} 修改前`, "before", beforeBytes));
+  const afterExtra = [];
+  if (action && (action.action || action.reason || action.source)) {
+    const actionParts = [];
+    if (action.action) actionParts.push(`动作 ${childActionLabel(action.action)}`);
+    if (action.reason) actionParts.push(`原因 ${translatedReasonText(action.reason) || action.reason}`);
+    if (action.source && action.source !== "-") actionParts.push(`${childUiTerm("source")} ${compactReportToDisplay(action.source)}`);
+    if (actionParts.length) afterExtra.push(actionParts.join(" | "));
+  }
+  if (risk && risk.text) afterExtra.push({ text: `风险 高：${risk.text}`, className: "child-preview-line-risk" });
+  if (ruleCompact) afterExtra.push(`规则 ${ruleCompact}`);
+  row.appendChild(makeChildPreviewBox(afterChild, `${labelBase} 修改后`, "after", afterBytes, { extraLines: afterExtra }));
+  return row;
 }
 
 function inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild) {
@@ -3781,7 +5321,41 @@ function childDiffText(diff) {
   return `${diff.changed}/${diff.commonLen} 长度${sign}${diff.lenDelta}`;
 }
 
+function childReplacementRisk(beforeChild, afterChild, beforeBytes, afterBytes, action, result) {
+  const kind = childActionKind(action && action.action, action && action.reason);
+  if (kind !== "replace") return null;
+  const reasons = [];
+  const diff = result && result.diff ? result.diff : countChangedBytes(beforeBytes, afterBytes);
+  const beforeType = childRichTypeText(beforeChild);
+  const afterType = childRichTypeText(afterChild);
+  const beforeReport = childReportText(beforeChild);
+  const afterReport = childReportText(afterChild);
+  const reason = String(action && action.reason ? action.reason : "");
+  const actionCode = String(action && action.action ? action.action : "");
+
+  if (actionCode === "VL" || /variable_length_source/i.test(reason)) {
+    reasons.push("变长 source 替换");
+  }
+  if (diff && Number(diff.lenDelta || 0) !== 0) {
+    const sign = Number(diff.lenDelta) > 0 ? "+" : "";
+    reasons.push(`长度变化 ${diff.leftLen} -> ${diff.rightLen} (${sign}${diff.lenDelta})`);
+  }
+  if (beforeType && afterType && beforeType !== "-" && afterType !== "-" && beforeType !== afterType) {
+    reasons.push(`语义类型变化 ${beforeType} -> ${afterType}`);
+  }
+  if (beforeReport && afterReport && beforeReport === afterReport && beforeType !== afterType) {
+    reasons.push("同 report 不代表同语义");
+  }
+
+  if (!reasons.length) return null;
+  return {
+    level: "high",
+    text: reasons.join("；"),
+  };
+}
+
 function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytesAll, index, actionMap, summaryKv = null) {
+  ensureChildCommonStyles();
   const beforeChild = beforeChildren[index] || null;
   const afterChild = afterChildren[index] || null;
   const beforeBytes = childBytesFromParsed(beforeBytesAll, beforeChild);
@@ -3789,58 +5363,141 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   const result = childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes);
   const action = (actionMap instanceof Map ? actionMap.get(index) : null)
     || inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild);
+  const nodeLabel = childNodeName(afterChild || beforeChild || { index });
+  const ruleText = childRuleAnnotations(beforeChild, afterChild, action);
+  const ruleCompact = compactRuleText(ruleText);
+  const observation = childActionObservation(action, result);
+  const kind = childActionKind(action && action.action, action && action.reason) || "observe";
+  const risk = childReplacementRisk(beforeChild, afterChild, beforeBytes, afterBytes, action, result);
+  const hasExplicitAction = Boolean(action && (action.action || action.reason || action.source || action.report));
+  const sameNoAction = result.kind === "same" && !hasExplicitAction;
 
   const card = document.createElement("div");
   card.className = `child-pair-card child-card-result-${result.kind}`;
+  if (result.kind === "same") card.classList.add("child-card-same-merged");
 
   const title = document.createElement("div");
   title.className = "child-pair-title";
   const name = document.createElement("span");
-  name.textContent = childNodeName(afterChild || beforeChild || { index });
+  name.className = "child-rail-name";
+  name.textContent = nodeLabel;
+  const label = document.createElement("span");
+  label.className = "child-rail-label";
+  label.textContent = "预览";
+  name.appendChild(label);
   const badges = document.createElement("span");
   badges.className = "child-title-badges";
   const status = document.createElement("span");
   status.className = `child-status child-status-${result.kind}`;
-  status.textContent = result.label;
+  status.textContent = sameNoAction ? "未修改" : result.label;
   badges.appendChild(status);
-  const actionStatus = document.createElement("span");
-  actionStatus.className = `child-status child-action-status child-action-status-${childActionKind(action && action.action, action && action.reason) || "observe"}`;
-  actionStatus.textContent = childActionBadgeText(action, result);
-  badges.appendChild(actionStatus);
+  if (!sameNoAction) {
+    const actionBadge = document.createElement("span");
+    actionBadge.className = `child-rail-action child-decision-${kind}`;
+    actionBadge.textContent = childActionBadgeText(action, result);
+    badges.appendChild(actionBadge);
+  }
+  if (risk) {
+    const riskBadge = document.createElement("span");
+    riskBadge.className = "child-risk-badge";
+    riskBadge.textContent = "高风险";
+    riskBadge.title = risk.text;
+    badges.appendChild(riskBadge);
+  }
   title.appendChild(name);
   title.appendChild(badges);
+
+  if (!sameNoAction) {
+    const copy = document.createElement("div");
+    copy.className = "child-rail-copy";
+    copy.title = [childDecisionText(kind, result), risk && risk.text, ruleCompact, observation].filter(Boolean).join("；");
+    copy.textContent = risk ? `高风险：${risk.text}` : childDecisionText(kind, result);
+    title.appendChild(copy);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "child-rail-meta-grid";
+  appendChildRailMeta(meta, childUiTerm("idx"), pairText("", childIndexText(beforeChild), childIndexText(afterChild)).trim());
+  appendChildRailMeta(meta, childUiTerm("report"), pairText("", childReportText(beforeChild), childReportText(afterChild)).trim());
+  appendChildRailMeta(meta, childUiTerm("type"), pairText("", childRichTypeText(beforeChild), childRichTypeText(afterChild)).trim());
+  appendChildRailMeta(meta, childUiTerm("ID"), pairText("", childIdText(beforeChild), childIdText(afterChild)).trim());
+  appendChildRailMeta(
+    meta,
+    childUiTerm("len"),
+    pairText(
+      "",
+      beforeChild && Number.isFinite(beforeChild.len) ? String(beforeChild.len) : "-",
+      afterChild && Number.isFinite(afterChild.len) ? String(afterChild.len) : "-",
+    ).trim(),
+  );
+  appendChildRailMeta(meta, childUiTerm("diff"), childDiffText(result && result.diff));
+  if (meta.childNodes.length) title.appendChild(meta);
+
   card.appendChild(title);
-
-  const afterRows = [
-    ["差异", childDiffText(result.diff)],
-    ["动作", childActionLabel(action && action.action)],
-  ];
-  if (action && action.source && action.source !== "-") {
-    afterRows.push(["来源 report", compactReportToDisplay(action.source)]);
-  }
-  if (action && action.reason) {
-    afterRows.push(["原因", translatedReasonText(action.reason) || action.reason, "child-card-line-long"]);
-  }
-  const ruleText = childRuleAnnotations(beforeChild, afterChild, action);
-  const ruleCompact = compactRuleText(ruleText);
-  const observation = childActionObservation(action, result);
-
-  const sides = document.createElement("div");
-  sides.className = "child-pair-sides";
-  const beforeExtraRows = [];
-  const afterExtraRows = [];
-  if (ruleCompact) {
-    beforeExtraRows.push(["规则适配", ruleCompact, "child-card-line-long child-card-rule"]);
-    afterExtraRows.push(["规则适配", ruleCompact, "child-card-line-long child-card-rule"]);
-  }
-  if (observation) {
-    afterExtraRows.unshift(["观察", observation, "child-card-line-long child-card-observation"]);
-  }
-  sides.appendChild(makeChildSide(beforeChild, "修改前", "before", beforeExtraRows));
-  sides.appendChild(makeChildSide(afterChild, "修改后", "after", [...afterRows, ...afterExtraRows]));
-  card.appendChild(sides);
+  card.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk));
 
   return card;
+}
+
+function parentStructureText(parent) {
+  if (!parent) return "无 0x010A001B 父容器结构信息";
+  const tailHex = parent.tailHex || "-";
+  const magicText = parent.tailLen === 0
+    ? "tail=empty"
+    : parent.tailMagicOk
+      ? `tail_magic=${tailHex} ok`
+      : `tail=${tailHex} unexpected`;
+  return [
+    `count=${Number(parent.childCount || 0)}`,
+    `layout=${parent.layout || "-"}`,
+    `header_len=${Number(parent.headerLen || 0)}`,
+    `child_start=${formatHexValue(parent.childStartOffset)}`,
+    `children_end=${formatHexValue(parent.childrenEndOffset)}`,
+    `tail_len=${Number(parent.tailLen || 0)}`,
+    magicText,
+  ].join("  ");
+}
+
+function appendParentStructureSide(container, label, parent) {
+  const side = document.createElement("div");
+  side.className = "parent-structure-side";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  side.appendChild(title);
+  const text = document.createElement("span");
+  text.textContent = parentStructureText(parent);
+  side.appendChild(text);
+  if (parent && Number(parent.tailLen || 0) > 0) {
+    const status = document.createElement("div");
+    status.className = parent.tailMagicOk ? "parent-structure-magic-ok" : "parent-structure-magic-bad";
+    status.textContent = parent.tailMagicOk
+      ? "parent:tail 是固定 trailer，结构已闭合，不是额外 child"
+      : "parent:tail 不是已知固定 trailer，需要复核";
+    side.appendChild(status);
+  }
+  container.appendChild(side);
+}
+
+function makeParentStructureStrip(beforeParent, afterParent) {
+  if (!beforeParent && !afterParent) return null;
+  const strip = document.createElement("div");
+  strip.className = "parent-structure-strip";
+  const title = document.createElement("div");
+  title.className = "parent-structure-title";
+  const left = document.createElement("span");
+  left.textContent = "父容器结构证据";
+  const right = document.createElement("small");
+  right.textContent = "synthetic parent:header / parent:tail，只读展示，不参与替换";
+  title.appendChild(left);
+  title.appendChild(right);
+  strip.appendChild(title);
+
+  const grid = document.createElement("div");
+  grid.className = "parent-structure-grid";
+  appendParentStructureSide(grid, "before parent", beforeParent);
+  appendParentStructureSide(grid, "after parent", afterParent);
+  strip.appendChild(grid);
+  return strip;
 }
 
 function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
@@ -3892,6 +5549,9 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   head.appendChild(title);
   head.appendChild(meta);
   panel.appendChild(head);
+
+  const parentStrip = makeParentStructureStrip(beforeParsed.parent, afterParsed.parent);
+  if (parentStrip) panel.appendChild(parentStrip);
 
   const grid = document.createElement("div");
   grid.className = "child-compare-grid";
@@ -5007,6 +6667,42 @@ el.reload.addEventListener("click", async () => {
     setStatus(`reload error: ${e.message}`);
   }
 });
+
+if (el.importFlow && el.importFile) {
+  el.importFlow.addEventListener("click", () => {
+    el.importFile.click();
+  });
+  el.importFile.addEventListener("change", async () => {
+    const file = el.importFile.files && el.importFile.files[0];
+    el.importFile.value = "";
+    if (!file) return;
+    try {
+      await importFlowFile(file);
+    } catch (e) {
+      setStatus(`import error: ${e.message}`);
+    }
+  });
+}
+
+if (el.saveFlow) {
+  el.saveFlow.addEventListener("click", async () => {
+    try {
+      await saveCurrentFlow();
+    } catch (e) {
+      setStatus(`save error: ${e.message}`);
+    }
+  });
+}
+
+if (el.exportFlow) {
+  el.exportFlow.addEventListener("click", async () => {
+    try {
+      await exportCurrentFlow();
+    } catch (e) {
+      setStatus(`export error: ${e.message}`);
+    }
+  });
+}
 
 if (el.deleteFlow) {
   el.deleteFlow.addEventListener("click", async () => {

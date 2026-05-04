@@ -1571,7 +1571,11 @@ INDEX_HTML = """
         <div class="left-title">连接列表</div>
         <div class="left-tools">
           <span id="flowCount" class="count">0</span>
+          <input id="importFileInput" type="file" accept=".txt,.jsonl,.gz,.tcpvflow.jsonl,.tcpvflow.jsonl.gz" hidden />
+          <button id="importFlowBtn" title="导入 txt 或 .tcpvflow.jsonl.gz 文件">导入</button>
           <button id="reloadBtn">刷新</button>
+          <button id="saveFlowBtn" title="把当前 flow 保存到服务器归档目录">保存</button>
+          <button id="exportFlowBtn" title="导出当前 flow 为 .tcpvflow.jsonl.gz">导出</button>
           <button id="deleteFlowBtn">删除连接</button>
         </div>
       </div>
@@ -1680,6 +1684,7 @@ INDEX_HTML = """
       <div id="events">__INITIAL_EVENTS__</div>
     </section>
   </div>
+  <script>window.TCPV_CONFIG = __APP_CONFIG__;</script>
   <script defer src="/app.js?v=__APP_JS_VERSION__"></script>
 </body>
 </html>

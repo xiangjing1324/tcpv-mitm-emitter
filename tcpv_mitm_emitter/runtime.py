@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import logging
+import base64
+import json
 import queue
 import threading
 import time
 import traceback
 import uuid
+from pathlib import Path
 from typing import Any
 
 import redis
 
+from .analyzer import TersafeAnalyzer
+from .archive import export_event_from_api, make_archive_path, parse_import_bytes, write_flow_archive
+from .config import archive_dir, env_int, overflow_dir, runtime_config
 from .store import TcpvEventStore
 
 logger = logging.getLogger(__name__)
@@ -23,7 +29,8 @@ class TcpvRuntime:
         self.instance_id = ""
         self.store: TcpvEventStore | None = None
 
-        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=20000)
+        self._queue_maxsize = env_int("TCPV_QUEUE_MAXSIZE", 100_000, min_value=1)
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=self._queue_maxsize)
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
 
@@ -36,8 +43,12 @@ class TcpvRuntime:
         self._emit_count = 0
         self._write_count = 0
         self._write_error_count = 0
+        self._sync_write_count = 0
+        self._spooled_count = 0
         self._last_write_error = ""
+        self._last_spool_path = ""
         self._drop_before_ts_ms: dict[str, int] = {}
+        self._analyzer = TersafeAnalyzer()
 
     def start(
         self,
@@ -135,7 +146,10 @@ class TcpvRuntime:
             self._emit_count = 0
             self._write_count = 0
             self._write_error_count = 0
+            self._sync_write_count = 0
+            self._spooled_count = 0
             self._last_write_error = ""
+            self._last_spool_path = ""
             self._drop_before_ts_ms = {}
             self._drain_queue()
 
@@ -210,9 +224,18 @@ class TcpvRuntime:
             self._queue.put_nowait(event)
             self._emit_count += 1
         except queue.Full:
-            self._dropped_count += 1
-            if self._dropped_count % 1000 == 1:
-                logger.warning("tcpv queue full, dropped=%s", self._dropped_count)
+            self._emit_count += 1
+            if self._write_event_sync(event):
+                self._sync_write_count += 1
+                if self._sync_write_count % 1000 == 1:
+                    logger.warning("tcpv queue full, wrote synchronously=%s", self._sync_write_count)
+                return
+            if self._spool_event(event, reason="queue_full"):
+                self._spooled_count += 1
+            else:
+                self._dropped_count += 1
+                if self._dropped_count % 1000 == 1:
+                    logger.warning("tcpv queue full, dropped=%s", self._dropped_count)
 
     def emit_lobby_packet(
         self,
@@ -360,6 +383,62 @@ class TcpvRuntime:
             include_payload=include_payload,
         )
 
+    def export_flow(self, account: str) -> tuple[Path, dict[str, Any]]:
+        account = str(account or "").strip()
+        if not account:
+            raise ValueError("account is required")
+        store = self.store
+        if store is None:
+            raise RuntimeError("service not enabled")
+        flow = next((item for item in store.list_accounts() if str(item.get("account") or "") == account), None)
+        if flow is None:
+            raise KeyError("flow not found")
+        events = [export_event_from_api(event) for event in store.iter_events(account, include_payload=True)]
+        if not events:
+            raise KeyError("flow has no events")
+        path = make_archive_path(flow)
+        write_flow_archive(path, flow, events)
+        return path, {"account": account, "events": len(events), "path": str(path)}
+
+    def save_flow(self, account: str) -> dict[str, Any]:
+        path, info = self.export_flow(account)
+        info["saved"] = True
+        info["filename"] = path.name
+        return info
+
+    def import_flow_bytes(self, data: bytes, filename: str) -> dict[str, Any]:
+        store = self.store
+        if store is None:
+            raise RuntimeError("service not enabled")
+        flow_meta, events = parse_import_bytes(data, filename, analyzer=self._analyzer)
+        result = store.import_flow(flow_meta, events)
+        result["source_file"] = filename
+        result["account"] = flow_meta.get("account")
+        return result
+
+    def list_archives(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for path in sorted(archive_dir().glob(f"*{'.tcpvflow.jsonl.gz'}"), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = path.stat()
+            items.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime * 1000),
+                }
+            )
+        return items
+
+    def replay_archive(self, name: str) -> dict[str, Any]:
+        safe_name = Path(str(name or "")).name
+        if not safe_name:
+            raise ValueError("archive name is required")
+        path = archive_dir() / safe_name
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(safe_name)
+        return self.import_flow_bytes(path.read_bytes(), path.name)
+
     def get_event(self, account: str, event_id: str) -> dict[str, Any] | None:
         store = self.store
         if store is None:
@@ -409,27 +488,14 @@ class TcpvRuntime:
                     continue
 
             try:
-                store.append_event(
-                    account=item["account"],
-                    cid=item["cid"],
-                    direction=item["dir"],
-                    payload=item["payload"],
-                    packet_len=item.get("packet_len"),
-                    full_payload=item.get("full_payload"),
-                    full_packet_len=item.get("full_packet_len"),
-                    before_payload=item.get("before_payload"),
-                    before_packet_len=item.get("before_packet_len"),
-                    proxy_username=item.get("proxy_username", ""),
-                    summary=item.get("summary", ""),
-                    ts_ms=item["ts_ms"],
-                    msg_idx=item.get("msg_idx"),
-                    chunk_idx=item.get("chunk_idx"),
-                )
+                self._append_store_event(store, item)
                 self._write_count += 1
             except Exception:
                 self._write_error_count += 1
                 self._last_write_error = traceback.format_exc(limit=1).strip().splitlines()[-1]
                 logger.exception("failed to append tcpv event")
+                if self._spool_event(item, reason="write_error"):
+                    self._spooled_count += 1
 
     def _run_server(self, app: Any, host: str, port: int) -> None:
         try:
@@ -449,17 +515,89 @@ class TcpvRuntime:
             except queue.Empty:
                 break
 
+    def _append_store_event(self, store: TcpvEventStore, item: dict[str, Any]) -> None:
+        store.append_event(
+            account=item["account"],
+            cid=item["cid"],
+            direction=item["dir"],
+            payload=item["payload"],
+            packet_len=item.get("packet_len"),
+            full_payload=item.get("full_payload"),
+            full_packet_len=item.get("full_packet_len"),
+            before_payload=item.get("before_payload"),
+            before_packet_len=item.get("before_packet_len"),
+            proxy_username=item.get("proxy_username", ""),
+            summary=item.get("summary", ""),
+            ts_ms=item["ts_ms"],
+            msg_idx=item.get("msg_idx"),
+            chunk_idx=item.get("chunk_idx"),
+        )
+
+    def _write_event_sync(self, item: dict[str, Any]) -> bool:
+        store = self.store
+        if store is None:
+            return False
+        try:
+            self._append_store_event(store, item)
+            self._write_count += 1
+            return True
+        except Exception:
+            self._write_error_count += 1
+            self._last_write_error = traceback.format_exc(limit=1).strip().splitlines()[-1]
+            logger.exception("failed to sync append tcpv event")
+            return False
+
+    def _spool_event(self, item: dict[str, Any], *, reason: str) -> bool:
+        try:
+            path = overflow_dir() / f"tcpv-overflow-{time.strftime('%Y%m%d')}.jsonl"
+            row = {
+                "reason": reason,
+                "spooled_at": int(time.time() * 1000),
+                "account": item.get("account", ""),
+                "cid": item.get("cid", ""),
+                "proxy_username": item.get("proxy_username", ""),
+                "summary": item.get("summary", ""),
+                "dir": item.get("dir", 0),
+                "payload": _bytes_to_b64(item.get("payload")),
+                "packet_len": item.get("packet_len", 0),
+                "full_payload": _bytes_to_b64(item.get("full_payload")),
+                "full_packet_len": item.get("full_packet_len", 0),
+                "before_payload": _bytes_to_b64(item.get("before_payload")),
+                "before_packet_len": item.get("before_packet_len", 0),
+                "ts_ms": item.get("ts_ms", 0),
+                "msg_idx": item.get("msg_idx"),
+                "chunk_idx": item.get("chunk_idx"),
+            }
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+            self._last_spool_path = str(path)
+            return True
+        except Exception:
+            logger.exception("failed to spool tcpv overflow event")
+            return False
+
     def get_stats(self) -> dict[str, Any]:
+        cfg = runtime_config()
         return {
             "enabled": self.enabled,
             "instance_id": self.instance_id,
             "queue_size": int(self._queue.qsize()),
+            "queue_maxsize": int(self._queue_maxsize),
             "emit_count": int(self._emit_count),
             "write_count": int(self._write_count),
+            "sync_write_count": int(self._sync_write_count),
             "write_error_count": int(self._write_error_count),
             "dropped_count": int(self._dropped_count),
+            "spooled_count": int(self._spooled_count),
             "last_write_error": self._last_write_error,
+            "last_spool_path": self._last_spool_path,
+            "stream_maxlen": int(cfg["stream_maxlen"]),
+            "ttl_seconds": int(cfg["ttl_seconds"]),
+            "max_events_in_memory": int(cfg["max_events_in_memory"]),
         }
+
+    def get_config(self) -> dict[str, Any]:
+        return runtime_config()
 
     @staticmethod
     def _to_bytes(data: Any) -> bytes:
@@ -502,6 +640,14 @@ def init_emitter(
         redis_port=redis_port,
         redis_db=redis_db,
     )
+
+
+def _bytes_to_b64(value: Any) -> str:
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, bytearray):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    return ""
 
 
 def shutdown_emitter() -> None:

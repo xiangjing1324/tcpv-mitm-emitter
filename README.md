@@ -152,7 +152,34 @@ When initialized, FastAPI viewer endpoints are exposed on `bind_host:bind_port`:
 - `GET /events?account=...`
 - `GET /connections?account=...`
 - `GET /stats`
+- `GET /config`
+- `POST /imports?filename=...` with raw request body (`.txt`, `.tcpvflow.jsonl`, `.tcpvflow.jsonl.gz`)
+- `GET /flows/export?account=...`
+- `POST /flows/save?account=...`
+- `GET /archives`
+- `POST /archives/replay?name=...`
 - `GET /`
+
+## Import / Replay / Save
+
+TCPV can import existing mitm txt captures and its own archive files.
+
+- Existing txt captures are parsed as label/time + hex packet pairs. Supported labels include `请求原包`, `请求`, `请求透传`, `请求原包未发送`, `响应原包`, and `响应`.
+- Standard archive files use `.tcpvflow.jsonl.gz`. They keep flow metadata plus packet events with raw/full/display/before payloads.
+- `full_pay` keeps the original encrypted packet. `pay` is the display payload, which becomes decrypted beforedump when `TCPV_TERSAFE_ROOT` is configured and decoding succeeds.
+- Saved archives default to `~/.tcpv/flows`, or `TCPV_ARCHIVE_DIR` when set.
+
+Useful environment variables:
+
+```bash
+export TCPV_ARCHIVE_DIR=~/.tcpv/flows
+export TCPV_TERSAFE_ROOT=/Users/jinger/locaTest   # or /root/Hello on server
+export TCPV_QUEUE_MAXSIZE=100000
+export TCPV_STREAM_MAXLEN=50000                   # 0 disables Redis stream trimming
+export TCPV_TTL_SECONDS=86400                     # 0 disables Redis TTL
+export TCPV_MAX_EVENTS_IN_MEMORY=50000
+export TCPV_EVENTS_FETCH_LIMIT=2000
+```
 
 ## Notes
 
