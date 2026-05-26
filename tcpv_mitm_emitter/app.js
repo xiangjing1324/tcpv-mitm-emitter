@@ -116,7 +116,7 @@ const ANALYSIS_XOR_SCAN_MAX_BYTES = 768;
 const PRINTABLE_RUN_ANCHOR_PATTERNS = [
   /\d{10,24}/,
   /(idevhw|idevsysver|iappversion|iappname|iappinfo)/i,
-  /(model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrpcs_|com\.|cn=|ou=|ip(hone|ad)\d|android)/i,
+  /(model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrpcs_|com\.|cn=|ou=|ip(hone|ad)\d|android|tersafe|config2\.dat|config3\.dat|comm\.zip)/i,
 ];
 const XOR_TEXT_KEYWORDS = [
   "/usr/sbin",
@@ -141,6 +141,10 @@ const XOR_TEXT_KEYWORDS = [
   "airdrop",
   "airdropalertui",
   "sharing",
+  "tersafe",
+  "config2.dat",
+  "config3.dat",
+  "comm.zip",
 ];
 const XOR_COMMON_KEYS = [0xb6, 0x3c, 0xb3, 0x8e];
 const XOR_KEY_PRIORITY = new Map([
@@ -1969,6 +1973,66 @@ function buildTimestampRange(start, value, label) {
   };
 }
 
+function bytesToLatin1String(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  let out = "";
+  for (const byte of byteValues) {
+    out += String.fromCharCode(Number(byte || 0) & 0xff);
+  }
+  return out;
+}
+
+function collectObTimestampTripletRanges(byteValues, baseOffset = 0, sourceLabel = "ob") {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const text = bytesToLatin1String(byteValues);
+  const ranges = [];
+  for (const match of text.matchAll(/\bob:([^\x00;\r\n]+)/gi)) {
+    const group = String(match[1] || "");
+    const groupStart = Number(match.index || 0) + String(match[0] || "").length - group.length;
+    const parts = group.split("/");
+    if (parts.length < 8) continue;
+
+    let cursor = 0;
+    const triplet = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      const start = groupStart + cursor;
+      const end = start + part.length;
+      cursor = end - groupStart + 1;
+      if (index < 5 || index > 7) continue;
+      const seconds = timestampSecondsFromToken(part);
+      if (!Number.isFinite(Number(seconds))) {
+        triplet.length = 0;
+        break;
+      }
+      triplet.push({
+        index,
+        start: Number(baseOffset || 0) + start,
+        end: Number(baseOffset || 0) + end,
+        value: Number(seconds),
+        raw: part,
+      });
+    }
+
+    if (triplet.length !== 3) continue;
+    const clocks = triplet.map((item) => formatTimestampClock(item.value) || item.raw);
+    const tripletText = clocks.join(" / ");
+    for (const item of triplet) {
+      const offsetText = formatHexValue(item.start);
+      ranges.push({
+        start: item.start,
+        end: item.end,
+        value: item.value,
+        kind: `ob${item.index}_triplet`,
+        triplet: true,
+        tripletLabel: sourceLabel,
+        text: `三时间戳 ${sourceLabel}:ob${item.index} ${formatTimestampDateTime(item.value) || item.raw} @${offsetText}；连续 ob5/ob6/ob7 ${tripletText}`,
+      });
+    }
+  }
+  return ranges;
+}
+
 function collectRecordTimestampRanges(record, baseOffset) {
   if (!Array.isArray(record) || record.length < 0x24) return [];
   const report = detectTssReport(record);
@@ -1976,6 +2040,11 @@ function collectRecordTimestampRanges(record, baseOffset) {
 
   const layout = read0102000aLayout(record, report);
   const ranges = new Map();
+  for (const item of collectObTimestampTripletRanges(record, baseOffset, "0102000a")) {
+    const start = Number(item && item.start);
+    if (!Number.isFinite(start) || ranges.has(start)) continue;
+    ranges.set(start, item);
+  }
   if (layout) {
     for (const shape of KNOWN_0102000A_TIMESTAMP_LAYOUTS) {
       if (!layoutMatchesKnownTimestampShape(layout, shape)) continue;
@@ -2026,9 +2095,34 @@ function collectTimestampHighlightsForPayload(base64Text) {
   return collectTimestampHighlightsFromBytes(bytes);
 }
 
+function obTripletItemIndex(item) {
+  const match = String(item && item.kind ? item.kind : "").match(/^ob([567])_/i);
+  return match ? Number(match[1]) : NaN;
+}
+
 function summarizeTimestampHighlights(ranges) {
   const items = Array.isArray(ranges) ? ranges : [];
   if (items.length <= 0) return "";
+  const tripletGroups = new Map();
+  for (const item of items) {
+    if (!item || !item.triplet) continue;
+    const key = String(item.tripletLabel || "ob");
+    const bucket = tripletGroups.get(key) || [];
+    bucket.push(item);
+    tripletGroups.set(key, bucket);
+  }
+  for (const [label, bucket] of tripletGroups.entries()) {
+    const ordered = bucket
+      .slice()
+      .sort((a, b) => (obTripletItemIndex(a) - obTripletItemIndex(b)) || (Number(a.start) - Number(b.start)));
+    if (ordered.length < 3) continue;
+    const firstThree = ordered.slice(0, 3);
+    if (![5, 6, 7].every((index, pos) => obTripletItemIndex(firstThree[pos]) === index)) continue;
+    const clocks = firstThree.map((item) => formatTimestampClock(item.value) || String(item.value || ""));
+    const offsets = firstThree.map((item) => formatHexValue(item.start)).join(", ");
+    const extra = items.length > 3 ? `, ...x${items.length}` : "";
+    return `三时间 ${clocks.join(" / ")} (${label}: ${offsets})${extra}`;
+  }
   const preview = items
     .slice(0, 3)
     .map((item) => {
@@ -2548,7 +2642,7 @@ function formatReportCodeText(value) {
 function reportBusinessLabel(value) {
   const parsed = parseReportCodeNumber(value);
   if (!Number.isFinite(parsed)) return "";
-  if (parsed === 0x010a001b) return "父容器/批量上报骨架";
+  if (parsed === 0x010a001b) return "父容器";
   if (parsed === 0x010a0011) return "高级白名单/保护节点";
   if (parsed === 0x0102000a) return "二进制叶子/运行态字段";
   const family = Math.floor(parsed / 0x10000) & 0xffff;
@@ -2656,13 +2750,7 @@ function idPatchResultText(scopeLabel, result, reason) {
 function innerNodeIdSummaryText(rawValue) {
   const text = decodeSummaryToken(rawValue);
   if (!text) return "";
-  const counts = {};
-  for (const item of text.split(",")) {
-    const [key, value] = item.split(":");
-    if (!key) continue;
-    const num = Number.parseInt(value || "0", 10);
-    counts[key] = Number.isFinite(num) ? num : 0;
-  }
+  const counts = innerNodeIdCounts(text);
   const bits = [];
   const labels = [
     ["replace", "替换"],
@@ -2676,6 +2764,18 @@ function innerNodeIdSummaryText(rawValue) {
     }
   }
   return bits.length ? `内层 child/leaf：${bits.join("，")}` : "";
+}
+
+function innerNodeIdCounts(rawValue) {
+  const text = decodeSummaryToken(rawValue);
+  const counts = {};
+  for (const item of text.split(",")) {
+    const [key, value] = item.split(":");
+    if (!key) continue;
+    const num = Number.parseInt(value || "0", 10);
+    counts[key] = Number.isFinite(num) ? num : 0;
+  }
+  return counts;
 }
 
 function summaryPrimaryItems(ev, summaryText) {
@@ -2713,6 +2813,299 @@ function summaryPrimaryItems(ev, summaryText) {
     items.push({ kind: "reason", text: `原因：${reasonText}` });
   }
   return { kv, items };
+}
+
+function isDecodedFlowEvent(ev, summaryText = "") {
+  const raw = String(summaryText || (ev && ev.summary) || "");
+  if (Number(ev && ev.dir) !== 0) return false;
+  if (String(ev && ev.before_pay ? ev.before_pay : "")) return true;
+  if (Number(ev && ev.before_len) > 0) return true;
+  return /\[TSS\/类型\]|\bchild_total=|\bchild_detail=|\bsim=|\bbeforedump=/.test(raw);
+}
+
+function bytesFromHexPrefix(hexText, maxBytes = 192) {
+  const compact = normalizeHex(hexText).slice(0, Math.max(0, Number(maxBytes || 0)) * 2);
+  const out = [];
+  for (let i = 0; i + 1 < compact.length; i += 2) {
+    out.push(Number.parseInt(compact.slice(i, i + 2), 16));
+  }
+  return out.filter((value) => Number.isFinite(value));
+}
+
+function eventPrefixText(ev) {
+  const chunks = [];
+  for (const key of ["pfx", "before_pfx", "full_pfx"]) {
+    const bytes = bytesFromHexPrefix(ev && ev[key], 192);
+    if (bytes.length <= 0) continue;
+    const text = extractPrintableRuns(bytes, 3, 8)
+      .map((item) => String(item && item.text ? item.text : "").trim())
+      .filter(Boolean)
+      .join(" ; ");
+    if (text) chunks.push(text);
+  }
+  return chunks.join(" ; ");
+}
+
+function extractSummarySection(summaryText, name) {
+  const safeName = escapeRegexLiteral(name);
+  const match = String(summaryText || "").match(new RegExp(`\\[${safeName}:([^\\]]+)\\]`));
+  return match ? String(match[1] || "").trim() : "";
+}
+
+function shortClockFromDateText(value) {
+  const text = String(value || "");
+  const match = text.match(/\b\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}:\d{2})\b/);
+  return match ? match[1] : text;
+}
+
+function shortClockFromEpochSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "";
+  try {
+    const d = new Date(seconds * 1000);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  } catch (_e) {
+    return "";
+  }
+}
+
+function timestampSecondsFromToken(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!/^\d{10}(?:\d{3})?$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  const seconds = raw.length === 13 ? Math.floor(value / 1000) : value;
+  return isPlausibleTimestampSeconds(seconds) ? seconds : null;
+}
+
+function timestampCountLabel(count, triplet = false) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  if (triplet) return "三时间";
+  if (n <= 1) return "时间";
+  return `时间×${n}`;
+}
+
+function parseTimestampAnalysisItems(analysisText) {
+  const items = [];
+  for (const match of String(analysisText || "").matchAll(/(?:^|[;\s])([^;\s=]+?)=(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/g)) {
+    const key = String(match[1] || "").trim();
+    const dateText = String(match[2] || "").trim();
+    if (!key || /^(now|flow_start)$/i.test(key)) continue;
+    const clock = shortClockFromDateText(dateText);
+    if (!clock) continue;
+    const parsed = key.match(/^(.+?):([^:@\s]+)(?:@0x([0-9a-f]+))?$/i);
+    items.push({
+      key,
+      label: parsed ? parsed[1] : key,
+      kind: parsed ? parsed[2] : "",
+      offset: parsed && parsed[3] ? Number.parseInt(parsed[3], 16) : NaN,
+      dateText,
+      clock,
+    });
+  }
+  return items;
+}
+
+function timestampSecondsFromDateTimeText(dateText) {
+  const text = String(dateText || "").trim();
+  if (!text) return null;
+  const parsed = new Date(text.replace(" ", "T"));
+  const seconds = Math.floor(parsed.getTime() / 1000);
+  return isPlausibleTimestampSeconds(seconds) ? seconds : null;
+}
+
+function parseSummaryChildTimestampHints(summaryText) {
+  const analysis = extractSummarySection(summaryText, "时间分析");
+  const out = new Map();
+  for (const item of parseTimestampAnalysisItems(analysis)) {
+    const label = String(item && item.label ? item.label : "").trim();
+    const match = label.match(/^child(\d+)\/(0x[0-9a-f]+)$/i);
+    const absoluteOffset = Number(item && item.offset);
+    if (!match || !Number.isFinite(absoluteOffset)) continue;
+    const childIndex = Number.parseInt(match[1], 10);
+    const hint = {
+      childIndex,
+      report: String(match[2] || "").toLowerCase(),
+      field: String(item && item.kind ? item.kind : "summary_time"),
+      absoluteOffset,
+      dateText: String(item && item.dateText ? item.dateText : ""),
+      clock: String(item && item.clock ? item.clock : ""),
+      seconds: timestampSecondsFromDateTimeText(item && item.dateText),
+    };
+    const list = out.get(childIndex) || [];
+    list.push(hint);
+    out.set(childIndex, list);
+  }
+  return out;
+}
+
+function findContinuousObTimestampTriplet(items) {
+  const byLabel = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const kindMatch = String(item && item.kind ? item.kind : "").match(/^ob([567])_(?:s|ms)$/i);
+    if (!kindMatch) continue;
+    const label = String(item && item.label ? item.label : "").trim();
+    if (!label) continue;
+    const bucket = byLabel.get(label) || new Map();
+    const index = Number(kindMatch[1]);
+    if (!bucket.has(index)) bucket.set(index, item);
+    byLabel.set(label, bucket);
+  }
+
+  for (const [label, bucket] of byLabel.entries()) {
+    if (![5, 6, 7].every((index) => bucket.has(index))) continue;
+    const triplet = [bucket.get(5), bucket.get(6), bucket.get(7)];
+    const offsets = triplet.map((item) => Number(item && item.offset));
+    const offsetsKnown = offsets.every((value) => Number.isFinite(value));
+    if (offsetsKnown && !(offsets[0] < offsets[1] && offsets[1] < offsets[2])) continue;
+    return { label, items: triplet };
+  }
+  return null;
+}
+
+function compactTimeInsight(summaryText) {
+  const analysis = extractSummarySection(summaryText, "时间分析");
+  const analysisItems = parseTimestampAnalysisItems(analysis);
+  const triplet = findContinuousObTimestampTriplet(analysisItems);
+  if (triplet) {
+    const shown = triplet.items.map((item) => `${String(item.kind || "").replace(/_s$/i, "")} ${item.clock}`);
+    const detail = triplet.items
+      .map((item) => `${item.kind}@${Number.isFinite(Number(item.offset)) ? formatHexValue(item.offset) : "?"}=${item.dateText}`)
+      .join(" / ");
+    return {
+      kind: "time",
+      text: `${timestampCountLabel(3, true)} ${shown.join(" / ")}`,
+      title: `${triplet.label} 连续 ob5/ob6/ob7：${detail}${analysis ? ` | ${analysis}` : ""}`,
+    };
+  }
+
+  const explicit = [];
+  for (const item of analysisItems) {
+    if (!item.clock || explicit.includes(item.clock)) continue;
+    explicit.push(item.clock);
+  }
+  if (explicit.length > 0) {
+    const shown = explicit.slice(0, 3);
+    return {
+      kind: "time",
+      text: `${timestampCountLabel(explicit.length)} ${shown.join(" / ")}`,
+      title: analysis,
+    };
+  }
+
+  const timePacket = extractSummarySection(summaryText, "时间包");
+  const seconds = [];
+  for (const match of timePacket.matchAll(/\b1[5-9]\d{8}\b/g)) {
+    const clock = shortClockFromEpochSeconds(match[0]);
+    if (clock && !seconds.includes(clock)) seconds.push(clock);
+    if (seconds.length >= 3) break;
+  }
+  if (seconds.length > 0) {
+    const shown = seconds.slice(0, 3);
+    return {
+      kind: "time",
+      text: `${timestampCountLabel(seconds.length)} ${shown.join(" / ")}`,
+      title: timePacket,
+    };
+  }
+  return null;
+}
+
+function compactDeviceInsight(ev, summaryText) {
+  const sourceText = `${String(summaryText || "")} ; ${eventPrefixText(ev)}`;
+  const deviceMatch = sourceText.match(/model:[^;\s|]+(?:;ver:[^;\s|]+)?(?:;inc_id:[^;\s|]+)?(?:;obf_id:[^;\s|]+)?/i);
+  if (deviceMatch) {
+    return {
+      text: `设备 ${compactText(deviceMatch[0], 58)}`,
+      title: deviceMatch[0],
+    };
+  }
+  const pathMatch = sourceText.match(/\b(?:mrpcs?|mrcp)[\w.-]*\.data\b|\b(?:config2|config3|comm)\.(?:dat|zip)\b/i);
+  if (pathMatch) {
+    return {
+      text: `文件 ${compactText(pathMatch[0], 42)}`,
+      title: pathMatch[0],
+    };
+  }
+  return null;
+}
+
+function compactChildInsight(summaryText) {
+  const counts = parseChildSummaryCounts(summaryText);
+  const total = Number.parseInt(counts.total, 10);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const changed = Number.parseInt(counts.changed, 10);
+  const kept = Number.parseInt(counts.kept, 10);
+  const clean = Number.parseInt(counts.clean, 10);
+  const nodeCounts = innerNodeIdCounts(readSummaryValue(summaryText, "node_id"));
+  const actionCounts = childActionSummaryCounts(summaryText);
+  const useActionCounts = actionCounts.total === total;
+  const bits = [`child ${total}`];
+  if (Number.isFinite(changed) && changed > 0) bits.push(`改${changed}`);
+  if (useActionCounts) {
+    if (actionCounts.replace > 0) bits.push(`替换${actionCounts.replace}`);
+    if (actionCounts.keep > 0) bits.push(`保留${actionCounts.keep}`);
+    if (actionCounts.clean > 0) bits.push(`清理${actionCounts.clean}`);
+    if (actionCounts.drop > 0) bits.push(`删除${actionCounts.drop}`);
+  } else {
+    if (Number.isFinite(nodeCounts.replace)) bits.push(`替换${nodeCounts.replace}`);
+    if (Number.isFinite(nodeCounts.keep)) bits.push(`保留${nodeCounts.keep}`);
+    if (Number.isFinite(nodeCounts.clean)) bits.push(`清理${nodeCounts.clean}`);
+    if (Number.isFinite(nodeCounts.drop) && nodeCounts.drop > 0) bits.push(`删除${nodeCounts.drop}`);
+    if (!Number.isFinite(nodeCounts.keep) && Number.isFinite(kept) && kept > 0) bits.push(`保留${kept}`);
+    if (!Number.isFinite(nodeCounts.clean) && Number.isFinite(clean) && clean > 0) bits.push(`清理${clean}`);
+  }
+  return {
+    kind: "child",
+    text: bits.join(" "),
+    title: String(summaryText || ""),
+  };
+}
+
+function compactFlowRoleText(reportText, role) {
+  const parsed = parseReportCodeNumber(reportText);
+  const raw = String(role || "").trim();
+  if (parsed === 0x010a001b) return "父容器";
+  return raw
+    .replace(/\/批量上报骨架/g, "")
+    .replace(/批量上报骨架/g, "")
+    .trim();
+}
+
+function compactTypeInsight(summaryText) {
+  const kv = parseSummaryKeyValues(summaryText);
+  const reportText = formatReportCodeText(kv.report || kv.code);
+  const role = compactFlowRoleText(reportText, decodeSummaryToken(kv.role));
+  if (reportText === "-" && !role) return null;
+  return {
+    kind: "type",
+    text: [reportText !== "-" ? reportText : "", role || reportBusinessLabel(reportText)].filter(Boolean).join(" "),
+    title: [reportText, role, decodeSummaryToken(kv.hint)].filter(Boolean).join(" | "),
+  };
+}
+
+function buildSummaryInsightStrip(ev, summaryText) {
+  if (!isDecodedFlowEvent(ev, summaryText)) return null;
+  const candidates = [
+    compactTimeInsight(summaryText),
+    compactDeviceInsight(ev, summaryText),
+    compactChildInsight(summaryText),
+    compactTypeInsight(summaryText),
+  ].filter(Boolean);
+  if (candidates.length <= 0) return null;
+  const strip = document.createElement("span");
+  strip.className = "summary-insights";
+  for (const item of candidates.slice(0, 4)) {
+    const chip = document.createElement("span");
+    chip.className = `summary-insight-chip${item.kind ? ` summary-insight-${item.kind}` : ""}`;
+    chip.textContent = item.text;
+    chip.title = item.title || item.text;
+    strip.appendChild(chip);
+  }
+  return strip;
 }
 
 function printableStats(byteValues) {
@@ -3023,11 +3416,13 @@ function analyzeDecodedSliceXor(byteValues) {
 
   const bodyOff = 20 + bestChoice.bodyRelOff;
   const commonPreviews = buildCommonXorPreviewItems(payload, [12, 16]);
-  const runs = bestChoice.best.runs.map((item) => ({
-    off: bodyOff + Number(item.off || 0),
-    text: shortenText(item.text, 96),
-    kind: inferStringKind(item.text),
-  }));
+  const runs = bestChoice.best.runs
+    .map((item) => ({
+      off: bodyOff + Number(item.off || 0),
+      text: shortenText(item.text, 96),
+      kind: inferStringKind(item.text),
+    }))
+    .filter((item) => isDisplayableDecodedRun(item.text, item.kind));
   return {
     ...baseInfo,
     bodyOff,
@@ -3552,6 +3947,18 @@ function countChangedBytes(left, right) {
   };
 }
 
+function buildChangedIndexSet(left, right) {
+  const leftBytes = Array.isArray(left) ? left : [];
+  const rightBytes = Array.isArray(right) ? right : [];
+  if (leftBytes.length <= 0 || rightBytes.length <= 0) return null;
+  const maxLen = Math.max(leftBytes.length, rightBytes.length);
+  const changed = new Set();
+  for (let i = 0; i < maxLen; i += 1) {
+    if (leftBytes[i] !== rightBytes[i]) changed.add(i);
+  }
+  return changed.size > 0 ? changed : null;
+}
+
 function parseChildActionDetails(summaryText) {
   const raw = String(summaryText || "");
   const out = new Map();
@@ -3592,6 +3999,26 @@ function parseChildActionDetails(summaryText) {
     }
   }
   return out;
+}
+
+function childActionSummaryCounts(summaryText) {
+  const actions = parseChildActionDetails(summaryText);
+  const counts = {
+    total: actions instanceof Map ? actions.size : 0,
+    replace: 0,
+    keep: 0,
+    clean: 0,
+    drop: 0,
+  };
+  for (const action of actions.values()) {
+    const code = String(action && action.action ? action.action : "").trim().toUpperCase();
+    if (!code) continue;
+    if (code === "KEEP") counts.keep += 1;
+    else if (code === "CLEAN") counts.clean += 1;
+    else if (code === "DROP") counts.drop += 1;
+    else if (["SL", "FS", "VL", "F11", "CR", "BLK", "ND", "R11"].includes(code)) counts.replace += 1;
+  }
+  return counts;
 }
 
 function parseChildSummaryCounts(summaryText) {
@@ -3676,13 +4103,19 @@ function compactSemanticSignal(text) {
 function splitChildSemanticRows(child) {
   const primaryRows = [];
   const debugLines = [];
+  const xorSignal = compactSemanticSignal(child && child.xorCommonPreview ? child.xorCommonPreview : "");
   for (const line of childSemanticLines(child)) {
     if (line.startsWith("value=")) {
       const value = semanticValueText(line, "value=");
       if (value.startsWith("xor:")) {
-        primaryRows.push(["可打印XOR", value.slice(4), "child-card-line-long child-card-parse"]);
+        const xorValue = value.slice(4);
+        if (isDisplayableDecodedRun(xorValue, inferStringKind(xorValue))) {
+          primaryRows.push(["可打印XOR", xorValue, "child-card-line-long child-card-parse"]);
+        }
       } else {
-        primaryRows.push(["解析", value, "child-card-line-long child-card-parse"]);
+        if (!xorSignal || isDisplayableDecodedRun(value, inferStringKind(value))) {
+          primaryRows.push(["解析", value, "child-card-line-long child-card-parse"]);
+        }
       }
       continue;
     }
@@ -3760,8 +4193,10 @@ function childRuleAnnotations(beforeChild, afterChild, action) {
   if (/tersafe|config2\.dat|config3\.dat|comm\.zip/.test(semanticText)) {
     add("tersafe/config2.dat/config3.dat/comm.zip：高级白名单规则");
   }
-  if (/account_patch_neutral_timestamp|timestamps=|timestamp|时间戳/.test(semanticText)) {
+  if (/account_patch_neutral_timestamp/.test(semanticText)) {
     add("三时间戳 / account_patch_neutral_timestamp：时间戳保护规则");
+  } else if (/timestamps=|timestamp|时间戳/.test(semanticText)) {
+    add("时间戳候选：按连续三字段复核");
   }
   if (/strict_preserve_whitelist/.test(semanticText)) add("strict_preserve_whitelist：严格白名单保护");
   if (/no_library_match/.test(semanticText)) add("未命中录制源");
@@ -3941,58 +4376,103 @@ function ensureChildCommonStyles() {
       color: color-mix(in srgb, #ef4444 86%, var(--text));
       font-weight: 900;
     }
-    .child-compare-grid {
-      grid-template-columns: repeat(2, minmax(460px, 1fr));
-      gap: 8px;
-      align-items: stretch;
-    }
-    .child-pair-card {
-      display: grid;
-      grid-template-columns: 136px minmax(0, 1fr);
-      min-height: 218px;
-      padding: 0;
-      gap: 0;
-      overflow: hidden;
-    }
-    .child-card-same-merged {
-      min-height: 168px;
-    }
-    .child-pair-title {
-      min-width: 0;
-      border-bottom: 0;
-      border-right: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-      padding: 9px 8px;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      gap: 7px;
-      background: linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--chip-bg) 66%, transparent),
+	    .event-time-strip {
+	      border: 1px solid color-mix(in srgb, #f59e0b 52%, var(--line));
+	      border-radius: 6px;
+	      padding: 6px 8px;
+	      margin: 7px 6px 0;
+	      background: color-mix(in srgb, #f59e0b 7%, var(--dump-bg));
+	      display: flex;
+	      flex-wrap: wrap;
+	      align-items: center;
+	      gap: 5px;
+	      font-size: 12px;
+	      line-height: 1.35;
+	    }
+	    .event-time-title {
+	      color: color-mix(in srgb, #f59e0b 86%, var(--text));
+	      font-weight: 900;
+	      margin-right: 2px;
+	    }
+	    .event-time-chip {
+	      min-width: 0;
+	      max-width: 100%;
+	      border: 1px solid color-mix(in srgb, #f59e0b 42%, var(--line));
+	      border-radius: 999px;
+	      padding: 2px 7px;
+	      background: color-mix(in srgb, #f59e0b 7%, var(--panel));
+	      color: color-mix(in srgb, #f59e0b 84%, var(--text));
+	      white-space: nowrap;
+	      overflow: hidden;
+	      text-overflow: ellipsis;
+	    }
+	    .event-time-chip-summary {
+	      border-color: color-mix(in srgb, #38bdf8 42%, var(--line));
+	      background: color-mix(in srgb, #38bdf8 7%, var(--panel));
+	      color: color-mix(in srgb, #38bdf8 82%, var(--text));
+	      white-space: normal;
+	      overflow: visible;
+	      text-overflow: clip;
+	    }
+	    .child-compare-grid {
+	      grid-template-columns: minmax(0, 1fr);
+	      gap: 8px;
+	      align-items: stretch;
+	    }
+	    .child-pair-card {
+	      display: grid;
+	      grid-template-columns: minmax(0, 1fr);
+	      min-height: 0;
+	      padding: 0;
+	      gap: 0;
+	      overflow: hidden;
+	    }
+	    .child-card-same-merged {
+	      min-height: 0;
+	    }
+	    .child-pair-title {
+	      min-width: 0;
+	      border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+	      border-right: 0;
+	      padding: 6px 8px;
+	      display: flex;
+	      flex-direction: row;
+	      flex-wrap: wrap;
+	      align-items: center;
+	      justify-content: space-between;
+	      gap: 4px 8px;
+	      background: linear-gradient(
+	        180deg,
+	        color-mix(in srgb, var(--chip-bg) 66%, transparent),
         color-mix(in srgb, var(--dump-bg) 72%, var(--panel))
       );
     }
     .child-rail-name {
       display: block;
-      color: var(--text);
-      font-weight: 850;
-      font-size: 14px;
-      line-height: 1.2;
-      text-align: center;
-      overflow-wrap: anywhere;
-    }
-    .child-rail-label {
-      display: block;
-      margin-top: 2px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 750;
-      text-align: center;
-    }
-    .child-title-badges {
-      justify-content: center;
-      gap: 4px;
-    }
+	      color: var(--text);
+	      font-weight: 850;
+	      font-size: 12px;
+	      line-height: 1.2;
+	      text-align: left;
+	      overflow-wrap: anywhere;
+	      display: inline-flex;
+	      align-items: center;
+	      gap: 6px;
+	      flex: 1 1 130px;
+	    }
+	    .child-rail-label {
+	      display: inline-block;
+	      margin-top: 0;
+	      color: var(--muted);
+	      font-size: 10px;
+	      font-weight: 750;
+	      text-align: left;
+	    }
+	    .child-title-badges {
+	      justify-content: flex-end;
+	      gap: 4px;
+	      flex: 0 0 auto;
+	    }
     .child-rail-action {
       border: 1px solid var(--chip-line);
       border-radius: 999px;
@@ -4006,16 +4486,17 @@ function ensureChildCommonStyles() {
       background: color-mix(in srgb, var(--chip-bg) 82%, transparent);
     }
     .child-rail-copy {
-      color: color-mix(in srgb, var(--text) 88%, var(--muted));
-      font-size: 11px;
-      line-height: 1.3;
-      text-align: center;
-      overflow-wrap: anywhere;
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
+	      color: color-mix(in srgb, var(--text) 88%, var(--muted));
+	      font-size: 11px;
+	      line-height: 1.3;
+	      text-align: left;
+	      overflow-wrap: anywhere;
+	      display: -webkit-box;
+	      -webkit-line-clamp: 1;
+	      -webkit-box-orient: vertical;
+	      overflow: hidden;
+	      flex: 1 1 100%;
+	    }
     .child-risk-badge {
       border: 1px solid color-mix(in srgb, #ef4444 72%, var(--line));
       border-radius: 999px;
@@ -4029,21 +4510,24 @@ function ensureChildCommonStyles() {
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .child-rail-meta-grid {
-      display: grid;
-      gap: 3px;
-    }
+	    .child-rail-meta-grid {
+	      display: grid;
+	      grid-template-columns: repeat(6, minmax(0, 1fr));
+	      gap: 3px;
+	      flex: 1 1 100%;
+	    }
     .child-rail-meta {
       min-width: 0;
       border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
       border-radius: 4px;
       padding: 2px 4px;
-      background: color-mix(in srgb, var(--dump-bg) 74%, var(--panel));
-      color: color-mix(in srgb, var(--muted) 82%, var(--text));
-      font-size: 10px;
-      line-height: 1.2;
-      overflow-wrap: anywhere;
-      white-space: normal;
+	      background: color-mix(in srgb, var(--dump-bg) 74%, var(--panel));
+	      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+	      font-size: 9.5px;
+	      line-height: 1.2;
+	      overflow: hidden;
+	      text-overflow: ellipsis;
+	      white-space: nowrap;
     }
     .child-rail-meta strong {
       color: var(--text);
@@ -4135,6 +4619,11 @@ function ensureChildCommonStyles() {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+	    .child-rail-meta-changed {
+	      border-color: color-mix(in srgb, #ffd36a 56%, var(--line));
+	      background: color-mix(in srgb, #ffd36a 10%, var(--dump-bg));
+	      color: color-mix(in srgb, #ffd36a 82%, var(--text));
+	    }
     .child-context-chip strong {
       color: var(--text);
       margin-right: 4px;
@@ -4152,33 +4641,44 @@ function ensureChildCommonStyles() {
       margin-top: 2px;
       padding-top: 2px;
     }
-    .child-preview-row {
-      margin: 0;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 0;
-      min-width: 0;
-      min-height: 0;
+	    .child-preview-row {
+	      margin: 0;
+	      display: grid;
+	      grid-template-columns: repeat(2, minmax(360px, 1fr));
+	      grid-template-rows: auto auto;
+	      gap: 0;
+	      min-width: 0;
+	      min-height: 0;
+	      overflow-x: auto;
+	      scrollbar-gutter: stable;
     }
-    .child-preview-row-single {
-      grid-template-rows: minmax(0, 1fr);
-    }
+	    .child-preview-row-single {
+	      grid-template-columns: minmax(0, 1fr);
+	    }
     .child-preview-box {
       min-width: 0;
-      border: 0;
-      border-radius: 0;
-      padding: 9px 11px;
-      background: color-mix(in srgb, var(--dump-bg) 88%, var(--panel));
-      display: flex;
-      flex-direction: column;
+	      border: 0;
+	      border-radius: 0;
+	      padding: 7px 9px;
+	      background: color-mix(in srgb, var(--dump-bg) 88%, var(--panel));
+	      display: grid;
+	      grid-template-rows: subgrid;
+	      grid-row: span 2;
       justify-content: flex-start;
       min-height: 0;
     }
-    .child-preview-before {
-      border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-      background: color-mix(in srgb, #f59e0b 4%, var(--dump-bg));
-    }
+	    .child-preview-info {
+	      min-width: 0;
+	      display: grid;
+	      gap: 1px;
+	      align-content: start;
+	      padding-bottom: 6px;
+	    }
+	    .child-preview-before {
+	      border-bottom: 0;
+	      border-right: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+	      background: color-mix(in srgb, #f59e0b 4%, var(--dump-bg));
+	    }
     .child-preview-after {
       background: color-mix(in srgb, var(--resp) 4%, var(--dump-bg));
     }
@@ -4188,18 +4688,112 @@ function ensureChildCommonStyles() {
     .child-preview-label {
       display: inline-block;
       margin-bottom: 5px;
-      color: var(--text);
-      font-weight: 800;
-      font-size: 13px;
-    }
+	      color: var(--text);
+	      font-weight: 800;
+	      font-size: 13px;
+	    }
     .child-preview-line {
       color: color-mix(in srgb, var(--muted) 80%, var(--text));
       overflow-wrap: anywhere;
       white-space: normal;
-      font-size: 12px;
-      line-height: 1.35;
-      margin-top: 2px;
+	      font-size: 13px;
+	      line-height: 1.32;
+	      margin-top: 1px;
     }
+	    .child-preview-line-rich {
+	      display: flex;
+	      flex-wrap: wrap;
+	      gap: 4px;
+	      align-items: center;
+	      margin-top: 3px;
+	    }
+	    .child-preview-token {
+	      min-width: 0;
+	      display: inline-flex;
+	      align-items: baseline;
+	      gap: 4px;
+	      max-width: 100%;
+	      border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+	      border-radius: 5px;
+	      padding: 2px 6px;
+	      background: color-mix(in srgb, var(--dump-bg) 74%, var(--panel));
+	      color: color-mix(in srgb, var(--text) 86%, var(--muted));
+	      overflow-wrap: anywhere;
+	    }
+	    .child-preview-token strong {
+	      flex: 0 0 auto;
+	      color: var(--muted);
+	      font-weight: 850;
+	    }
+	    .child-preview-token span {
+	      min-width: 0;
+	    }
+	    .child-preview-token code {
+	      font: inherit;
+	      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	      color: color-mix(in srgb, var(--text) 92%, var(--accent));
+	      overflow-wrap: anywhere;
+	    }
+	    .child-preview-token-action {
+	      border-color: color-mix(in srgb, #22c55e 48%, var(--line));
+	      background: color-mix(in srgb, #22c55e 7%, var(--dump-bg));
+	    }
+	    .child-preview-token-action strong,
+	    .child-preview-token-action span {
+	      color: color-mix(in srgb, #22c55e 76%, var(--text));
+	    }
+	    .child-preview-token-reason {
+	      border-color: color-mix(in srgb, #f59e0b 50%, var(--line));
+	      background: color-mix(in srgb, #f59e0b 8%, var(--dump-bg));
+	    }
+	    .child-preview-token-reason strong,
+	    .child-preview-token-reason span {
+	      color: color-mix(in srgb, #f59e0b 80%, var(--text));
+	    }
+	    .child-preview-token-source,
+	    .child-preview-token-parse {
+	      border-color: color-mix(in srgb, #38bdf8 48%, var(--line));
+	      background: color-mix(in srgb, #38bdf8 7%, var(--dump-bg));
+	    }
+	    .child-preview-token-source strong,
+	    .child-preview-token-source code,
+	    .child-preview-token-parse strong {
+	      color: color-mix(in srgb, #38bdf8 82%, var(--text));
+	    }
+	    .child-preview-token-rule {
+	      flex: 1 1 100%;
+	      align-items: flex-start;
+	      border-color: color-mix(in srgb, #a78bfa 48%, var(--line));
+	      background: color-mix(in srgb, #a78bfa 7%, var(--dump-bg));
+	    }
+	    .child-preview-token-rule strong {
+	      color: color-mix(in srgb, #c4b5fd 84%, var(--text));
+	    }
+	    .child-preview-token-risk {
+	      border-color: color-mix(in srgb, #ef4444 56%, var(--line));
+	      background: color-mix(in srgb, #ef4444 8%, var(--dump-bg));
+	    }
+	    .child-preview-token-risk strong,
+	    .child-preview-token-risk span {
+	      color: color-mix(in srgb, #ef4444 86%, var(--text));
+	    }
+	    .child-preview-token-xor {
+	      border-color: color-mix(in srgb, #67e8f9 46%, var(--line));
+	      background: color-mix(in srgb, #67e8f9 6%, var(--dump-bg));
+	    }
+	    .child-preview-token-xor strong,
+	    .child-preview-token-xor code {
+	      color: color-mix(in srgb, #67e8f9 84%, var(--text));
+	    }
+	    .child-preview-token-time {
+	      border-color: color-mix(in srgb, #f59e0b 54%, var(--line));
+	      background: color-mix(in srgb, #f59e0b 9%, var(--dump-bg));
+	    }
+	    .child-preview-token-time strong,
+	    .child-preview-token-time span,
+	    .child-preview-token-time code {
+	      color: color-mix(in srgb, #f59e0b 86%, var(--text));
+	    }
     .child-preview-line-meta {
       color: color-mix(in srgb, var(--text) 88%, var(--muted));
       font-weight: 650;
@@ -4212,18 +4806,55 @@ function ensureChildCommonStyles() {
       color: color-mix(in srgb, #ef4444 86%, var(--text));
       font-weight: 800;
     }
-    .child-hex-table {
-      margin-top: 7px;
-      border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-      border-radius: 5px;
-      overflow: hidden;
-      background: color-mix(in srgb, var(--dump-bg) 84%, #000);
-    }
+	    .child-hex-table {
+	      margin-top: 7px;
+	      border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+	      border-radius: 5px;
+	      overflow-x: auto;
+	      overflow-y: visible;
+	      scrollbar-gutter: stable;
+	      background: color-mix(in srgb, var(--dump-bg) 84%, #000);
+	    }
+	    .child-hex-table::-webkit-scrollbar {
+	      width: 8px;
+	      height: 8px;
+	    }
+	    .child-hex-table::-webkit-scrollbar-track {
+	      background: color-mix(in srgb, var(--dump-bg) 82%, var(--panel));
+	    }
+	    .child-hex-table::-webkit-scrollbar-thumb {
+	      border: 2px solid color-mix(in srgb, var(--dump-bg) 82%, var(--panel));
+	      border-radius: 999px;
+	      background: color-mix(in srgb, var(--accent) 48%, var(--muted));
+	    }
+	    .child-hex-details > summary.child-hex-title {
+	      list-style: none;
+	      cursor: pointer;
+	      border-left: 0;
+	      min-height: 0;
+	      user-select: none;
+	      display: flex;
+	      align-items: center;
+	      gap: 8px;
+	    }
+	    .child-hex-details > summary.child-hex-title::-webkit-details-marker {
+	      display: none;
+	    }
+	    .child-hex-details > summary.child-hex-title::after {
+	      content: "展开";
+	      margin-left: auto;
+	      color: var(--muted);
+	      font-size: 10px;
+	      font-weight: 800;
+	    }
+	    .child-hex-details[open] > summary.child-hex-title::after {
+	      content: "收起";
+	    }
     .child-hex-title {
-      padding: 4px 6px;
+      padding: 5px 7px;
       border-bottom: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
       color: color-mix(in srgb, var(--text) 88%, var(--muted));
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 850;
     }
     .child-hex-body {
@@ -4231,17 +4862,17 @@ function ensureChildCommonStyles() {
       gap: 0;
       padding: 3px 0;
     }
-    .child-hex-row {
-      display: grid;
-      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
+	    .child-hex-row {
+	      display: grid;
+	      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
       gap: 8px;
       align-items: baseline;
-      padding: 1px 6px;
-      font-size: 11px;
-      line-height: 1.35;
+      padding: 2px 7px;
+      font-size: 12px;
+      line-height: 1.38;
     }
     .child-hex-row-marked {
-      background: color-mix(in srgb, var(--accent) 7%, transparent);
+      background: color-mix(in srgb, var(--accent) 4%, transparent);
     }
     .child-hex-row-report,
     .child-hex-row-id {
@@ -4289,38 +4920,90 @@ function ensureChildCommonStyles() {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       white-space: pre;
     }
-    .child-hex-byte-cell,
-    .child-hex-char-cell {
-      text-align: center;
-    }
-    .child-hex-string-row {
-      display: grid;
-      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
-      gap: 8px;
-      align-items: baseline;
-      padding: 1px 6px 3px;
-      font-size: 11px;
-      line-height: 1.35;
-      background: color-mix(in srgb, #22c55e 6%, transparent);
-      border-left: 2px solid color-mix(in srgb, #22c55e 70%, transparent);
+	    .child-hex-byte-cell,
+	    .child-hex-char-cell {
+	      text-align: center;
+	    }
+	    .child-hex-byte-cell-changed {
+	      color: #ffd36a;
+	      background: rgba(255, 179, 46, 0.22);
+	      border-radius: 3px;
+	      box-shadow: 0 0 0 1px rgba(255, 179, 46, 0.18);
+	    }
+	    .child-hex-byte-cell-time {
+	      color: color-mix(in srgb, #f59e0b 84%, var(--text));
+	      background: rgba(245, 158, 11, 0.10);
+	      border-radius: 3px;
+	      box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12);
+	    }
+	    .child-hex-string-row {
+	      display: grid;
+	      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
+	      gap: 8px;
+	      align-items: baseline;
+	      padding: 0 7px 2px;
+	      font-size: 12px;
+	      line-height: 1.22;
+	      background: color-mix(in srgb, #22c55e 3%, transparent);
+	      border-left: 2px solid color-mix(in srgb, #22c55e 42%, transparent);
     }
     .child-hex-string-label,
     .child-hex-string-cells {
-      color: color-mix(in srgb, #22c55e 78%, var(--text));
+      color: color-mix(in srgb, #67e8f9 82%, var(--text));
     }
-    .child-hex-string-note {
-      color: color-mix(in srgb, #22c55e 70%, var(--muted));
-      overflow-wrap: anywhere;
-    }
+	    .child-hex-time-row {
+	      display: grid;
+	      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
+	      gap: 8px;
+	      align-items: baseline;
+	      padding: 0 7px 2px;
+	      font-size: 12px;
+	      line-height: 1.22;
+	      background: color-mix(in srgb, #f59e0b 5%, transparent);
+	      border-left: 2px solid color-mix(in srgb, #f59e0b 56%, transparent);
+	    }
+	    .child-hex-time-label,
+	    .child-hex-time-value {
+	      color: color-mix(in srgb, #f59e0b 86%, var(--text));
+	      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	      white-space: pre;
+	    }
+	    .child-hex-time-note {
+	      color: color-mix(in srgb, #f59e0b 74%, var(--muted));
+	      white-space: nowrap;
+	      overflow: hidden;
+	      text-overflow: ellipsis;
+	    }
+	    .child-hex-string-note {
+	      color: color-mix(in srgb, #67e8f9 72%, var(--muted));
+	      white-space: nowrap;
+	      overflow: hidden;
+	      text-overflow: ellipsis;
+	    }
     .child-hex-note {
       min-width: 0;
       color: color-mix(in srgb, var(--text) 78%, var(--muted));
-      overflow-wrap: anywhere;
+      overflow-wrap: normal;
+      white-space: pre;
     }
     .child-hex-row-time {
       background: color-mix(in srgb, #f59e0b 10%, transparent);
       border-left: 2px solid color-mix(in srgb, #f59e0b 72%, transparent);
     }
+	    .child-hex-row-string {
+	      background: color-mix(in srgb, #22c55e 3%, transparent);
+	      border-left: 2px solid color-mix(in srgb, #22c55e 42%, transparent);
+	    }
+	    .child-hex-row-string .child-hex-note {
+	      color: color-mix(in srgb, #22c55e 78%, var(--text));
+	      font-weight: 800;
+	    }
+	    .child-hex-byte-cell-string {
+	      color: color-mix(in srgb, #22c55e 72%, var(--text));
+	      background: rgba(34, 197, 94, 0.07);
+	      border-radius: 3px;
+	      box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.08);
+	    }
     .child-hex-row-time .child-hex-note {
       color: color-mix(in srgb, #f59e0b 82%, var(--text));
       font-weight: 800;
@@ -4351,22 +5034,94 @@ function ensureChildCommonStyles() {
     .child-hex-insight-time span {
       color: color-mix(in srgb, #f59e0b 82%, var(--text));
     }
+	    .child-hex-insight span {
+	      min-width: 0;
+	      overflow: hidden;
+	      text-overflow: ellipsis;
+	      white-space: nowrap;
+	    }
     .child-preview-empty {
       color: var(--muted);
       font-size: 12px;
     }
     @media (max-width: 900px) {
       .child-compare-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
       }
       .parent-structure-grid {
         grid-template-columns: 1fr;
       }
     }
-    @media (max-width: 720px) {
-      .child-pair-card {
-        grid-template-columns: 112px minmax(0, 1fr);
-      }
+	    @media (max-width: 520px) {
+	      .child-compare-grid {
+	        grid-template-columns: minmax(0, 1fr);
+	        gap: 6px;
+	      }
+	      .child-pair-title {
+	        padding: 5px 6px;
+	        gap: 3px 5px;
+	      }
+	      .child-rail-name {
+	        flex-basis: 72px;
+	        font-size: 11px;
+	      }
+	      .child-rail-label {
+	        display: none;
+	      }
+	      .child-title-badges {
+	        max-width: 100%;
+	      }
+	      .child-status,
+	      .child-rail-action,
+	      .child-risk-badge {
+	        padding: 1px 5px;
+	        font-size: 10px;
+	      }
+	      .child-rail-copy {
+	        font-size: 10px;
+	      }
+	      .child-rail-meta-grid {
+	        grid-template-columns: repeat(2, minmax(0, 1fr));
+	        gap: 2px;
+	      }
+	      .child-rail-meta {
+	        padding: 1px 3px;
+	        font-size: 9px;
+	      }
+	      .child-preview-box {
+	        padding: 6px;
+	      }
+	      .child-preview-label,
+	      .child-preview-line {
+	        font-size: 11px;
+	      }
+	      .child-hex-title,
+	      .child-hex-insights {
+	        font-size: 10px;
+	      }
+	      .child-hex-insight {
+	        grid-template-columns: minmax(0, 1fr);
+	        gap: 1px;
+	      }
+	      .child-hex-insight strong {
+	        overflow: hidden;
+	        text-overflow: ellipsis;
+	        white-space: nowrap;
+	      }
+	    }
+	    @media (max-width: 330px) {
+	      .child-compare-grid {
+	        grid-template-columns: minmax(0, 1fr);
+	      }
+	    }
+	    @media (max-width: 720px) {
+	      .child-pair-card {
+	        grid-template-columns: minmax(0, 1fr);
+	      }
+	      .child-preview-before {
+	        border-right: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+	        border-bottom: 0;
+	      }
       .child-pair-title {
         padding: 8px 6px;
       }
@@ -4409,6 +5164,7 @@ function appendChildRailMeta(container, label, value) {
   if (!text || text === "-") return;
   const row = document.createElement("div");
   row.className = "child-rail-meta";
+  if (text.includes("->")) row.classList.add("child-rail-meta-changed");
   row.title = `${label} ${text}`;
   const strong = document.createElement("strong");
   strong.textContent = label;
@@ -4431,6 +5187,19 @@ function childUiTerm(term) {
     head: "head(头)",
     tail: "tail(尾)",
     all: "all(全部)",
+  };
+  return labels[term] || term;
+}
+
+function childUiShortTerm(term) {
+  const labels = {
+    idx: "idx",
+    report: "report",
+    type: "type",
+    ID: "id",
+    len: "len",
+    diff: "diff",
+    offset: "off",
   };
   return labels[term] || term;
 }
@@ -4498,6 +5267,20 @@ function addChildHexField(fields, offset, length, note, kind = "field") {
   });
 }
 
+function isDisplayableDecodedRun(text, kind = "") {
+  const raw = String(text || "");
+  const normalized = normalizeVisibleText(raw);
+  if (normalized.length < 4) return false;
+  const lower = normalized.toLowerCase();
+  if (compactSemanticSignal(normalized)) return true;
+  if (/\d{10,24}/.test(normalized)) return true;
+  if (/(model:|ver:|inc_id:|obf_id:|appid:|uuid:|client:|bundle:)/i.test(normalized)) return true;
+  if (/[/:;=_]/.test(normalized) && /[A-Za-z0-9]{3,}/.test(normalized)) return true;
+  if (String(kind || "") !== "ascii") return true;
+  if (normalized.length >= 12 && /^[A-Za-z0-9 .:_/-]+$/.test(normalized)) return true;
+  return false;
+}
+
 function childBestDecodedOverlay(childBytes) {
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return null;
 
@@ -4527,7 +5310,9 @@ function childBestDecodedOverlay(childBytes) {
           text,
           kind: inferStringKind(text),
         };
-      });
+      })
+      .filter((run) => isDisplayableDecodedRun(run.text, run.kind));
+    if (runs.length <= 0) return null;
     return {
       mode: "xor",
       key: xorKey,
@@ -4596,7 +5381,7 @@ function childBestDecodedOverlay(childBytes) {
       text,
       kind: inferStringKind(text),
     };
-  });
+  }).filter((run) => isDisplayableDecodedRun(run.text, run.kind));
   if (rawRuns.length <= 0 || rawRuns.every((run) => String(run.text || "").length < 8)) return null;
   return {
     mode: "ascii",
@@ -4632,9 +5417,7 @@ function childDecodedCellsForRange(overlay, offset, end) {
     const runStart = Number(run.start);
     const runEnd = Number(run.end);
     if (runStart >= start && runStart < stop) {
-      notes.push(`string ${hexOffsetText(runStart)}-${hexOffsetText(Math.max(runStart, runEnd - 1))} "${shortenText(run.text, 80)}"`);
-    } else if (runEnd > start && runEnd <= stop) {
-      notes.push(`string end ${hexOffsetText(Math.max(runStart, runEnd - 1))}`);
+      notes.push(`${run.kind || "string"} ${hexOffsetText(runStart)}-${hexOffsetText(Math.max(runStart, runEnd - 1))}`);
     }
   }
   return {
@@ -4643,31 +5426,55 @@ function childDecodedCellsForRange(overlay, offset, end) {
   };
 }
 
-function collectChildTimestampItems(childBytes, valueStart) {
+function collectChildTimestampItems(childBytes, valueStart, timestampHints = []) {
   if (!Array.isArray(childBytes) || childBytes.length < 4) return [];
   const out = [];
   const seen = new Set();
-  const add = (start, value, source, label = "") => {
+  const add = (start, value, source, label = "", options = {}) => {
     const offset = Number(start);
     const seconds = Number(value);
-    if (!Number.isFinite(offset) || offset < 0 || offset + 3 >= childBytes.length) return;
+    const rawEnd = Number(options && options.end);
+    const end = Number.isFinite(rawEnd) && rawEnd > offset ? rawEnd : offset + 4;
+    if (!Number.isFinite(offset) || offset < 0 || end > childBytes.length) return;
     if (!isPlausibleTimestampSeconds(seconds) || seen.has(offset)) return;
     seen.add(offset);
     const clock = formatTimestampDateTime(seconds) || formatTimestampClock(seconds) || String(seconds);
     const display = timestampShapeDisplay(label);
     const labelText = source === "known" && display ? `[${display}] ` : "";
+    const sourceText = source === "known" || source === "summary" ? "时间戳" : source === "ob-triplet" ? "三时间戳" : "候选时间戳";
     out.push({
       start: offset,
-      end: offset + 4,
+      end,
       value: seconds,
       source,
       label,
-      text: `${source === "known" ? "时间戳" : "候选时间戳"} ${labelText}${clock} @${hexOffsetText(offset)} BE秒=${seconds}`,
+      triplet: !!(options && options.triplet),
+      text: String(options && options.text ? options.text : `${sourceText} ${labelText}${clock} @${hexOffsetText(offset)} BE秒=${seconds}`),
     });
   };
 
+  for (const hint of Array.isArray(timestampHints) ? timestampHints : []) {
+    const offset = Number(hint && hint.start);
+    if (!Number.isFinite(offset) || offset < 0 || offset + 3 >= childBytes.length) continue;
+    const actual = readBe32(childBytes, offset);
+    if (!isPlausibleTimestampSeconds(actual)) continue;
+    const field = String(hint && hint.field ? hint.field : "summary_time");
+    const clock = formatTimestampDateTime(actual) || formatTimestampClock(actual) || String(actual);
+    add(offset, actual, "summary", field, {
+      text: `时间戳 [${field}] ${clock} @${hexOffsetText(offset)} BE秒=${actual}`,
+    });
+  }
+
   for (const item of collectRecordTimestampRanges(childBytes, 0)) {
-    add(Number(item && item.start), Number(item && item.value), "known", item && item.kind);
+    if (item && item.triplet) {
+      add(Number(item.start), Number(item.value), "ob-triplet", item.kind, {
+        triplet: true,
+        end: Number(item.end),
+        text: item.text,
+      });
+    } else {
+      add(Number(item && item.start), Number(item && item.value), "known", item && item.kind);
+    }
   }
 
   const rawStart = Number(valueStart);
@@ -4699,7 +5506,7 @@ function collectChildTimestampItems(childBytes, valueStart) {
   return out.sort((a, b) => Number(a.start) - Number(b.start));
 }
 
-function childHexStructure(child, childBytes) {
+function childHexStructure(child, childBytes, options = {}) {
   const annotations = new Map();
   const fields = [];
   let valueStart = null;
@@ -4758,20 +5565,22 @@ function childHexStructure(child, childBytes) {
     }
   }
 
-  const timestamps = collectChildTimestampItems(childBytes, valueStart);
+  const timestamps = collectChildTimestampItems(childBytes, valueStart, options.timestampHints);
   for (const item of timestamps) {
     const start = Number(item && item.start);
-    if (!Number.isFinite(start) || start < 0 || start + 3 >= childBytes.length) continue;
-    addChildHexField(fields, start, 4, item.text || "时间戳", "timestamp");
+    const end = Number(item && item.end);
+    if (!Number.isFinite(start) || start < 0 || !Number.isFinite(end) || end <= start || end > childBytes.length) continue;
+    addChildHexField(fields, start, end - start, item.text || "时间戳", "timestamp");
   }
 
   return { annotations, fields, valueStart, timestamps };
 }
 
-function buildChildHexModel(child, childBytes) {
+function buildChildHexModel(child, childBytes, options = {}) {
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return { rows: [], overlay: null, timestamps: [] };
-  const { annotations, fields, valueStart, timestamps } = childHexStructure(child, childBytes);
+  const { annotations, fields, valueStart, timestamps } = childHexStructure(child, childBytes, options);
   const overlay = childBestDecodedOverlay(childBytes);
+  const changedOffsets = options && options.changedOffsets instanceof Set ? options.changedOffsets : null;
   const bodyStart = Number.isFinite(Number(valueStart)) ? Number(valueStart) : Math.min(16, childBytes.length);
   const normalizedFields = (Array.isArray(fields) ? fields : [])
     .map((field) => {
@@ -4785,7 +5594,12 @@ function buildChildHexModel(child, childBytes) {
       };
     })
     .filter((field) => Number.isFinite(field.offset) && field.length > 0 && field.offset < childBytes.length)
-    .sort((a, b) => (a.offset - b.offset) || (b.length - a.length));
+    .sort((a, b) => (
+      (a.offset - b.offset)
+      || (a.kind === "timestamp" ? -1 : 0)
+      || (b.kind === "timestamp" ? 1 : 0)
+      || (b.length - a.length)
+    ));
 
   const rows = [];
   const appendRow = (offset, length, notes = [], kind = "") => {
@@ -4803,14 +5617,17 @@ function buildChildHexModel(child, childBytes) {
     for (const note of mergedNotes) {
       if (!uniqueNotes.includes(note)) uniqueNotes.push(note);
     }
-    rows.push({
-      offset: safeOffset,
-      bytes: chunk.map(childHexByteText).join(" "),
-      byteValues: chunk,
-      decoded: childDecodedCellsForRange(overlay, safeOffset, end),
-      note: uniqueNotes.join("；"),
-      kind: uniqueNotes.some((note) => /时间戳/.test(note)) ? "timestamp" : String(kind || ""),
-    });
+	    rows.push({
+	      offset: safeOffset,
+	      bytes: chunk.map(childHexByteText).join(" "),
+	      byteValues: chunk,
+	      changedIndexes: changedOffsets
+	        ? chunk.map((_byte, index) => changedOffsets.has(safeOffset + index))
+	        : [],
+	      decoded: childDecodedCellsForRange(overlay, safeOffset, end),
+	      note: uniqueNotes.join("；"),
+	      kind: uniqueNotes.some((note) => /时间戳/.test(note)) ? "timestamp" : String(kind || ""),
+	    });
   };
   const emitGapRows = (start, end) => {
     let cursor = Math.max(0, Math.floor(Number(start)));
@@ -4844,22 +5661,45 @@ function childHexRowKindClass(kind) {
   return ` child-hex-row-${value}`;
 }
 
-function appendChildFullHexTable(box, child, childBytes) {
-  const model = buildChildHexModel(child, childBytes);
+function childTimestampDisplayFromNote(note) {
+  const text = String(note || "").trim();
+  if (!text) return null;
+  const first = text.split("；").find((part) => /时间戳/.test(part)) || text;
+  const match = first.match(/^(候选时间戳|时间戳)\s*(\[[^\]]+\]\s*)?(.+?)\s*@(\+0x[0-9a-f]+)\s*BE秒=(\d+)/i);
+  if (!match) {
+    return {
+      label: /候选/.test(first) ? "候选时间" : "时间戳",
+      value: first,
+      note: "",
+    };
+  }
+  const kind = match[1] || "时间戳";
+  const shape = String(match[2] || "").trim();
+  return {
+    label: kind === "候选时间戳" ? "候选时间" : "时间戳",
+    value: String(match[3] || "").trim(),
+    note: [shape, match[4], `BE=${match[5]}`].filter(Boolean).join(" "),
+  };
+}
+
+function appendChildFullHexTable(box, child, childBytes, options = {}) {
+  const model = buildChildHexModel(child, childBytes, options);
   const rows = model.rows;
   if (!rows.length) return;
 
-  const wrap = document.createElement("div");
-  wrap.className = "child-hex-table";
-  const title = document.createElement("div");
-  title.className = "child-hex-title";
-  const len = Array.isArray(childBytes) ? childBytes.length : 0;
-  title.textContent = `${childUiTerm("hex")} 完整 child bytes / ${childUiTerm("len")} ${len}`;
-  wrap.appendChild(title);
+	  const wrap = document.createElement("div");
+	  wrap.className = "child-hex-table";
+	  const title = document.createElement("div");
+	  title.className = "child-hex-title";
+	  const len = Array.isArray(childBytes) ? childBytes.length : 0;
+	  title.textContent = `${childUiTerm("hex")} 完整 child bytes / ${childUiTerm("len")} ${len}`;
+	  wrap.appendChild(title);
 
-  const body = document.createElement("div");
-  body.className = "child-hex-body";
+	  const body = document.createElement("div");
+	  body.className = "child-hex-body";
   for (const row of rows) {
+    const decoded = row && row.decoded && Array.isArray(row.decoded.cells) ? row.decoded : null;
+    const isTimestamp = row && row.kind === "timestamp";
     const line = document.createElement("div");
     line.className = `child-hex-row${row.note ? " child-hex-row-marked" : ""}${row.kind === "timestamp" ? " child-hex-row-time" : ""}${childHexRowKindClass(row.kind)}`;
 
@@ -4870,51 +5710,83 @@ function appendChildFullHexTable(box, child, childBytes) {
     const bytes = document.createElement("code");
     bytes.className = "child-hex-bytes child-hex-byte-grid";
     const byteValues = Array.isArray(row.byteValues) ? row.byteValues : [];
-    for (const byte of byteValues) {
-      const span = document.createElement("span");
-      span.className = "child-hex-byte-cell";
-      span.textContent = childHexByteText(byte);
-      bytes.appendChild(span);
-    }
+	    const changedIndexes = Array.isArray(row.changedIndexes) ? row.changedIndexes : [];
+	    for (let index = 0; index < byteValues.length; index += 1) {
+	      const byte = byteValues[index];
+	      const span = document.createElement("span");
+	      const decodedChar = decoded && decoded.cells[index] && String(decoded.cells[index]).trim()
+	        ? String(decoded.cells[index])
+	        : "";
+	      span.className = `child-hex-byte-cell${changedIndexes[index] ? " child-hex-byte-cell-changed" : ""}${decodedChar ? " child-hex-byte-cell-string" : ""}${isTimestamp ? " child-hex-byte-cell-time" : ""}`;
+	      span.textContent = childHexByteText(byte);
+	      if (decodedChar) span.title = `string char "${decodedChar}"`;
+	      if (isTimestamp) span.title = [span.title, row.note].filter(Boolean).join("；");
+	      bytes.appendChild(span);
+	    }
 
     const note = document.createElement("span");
     note.className = "child-hex-note";
-    note.textContent = row.note || "";
+    note.textContent = isTimestamp ? "时间戳" : (row.note || "");
 
     line.appendChild(offset);
     line.appendChild(bytes);
     line.appendChild(note);
-    body.appendChild(line);
+	    body.appendChild(line);
 
-    if (row.decoded && Array.isArray(row.decoded.cells) && row.decoded.cells.length > 0) {
-      const stringLine = document.createElement("div");
-      stringLine.className = "child-hex-string-row";
+	    if (decoded) {
+	      const stringLine = document.createElement("div");
+	      stringLine.className = "child-hex-string-row";
 
-      const label = document.createElement("code");
-      label.className = "child-hex-string-label";
-      label.textContent = "string";
+	      const stringLabel = document.createElement("code");
+	      stringLabel.className = "child-hex-string-label";
+	      stringLabel.textContent = "string";
 
-      const chars = document.createElement("code");
-      chars.className = "child-hex-string-cells child-hex-char-grid";
-      for (const ch of row.decoded.cells) {
-        const span = document.createElement("span");
-        span.className = "child-hex-char-cell";
-        span.textContent = ch;
-        chars.appendChild(span);
-      }
+	      const stringCells = document.createElement("code");
+	      stringCells.className = "child-hex-string-cells child-hex-char-grid";
+	      for (const value of decoded.cells) {
+	        const span = document.createElement("span");
+	        span.className = "child-hex-char-cell";
+	        span.textContent = value || " ";
+	        stringCells.appendChild(span);
+	      }
 
-      const stringNote = document.createElement("span");
-      stringNote.className = "child-hex-string-note";
-      const decodeLabel = model.overlay && model.overlay.label ? model.overlay.label : "";
-      stringNote.textContent = [decodeLabel, row.decoded.note].filter(Boolean).join("；");
+	      const stringNote = document.createElement("span");
+	      stringNote.className = "child-hex-string-note";
+	      stringNote.textContent = decoded.note || "";
 
-      stringLine.appendChild(label);
-      stringLine.appendChild(chars);
-      stringLine.appendChild(stringNote);
-      body.appendChild(stringLine);
-    }
-  }
-  wrap.appendChild(body);
+	      stringLine.appendChild(stringLabel);
+	      stringLine.appendChild(stringCells);
+	      stringLine.appendChild(stringNote);
+	      body.appendChild(stringLine);
+	    }
+
+	    if (isTimestamp) {
+	      const time = childTimestampDisplayFromNote(row.note);
+	      if (time) {
+	        const timeLine = document.createElement("div");
+	        timeLine.className = "child-hex-time-row";
+
+	        const timeLabel = document.createElement("code");
+	        timeLabel.className = "child-hex-time-label";
+	        timeLabel.textContent = time.label || "时间戳";
+
+	        const timeValue = document.createElement("code");
+	        timeValue.className = "child-hex-time-value";
+	        timeValue.textContent = time.value || "";
+
+	        const timeNote = document.createElement("span");
+	        timeNote.className = "child-hex-time-note";
+	        timeNote.textContent = time.note || "";
+
+	        timeLine.appendChild(timeLabel);
+	        timeLine.appendChild(timeValue);
+	        timeLine.appendChild(timeNote);
+	        body.appendChild(timeLine);
+	      }
+	    }
+
+	  }
+	  wrap.appendChild(body);
 
   const insights = [];
   if (model.overlay && Array.isArray(model.overlay.runs) && model.overlay.runs.length > 0) {
@@ -4935,12 +5807,13 @@ function appendChildFullHexTable(box, child, childBytes) {
       });
     }
   }
-  if (insights.length > 0) {
+  if (options.showInsights !== false && insights.length > 0) {
     const insightBox = document.createElement("div");
     insightBox.className = "child-hex-insights";
     for (const insight of insights) {
       const item = document.createElement("div");
       item.className = `child-hex-insight child-hex-insight-${insight.kind || "field"}`;
+      item.title = `${insight.label || ""} ${insight.value || ""}`.trim();
       const label = document.createElement("strong");
       label.textContent = insight.label || "";
       const value = document.createElement("span");
@@ -5129,7 +6002,7 @@ function childRichTypeText(child) {
     return role || "0102000a / 运行态二进制叶子";
   }
   if (Number(report) === 0x010a0011) return "010a0011 / 高级白名单保护节点";
-  if (Number(report) === 0x010a001b) return "010a001b / 父容器批量上报骨架";
+  if (Number(report) === 0x010a001b) return "010a001b / 父容器";
   if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) {
     return role || "0112xxxx / 结构化元数据叶子";
   }
@@ -5154,6 +6027,15 @@ function childFullMetaLine(child) {
   return parts.join(" | ");
 }
 
+function childCompactMetaLine(child) {
+  if (!child || child.truncated) return "";
+  const parts = [
+    Number.isFinite(child.len) ? `len ${child.len}` : "",
+    childOffsetText(child) && childOffsetText(child) !== "-" ? `off ${childOffsetText(child)}` : "",
+  ].filter(Boolean);
+  return parts.join(" | ");
+}
+
 function childHexLine(child, childBytes) {
   if (child && child.hexSignature) return `${childUiTerm("hex")} ${annotateHexSignature(child.hexSignature)}`;
   if (Array.isArray(childBytes) && childBytes.length > 0) {
@@ -5166,7 +6048,7 @@ function childHexLine(child, childBytes) {
 function childPreviewRichLines(child, childBytes, options = {}) {
   if (!child || child.truncated) return [];
   const lines = [];
-  const meta = childFullMetaLine(child);
+  const meta = childCompactMetaLine(child);
   if (meta) lines.push({ text: meta, className: "child-preview-line-meta" });
   const semanticRows = splitChildSemanticRows(child);
   const semanticLimit = options.merged ? 4 : 3;
@@ -5183,41 +6065,197 @@ function childPreviewRichLines(child, childBytes, options = {}) {
   return lines;
 }
 
+function childPreviewSegmentKind(label, fallbackClass = "") {
+  const value = String(label || "").trim().toLowerCase();
+  if (value === "动作") return "action";
+  if (value === "原因") return "reason";
+  if (value === "source(来源)" || value === "source" || value === "来源") return "source";
+  if (value === "规则") return "rule";
+  if (value === "风险") return "risk";
+  if (value === "解析") return "parse";
+  if (value === "可打印xor") return "xor";
+  if (value === "时间戳" || value === "候选时间戳") return "time";
+  if (value === "len" || value === "off") return "meta";
+  if (String(fallbackClass || "").includes("risk")) return "risk";
+  return "plain";
+}
+
+function childPreviewSegmentParts(rawSegment, fallbackClass = "") {
+  const raw = String(rawSegment || "").trim();
+  if (!raw) return null;
+  const labels = [
+    "source(来源)",
+    "可打印XOR",
+    "候选时间戳",
+    "时间戳",
+    "动作",
+    "原因",
+    "规则",
+    "风险",
+    "解析",
+    "len",
+    "off",
+  ];
+  for (const label of labels) {
+    if (raw === label) {
+      return { label, value: "", kind: childPreviewSegmentKind(label, fallbackClass) };
+    }
+    if (raw.startsWith(`${label} `) || raw.startsWith(`${label}:`) || raw.startsWith(`${label}：`)) {
+      const value = raw.slice(label.length).replace(/^[\s:：]+/, "");
+      return { label, value, kind: childPreviewSegmentKind(label, fallbackClass) };
+    }
+  }
+  return { label: "", value: raw, kind: childPreviewSegmentKind("", fallbackClass) };
+}
+
+function formatTimestampPreviewValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const parts = text.split(/[,\s/]+/).map((item) => item.trim()).filter(Boolean);
+  if (parts.length <= 0) return text;
+  const clocks = [];
+  for (const part of parts) {
+    if (!/^\d{10}$/.test(part)) return text;
+    const seconds = Number(part);
+    if (!isPlausibleTimestampSeconds(seconds)) return text;
+    const clock = formatTimestampDateTime(seconds) || formatTimestampClock(seconds) || part;
+    clocks.push(clock);
+  }
+  return clocks.join(" / ");
+}
+
+function appendChildPreviewToken(container, segment, fallbackClass = "") {
+  const parts = childPreviewSegmentParts(segment, fallbackClass);
+  if (!parts) return;
+  const chip = document.createElement("span");
+  chip.className = `child-preview-token child-preview-token-${parts.kind}`.trim();
+  chip.title = String(segment || "").trim();
+  if (parts.label) {
+    const label = document.createElement("strong");
+    label.textContent = parts.label;
+    chip.appendChild(label);
+  }
+  if (parts.value) {
+    const displayValue = parts.kind === "time" ? formatTimestampPreviewValue(parts.value) : parts.value;
+    const valueNode = /^(0x[0-9a-f]+|[a-z0-9_./:-]+)$/i.test(parts.value) && parts.value.length <= 80
+      ? document.createElement("code")
+      : document.createElement("span");
+    valueNode.textContent = displayValue;
+    chip.appendChild(valueNode);
+  }
+  container.appendChild(chip);
+}
+
+function appendChildPreviewLine(container, entry) {
+  const text = String(entry && entry.text ? entry.text : "").trim();
+  if (!text) return;
+  const className = String(entry && entry.className ? entry.className : "");
+  const line = document.createElement("div");
+  line.className = `child-preview-line child-preview-line-rich ${className}`.trim();
+  line.title = text;
+  const segments = text.split(/\s+\|\s+/).map((segment) => segment.trim()).filter(Boolean);
+  for (const segment of segments.length ? segments : [text]) {
+    appendChildPreviewToken(line, segment, className);
+  }
+  container.appendChild(line);
+}
+
 function makeChildPreviewBox(child, label, sideClass, childBytes = [], options = {}) {
   const box = document.createElement("div");
   box.className = `child-preview-box child-preview-${sideClass}`;
+  const info = document.createElement("div");
+  info.className = "child-preview-info";
   const title = document.createElement("div");
   title.className = "child-preview-label";
   title.textContent = label;
-  box.appendChild(title);
+  info.appendChild(title);
   const lines = childPreviewRichLines(child, childBytes, options);
   if (!lines.length) {
     const empty = document.createElement("div");
     empty.className = "child-preview-empty";
     empty.textContent = "-";
-    box.appendChild(empty);
-    return box;
+    info.appendChild(empty);
+  } else {
+    for (const entry of lines) {
+      appendChildPreviewLine(info, entry);
+    }
   }
-  for (const entry of lines) {
-    const line = document.createElement("div");
-    line.className = `child-preview-line ${entry.className || ""}`.trim();
-    line.title = entry.text;
-    line.textContent = entry.text;
-    box.appendChild(line);
-  }
-  appendChildFullHexTable(box, child, childBytes);
-  return box;
+  box.appendChild(info);
+	  appendChildFullHexTable(box, child, childBytes, {
+	    changedOffsets: options.changedOffsets || null,
+	    showInsights: options.showInsights !== false,
+	    timestampHints: options.timestampHints || [],
+	  });
+	  return box;
+	}
+
+function childRecordAbsoluteStart(child) {
+  if (!child || child.truncated) return null;
+  const recordStart = Number(child.recordStart);
+  if (Number.isFinite(recordStart)) return recordStart;
+  const offset = Number(child.offset);
+  if (Number.isFinite(offset)) return offset + 4;
+  return null;
 }
 
-function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", beforeBytes = [], afterBytes = [], result = null, action = null, ruleCompact = "", risk = null) {
+function normalizeChildTimestampHints(child, childBytes, timestampHintMap) {
+  if (!child || child.truncated || !(timestampHintMap instanceof Map)) return [];
+  const index = Number(child.index);
+  const hints = timestampHintMap.get(index) || [];
+  if (!Array.isArray(hints) || hints.length <= 0) return [];
+  const reportText = childReportText(child).toLowerCase();
+  const recordStart = childRecordAbsoluteStart(child);
+  const out = [];
+  const seen = new Set();
+  for (const hint of hints) {
+    if (!hint) continue;
+    const report = String(hint.report || "").toLowerCase();
+    if (report && reportText !== "-" && report !== reportText) continue;
+    const absoluteOffset = Number(hint.absoluteOffset);
+    const candidates = [];
+    if (Number.isFinite(absoluteOffset) && Number.isFinite(recordStart)) {
+      candidates.push(absoluteOffset - recordStart);
+    }
+    if (Number.isFinite(absoluteOffset)) candidates.push(absoluteOffset);
+    for (const start of candidates) {
+      const local = Math.floor(Number(start));
+      if (!Number.isFinite(local) || local < 0 || local + 3 >= childBytes.length) continue;
+      const actual = readBe32(childBytes, local);
+      if (!isPlausibleTimestampSeconds(actual)) continue;
+      const key = `${local}:${actual}:${hint.field || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        ...hint,
+        start: local,
+        seconds: actual,
+      });
+      break;
+    }
+  }
+  return out;
+}
+
+function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", beforeBytes = [], afterBytes = [], result = null, action = null, ruleCompact = "", risk = null, timestampHintMap = null) {
   const row = document.createElement("div");
   row.className = "child-preview-row";
+  const changedOffsets = buildChangedIndexSet(beforeBytes, afterBytes);
+  const beforeTimestampHints = normalizeChildTimestampHints(beforeChild, beforeBytes, timestampHintMap);
+  const afterTimestampHints = normalizeChildTimestampHints(afterChild, afterBytes, timestampHintMap);
   if (result && result.kind === "same") {
     row.classList.add("child-preview-row-single");
-    row.appendChild(makeChildPreviewBox(afterChild || beforeChild, `${labelBase} 未修改`, "same", afterBytes.length ? afterBytes : beforeBytes, { merged: true }));
+    row.appendChild(makeChildPreviewBox(afterChild || beforeChild, `${labelBase} 未修改`, "same", afterBytes.length ? afterBytes : beforeBytes, {
+      merged: true,
+      showInsights: true,
+      timestampHints: afterTimestampHints.length ? afterTimestampHints : beforeTimestampHints,
+    }));
     return row;
   }
-  row.appendChild(makeChildPreviewBox(beforeChild, `${labelBase} 修改前`, "before", beforeBytes));
+  row.appendChild(makeChildPreviewBox(beforeChild, `${labelBase} 修改前`, "before", beforeBytes, {
+    changedOffsets,
+    showInsights: false,
+    timestampHints: beforeTimestampHints,
+  }));
   const afterExtra = [];
   if (action && (action.action || action.reason || action.source)) {
     const actionParts = [];
@@ -5228,7 +6266,12 @@ function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", befor
   }
   if (risk && risk.text) afterExtra.push({ text: `风险 高：${risk.text}`, className: "child-preview-line-risk" });
   if (ruleCompact) afterExtra.push(`规则 ${ruleCompact}`);
-  row.appendChild(makeChildPreviewBox(afterChild, `${labelBase} 修改后`, "after", afterBytes, { extraLines: afterExtra }));
+  row.appendChild(makeChildPreviewBox(afterChild, `${labelBase} 修改后`, "after", afterBytes, {
+    extraLines: afterExtra,
+    changedOffsets,
+    showInsights: true,
+    timestampHints: afterTimestampHints,
+  }));
   return row;
 }
 
@@ -5354,7 +6397,7 @@ function childReplacementRisk(beforeChild, afterChild, beforeBytes, afterBytes, 
   };
 }
 
-function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytesAll, index, actionMap, summaryKv = null) {
+function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytesAll, index, actionMap, summaryKv = null, timestampHintMap = null) {
   ensureChildCommonStyles();
   const beforeChild = beforeChildren[index] || null;
   const afterChild = afterChildren[index] || null;
@@ -5417,24 +6460,24 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
 
   const meta = document.createElement("div");
   meta.className = "child-rail-meta-grid";
-  appendChildRailMeta(meta, childUiTerm("idx"), pairText("", childIndexText(beforeChild), childIndexText(afterChild)).trim());
-  appendChildRailMeta(meta, childUiTerm("report"), pairText("", childReportText(beforeChild), childReportText(afterChild)).trim());
-  appendChildRailMeta(meta, childUiTerm("type"), pairText("", childRichTypeText(beforeChild), childRichTypeText(afterChild)).trim());
-  appendChildRailMeta(meta, childUiTerm("ID"), pairText("", childIdText(beforeChild), childIdText(afterChild)).trim());
-  appendChildRailMeta(
-    meta,
-    childUiTerm("len"),
-    pairText(
-      "",
-      beforeChild && Number.isFinite(beforeChild.len) ? String(beforeChild.len) : "-",
+	  appendChildRailMeta(meta, childUiShortTerm("idx"), pairText("", childIndexText(beforeChild), childIndexText(afterChild)).trim());
+	  appendChildRailMeta(meta, childUiShortTerm("report"), pairText("", childReportText(beforeChild), childReportText(afterChild)).trim());
+	  appendChildRailMeta(meta, childUiShortTerm("type"), pairText("", childRichTypeText(beforeChild), childRichTypeText(afterChild)).trim());
+	  appendChildRailMeta(meta, childUiShortTerm("ID"), pairText("", childIdText(beforeChild), childIdText(afterChild)).trim());
+	  appendChildRailMeta(
+	    meta,
+	    childUiShortTerm("len"),
+	    pairText(
+	      "",
+	      beforeChild && Number.isFinite(beforeChild.len) ? String(beforeChild.len) : "-",
       afterChild && Number.isFinite(afterChild.len) ? String(afterChild.len) : "-",
-    ).trim(),
-  );
-  appendChildRailMeta(meta, childUiTerm("diff"), childDiffText(result && result.diff));
+	    ).trim(),
+	  );
+	  appendChildRailMeta(meta, childUiShortTerm("diff"), childDiffText(result && result.diff));
   if (meta.childNodes.length) title.appendChild(meta);
 
   card.appendChild(title);
-  card.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk));
+  card.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk, timestampHintMap));
 
   return card;
 }
@@ -5445,7 +6488,7 @@ function parentStructureText(parent) {
   const magicText = parent.tailLen === 0
     ? "tail=empty"
     : parent.tailMagicOk
-      ? `tail_magic=${tailHex} ok`
+      ? `tail=fixed-trailer ${tailHex}`
       : `tail=${tailHex} unexpected`;
   return [
     `count=${Number(parent.childCount || 0)}`,
@@ -5467,12 +6510,10 @@ function appendParentStructureSide(container, label, parent) {
   const text = document.createElement("span");
   text.textContent = parentStructureText(parent);
   side.appendChild(text);
-  if (parent && Number(parent.tailLen || 0) > 0) {
+  if (parent && Number(parent.tailLen || 0) > 0 && !parent.tailMagicOk) {
     const status = document.createElement("div");
-    status.className = parent.tailMagicOk ? "parent-structure-magic-ok" : "parent-structure-magic-bad";
-    status.textContent = parent.tailMagicOk
-      ? "parent:tail 是固定 trailer，结构已闭合，不是额外 child"
-      : "parent:tail 不是已知固定 trailer，需要复核";
+    status.className = "parent-structure-magic-bad";
+    status.textContent = "tail 不是已知固定 trailer，需要复核";
     side.appendChild(status);
   }
   container.appendChild(side);
@@ -5486,8 +6527,8 @@ function makeParentStructureStrip(beforeParent, afterParent) {
   title.className = "parent-structure-title";
   const left = document.createElement("span");
   left.textContent = "父容器结构证据";
-  const right = document.createElement("small");
-  right.textContent = "synthetic parent:header / parent:tail，只读展示，不参与替换";
+	  const right = document.createElement("small");
+	  right.textContent = "header / fixed trailer 只作结构边界参考";
   title.appendChild(left);
   title.appendChild(right);
   strip.appendChild(title);
@@ -5497,6 +6538,61 @@ function makeParentStructureStrip(beforeParent, afterParent) {
   appendParentStructureSide(grid, "before parent", beforeParent);
   appendParentStructureSide(grid, "after parent", afterParent);
   strip.appendChild(grid);
+  return strip;
+}
+
+function buildEventTimestampStrip(summaryText, beforeBase64, decodedBase64) {
+  ensureChildCommonStyles();
+  const items = [];
+  const summaryInsight = compactTimeInsight(summaryText);
+  if (summaryInsight && summaryInsight.text) {
+    items.push({
+      kind: "summary",
+      text: summaryInsight.text,
+      title: summaryInsight.title || summaryInsight.text,
+    });
+  }
+  const addPayloadTimes = (label, base64Text) => {
+    if (!base64Text) return;
+    const ranges = collectTimestampHighlightsForPayload(base64Text);
+    for (const item of ranges.slice(0, 8)) {
+      const clock = formatTimestampDateTime(Number(item && item.value)) || formatTimestampClock(Number(item && item.value)) || String(item && item.value);
+      const offset = formatHexValue(Number(item && item.start));
+      const shape = timestampShapeDisplay(item && item.kind);
+      items.push({
+        kind: "offset",
+        text: item && item.triplet
+          ? `${label} 三时间 ${String(item.kind || "").replace(/_triplet$/i, "")} ${offset} ${clock}`
+          : `${label} ${offset} ${clock}`,
+        title: [shape, item && item.text].filter(Boolean).join(" | "),
+      });
+    }
+  };
+  addPayloadTimes("before", beforeBase64);
+  addPayloadTimes("after", decodedBase64);
+
+  const seen = new Set();
+  const unique = items.filter((item) => {
+    const key = `${item.kind}:${item.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (unique.length <= 0) return null;
+
+  const strip = document.createElement("div");
+  strip.className = "event-time-strip";
+  const title = document.createElement("span");
+  title.className = "event-time-title";
+  title.textContent = "时间戳定位";
+  strip.appendChild(title);
+  for (const item of unique.slice(0, 10)) {
+    const chip = document.createElement("span");
+    chip.className = `event-time-chip${item.kind === "summary" ? " event-time-chip-summary" : ""}`;
+    chip.textContent = item.text;
+    chip.title = item.title || item.text;
+    strip.appendChild(chip);
+  }
   return strip;
 }
 
@@ -5518,6 +6614,7 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
 
   const actionMap = parseChildActionDetails(summaryText);
   const summaryKv = parseSummaryKeyValues(summaryText);
+  const timestampHintMap = parseSummaryChildTimestampHints(summaryText);
   const counts = parseChildSummaryCounts(summaryText);
   const visible = Math.min(total, 8);
   const panel = document.createElement("section");
@@ -5556,7 +6653,7 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   const grid = document.createElement("div");
   grid.className = "child-compare-grid";
   for (let i = 0; i < visible; i += 1) {
-    grid.appendChild(makeChildCard(beforeChildren, afterChildren, beforeBytes, afterBytes, i, actionMap, summaryKv));
+    grid.appendChild(makeChildCard(beforeChildren, afterChildren, beforeBytes, afterBytes, i, actionMap, summaryKv, timestampHintMap));
   }
   panel.appendChild(grid);
 
@@ -5578,6 +6675,73 @@ function comparableNodesFromBytes(byteValues) {
   return rootNode ? [rootNode] : [];
 }
 
+function comparableNodeBytes(byteValues, node) {
+  if (!node) return [];
+  if (node.nodeLabel && String(node.nodeLabel).startsWith("node[")) {
+    return Array.isArray(byteValues) ? byteValues.slice() : [];
+  }
+  const childBytes = childBytesFromParsed(byteValues, node);
+  if (childBytes.length > 0) return childBytes;
+  if (Number(node.offset) === 0 && Number(node.len) === (Array.isArray(byteValues) ? byteValues.length : -1)) {
+    return Array.isArray(byteValues) ? byteValues.slice() : [];
+  }
+  return childBytes;
+}
+
+function nodeReadableStringRows(node, nodeBytes, side, actionText = "", ruleText = "") {
+  const rows = [];
+  const prefix = [
+    childNodeName(node),
+    childReportText(node),
+    childRichTypeText(node),
+  ].filter(Boolean).join(" | ");
+  const add = (label, value, offsetText = "") => {
+    const text = compactText(value, 150);
+    if (!text || text.length < 3) return;
+    const parts = [
+      prefix,
+      label,
+      offsetText,
+      text,
+      ruleText ? `规则 ${ruleText}` : "",
+      actionText,
+    ].filter(Boolean);
+    const line = parts.join(" | ");
+    if (!rows.includes(line)) rows.push(line);
+  };
+
+  const overlay = childBestDecodedOverlay(nodeBytes);
+  if (overlay && Array.isArray(overlay.runs)) {
+    for (const run of overlay.runs.slice(0, 4)) {
+      const runText = String(run && run.text ? run.text : "").trim();
+      if (runText.length < 4 && !/^\d{6,}$/.test(runText)) continue;
+      const off = Number(run && run.start);
+      add(overlay.label || "string", runText, Number.isFinite(off) ? hexOffsetText(off) : "");
+      if (rows.length >= 4) break;
+    }
+  }
+
+  if (rows.length <= 0) {
+    const runs = extractPrintableRuns(nodeBytes, 4, 6);
+    for (const run of runs) {
+      const runText = String(run && run.text ? run.text : "").trim();
+      if (runText.length < 4 && !/^\d{6,}$/.test(runText)) continue;
+      const kind = inferStringKind(runText);
+      add(kind || "ascii", runText, hexOffsetText(run.off));
+      if (rows.length >= 4) break;
+    }
+  }
+
+  if (rows.length <= 0) {
+    const semanticRows = splitChildSemanticRows(node).primaryRows;
+    for (const [label, value] of semanticRows.slice(0, 2)) {
+      add(label, value);
+    }
+  }
+
+  return rows.map((row) => `${side} | ${row}`);
+}
+
 function stringRowsForComparableNodes(byteValues, summaryText, side = "before") {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
   const nodes = comparableNodesFromBytes(byteValues);
@@ -5596,21 +6760,27 @@ function stringRowsForComparableNodes(byteValues, summaryText, side = "before") 
     const action = side === "after"
       ? (actionMap instanceof Map ? actionMap.get(i) : null) || inferChildActionFromSummary(summaryKv, null, null, node)
       : null;
-    const actionText = side === "after" && action
-      ? `；${childActionBadgeText(action, { label: "" })}${action.reason ? `，${translatedReasonText(action.reason) || action.reason}` : ""}`
-      : "";
-    const ruleText = compactRuleText(childRuleAnnotations(side === "before" ? node : null, side === "after" ? node : null, action));
-    const parts = [
-      childNodeName(node),
-      childReportText(node),
-      childIdText(node) !== "-" ? `ID ${childIdText(node)}` : "",
-      semanticText,
-      ruleText ? `规则 ${ruleText}` : "",
-    ].filter(Boolean);
-    rows.push(`${parts.join(" | ")}${actionText}`);
-  }
-  return rows;
-}
+	    const actionText = side === "after" && action
+	      ? `；${childActionBadgeText(action, { label: "" })}${action.reason ? `，${translatedReasonText(action.reason) || action.reason}` : ""}`
+	      : "";
+	    const ruleText = compactRuleText(childRuleAnnotations(side === "before" ? node : null, side === "after" ? node : null, action));
+	    const nodeBytes = comparableNodeBytes(byteValues, node);
+	    const readableRows = nodeReadableStringRows(node, nodeBytes, side, actionText, ruleText);
+	    if (readableRows.length > 0) {
+	      rows.push(...readableRows);
+	    } else {
+	      const parts = [
+	        childNodeName(node),
+	        childReportText(node),
+	        childIdText(node) !== "-" ? `ID ${childIdText(node)}` : "",
+	        semanticText,
+	        ruleText ? `规则 ${ruleText}` : "",
+	      ].filter(Boolean);
+	      rows.push(`${side} | ${parts.join(" | ")}${actionText}`);
+	    }
+	  }
+	  return rows;
+	}
 
 function buildStringResultPanel(beforeBase64, decodedBase64, summaryText = "") {
   const beforeRows = stringRowsForComparableNodes(b64ToBytes(beforeBase64), summaryText, "before");
@@ -5952,29 +7122,38 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const decodedPay = String(ev && ev.pay ? ev.pay : "");
   const hasFullDump = !!fullPay;
   const hasBeforeDump = !!beforePay;
-  const hasDecodedDump = !!decodedPay;
-  const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
-  const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
-  const isRequest = Number(ev && ev.dir) === 0;
-  const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
-    ? buildChangedOffsetSet(beforePay, decodedPay)
-    : null;
+	  const hasDecodedDump = !!decodedPay;
+	  const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
+	  const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
+	  const isRequest = Number(ev && ev.dir) === 0;
+	  const isDecodedRequest = isRequest && isDecodedFlowEvent(ev, summaryText) && (hasFullDump || hasBeforeDump || hasDecodedDump);
+	  const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
+	    ? buildChangedOffsetSet(beforePay, decodedPay)
+	    : null;
 
-  const dumpGrid = document.createElement("div");
-  dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
-  body.appendChild(dumpGrid);
+	  if (isDecodedRequest) {
+	    const timeStrip = buildEventTimestampStrip(summaryText, beforePay, decodedPay);
+	    if (timeStrip) body.appendChild(timeStrip);
+	  }
+
+	  const dumpGrid = document.createElement("div");
+	  dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
+	  if (isDecodedRequest) dumpGrid.classList.add("dump-grid-decrypted");
+	  body.appendChild(dumpGrid);
   let semanticCompareAdded = false;
 
-  function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
-    if (!base64Text) return;
-    const panel = document.createElement("section");
-    panel.className = `dump-panel ${toneClass || ""}`.trim();
-    const timestampHighlights =
-      sourceKey === "full" ? [] : collectTimestampHighlightsForPayload(base64Text);
+	  function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
+	    if (!base64Text) return;
+	    const collapsed = !!(dumpOptions && dumpOptions.collapsed);
+	    const panel = document.createElement(collapsed ? "details" : "section");
+	    panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
+	    if (collapsed && dumpOptions.open) panel.open = true;
+	    const timestampHighlights =
+	      sourceKey === "full" ? [] : collectTimestampHighlightsForPayload(base64Text);
     const timestampSummary = summarizeTimestampHighlights(timestampHighlights);
 
-    const sectionTitle = document.createElement("div");
-    sectionTitle.className = "dump-label";
+	    const sectionTitle = document.createElement(collapsed ? "summary" : "div");
+	    sectionTitle.className = "dump-label";
     sectionTitle.appendChild(
       document.createTextNode(
         Number.isFinite(Number(lengthValue))
@@ -5982,14 +7161,20 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           : title
       )
     );
-    if (timestampHighlights.length > 0) {
+	    if (timestampHighlights.length > 0) {
       const timestampChip = document.createElement("span");
       timestampChip.className = "dump-label-note dump-label-timestamp";
       timestampChip.textContent = `时间戳×${timestampHighlights.length}`;
       timestampChip.title = timestampSummary;
-      sectionTitle.appendChild(timestampChip);
-    }
-    panel.appendChild(sectionTitle);
+	      sectionTitle.appendChild(timestampChip);
+	    }
+	    if (collapsed) {
+	      const foldNote = document.createElement("span");
+	      foldNote.className = "dump-label-note";
+	      foldNote.textContent = dumpOptions.foldNote || "参考";
+	      sectionTitle.appendChild(foldNote);
+	    }
+	    panel.appendChild(sectionTitle);
 
     const annotationIndex = mergeDumpAnnotationIndexes(
       getDumpAnnotationIndex(ev, sourceKey),
@@ -6032,10 +7217,13 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     dumpGrid.appendChild(panel);
   }
 
-  if (isRequest) {
-    if (hasFullDump) {
-      appendDumpSection("原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
-    } else {
+	  if (isRequest) {
+	    if (hasFullDump) {
+	      appendDumpSection("原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full", {
+	        collapsed: isDecodedRequest,
+	        foldNote: "raw 参考",
+	      });
+	    } else {
       appendEmptyDumpSection("原始封包 [raw]", "当前事件没有 full_pay，无法显示完整原始封包。", "dump-panel-full");
     }
     if (hasBeforeDump) {
@@ -6075,8 +7263,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
   }
 
-  if (isRequest && (hasBeforeDump || hasDecodedDump)) {
-    const stringResult = buildStringResultPanel(beforePay, decodedPay, summaryText);
+	  if (isRequest && (hasBeforeDump || hasDecodedDump) && !isDecodedRequest) {
+	    const stringResult = buildStringResultPanel(beforePay, decodedPay, summaryText);
     if (stringResult) {
       stringResult.classList.add("string-result-inline");
       dumpGrid.classList.add("has-string-results");
@@ -6402,11 +7590,15 @@ function renderEvents() {
     if (!needFullScan && !state.expandedIds.has(eventId)) {
       ev.pay = "";
     }
-    wrap.dataset.eventId = eventId;
-    wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
-    if (allowExpand && (state.expandedIds.has(eventId) || autoExpandIds.has(eventId))) {
-      wrap.open = true;
-    }
+	    wrap.dataset.eventId = eventId;
+	    wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
+	    const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
+	    if (isDecodedFlowEvent(ev, summaryText)) {
+	      wrap.classList.add("event-decoded-detail");
+	    }
+	    if (allowExpand && (state.expandedIds.has(eventId) || autoExpandIds.has(eventId))) {
+	      wrap.open = true;
+	    }
     if (!allowExpand) {
       wrap.classList.add("no-expand");
     }
@@ -6489,12 +7681,17 @@ function renderEvents() {
         previewSpan.style.borderColor = firstColor;
       }
     }
-    previewWrap.appendChild(previewSpan);
-    previewWrap.appendChild(document.createTextNode("]"));
-    summary.appendChild(previewWrap);
+	    previewWrap.appendChild(previewSpan);
+	    previewWrap.appendChild(document.createTextNode("]"));
+	    summary.appendChild(previewWrap);
 
-    if (preview.needsWindowFetch && windowPrefetchBudget > 0 && state.flowId) {
-      prefetchEventPayload(state.flowId, eventId);
+	    const insightStrip = buildSummaryInsightStrip(ev, summaryText);
+	    if (insightStrip) {
+	      summary.appendChild(insightStrip);
+	    }
+
+	    if (preview.needsWindowFetch && windowPrefetchBudget > 0 && state.flowId) {
+	      prefetchEventPayload(state.flowId, eventId);
       windowPrefetchBudget -= 1;
     }
 
