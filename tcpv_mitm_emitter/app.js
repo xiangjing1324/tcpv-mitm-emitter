@@ -4039,12 +4039,13 @@ function parseChildSummaryCounts(summaryText) {
   };
 }
 
-function childActionLabel(action) {
+function childActionLabel(action, result = null) {
   const value = String(action || "").trim();
+  const diff = result && result.diff ? result.diff : null;
   const labels = {
     SL: "同长复制",
     FS: "强制同类",
-    VL: "变长替换",
+    VL: diff && Number(diff.lenDelta || 0) === 0 ? "同长替换" : "变长替换",
     F11: "兜底010a0011",
     CR: "跨类型",
     BLK: "黑名单安全替换",
@@ -5862,7 +5863,7 @@ function makeChildCommonStrip(beforeChild, afterChild, action, result, ruleCompa
   );
   appendChildCommonChip(primary, "ID", pairText("", childIdText(beforeChild), childIdText(afterChild)).trim());
   appendChildCommonChip(primary, "差异", childDiffText(result && result.diff));
-  appendChildCommonChip(primary, "动作", childActionLabel(action && action.action));
+  appendChildCommonChip(primary, "动作", childActionLabel(action && action.action, result));
   if (action && action.source && action.source !== "-") {
     appendChildCommonChip(primary, "来源", compactReportToDisplay(action.source));
   }
@@ -6259,7 +6260,7 @@ function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", befor
   const afterExtra = [];
   if (action && (action.action || action.reason || action.source)) {
     const actionParts = [];
-    if (action.action) actionParts.push(`动作 ${childActionLabel(action.action)}`);
+    if (action.action) actionParts.push(`动作 ${childActionLabel(action.action, result)}`);
     if (action.reason) actionParts.push(`原因 ${translatedReasonText(action.reason) || action.reason}`);
     if (action.source && action.source !== "-") actionParts.push(`${childUiTerm("source")} ${compactReportToDisplay(action.source)}`);
     if (actionParts.length) afterExtra.push(actionParts.join(" | "));
@@ -6375,13 +6376,14 @@ function childReplacementRisk(beforeChild, afterChild, beforeBytes, afterBytes, 
   const afterReport = childReportText(afterChild);
   const reason = String(action && action.reason ? action.reason : "");
   const actionCode = String(action && action.action ? action.action : "");
+  const lenDelta = Number(diff && diff.lenDelta || 0);
 
-  if (actionCode === "VL" || /variable_length_source/i.test(reason)) {
+  if ((actionCode === "VL" || /variable_length_source/i.test(reason)) && lenDelta !== 0) {
     reasons.push("变长 source 替换");
   }
-  if (diff && Number(diff.lenDelta || 0) !== 0) {
-    const sign = Number(diff.lenDelta) > 0 ? "+" : "";
-    reasons.push(`长度变化 ${diff.leftLen} -> ${diff.rightLen} (${sign}${diff.lenDelta})`);
+  if (diff && lenDelta !== 0) {
+    const sign = lenDelta > 0 ? "+" : "";
+    reasons.push(`长度变化 ${diff.leftLen} -> ${diff.rightLen} (${sign}${lenDelta})`);
   }
   if (beforeType && afterType && beforeType !== "-" && afterType !== "-" && beforeType !== afterType) {
     reasons.push(`语义类型变化 ${beforeType} -> ${afterType}`);
