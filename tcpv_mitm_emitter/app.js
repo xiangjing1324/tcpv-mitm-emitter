@@ -361,6 +361,12 @@ function trimPayloadCache() {
   }
 }
 
+function clearPayloadCache() {
+  payloadCache.clear();
+  payloadInFlight.clear();
+  payloadCacheBytes = 0;
+}
+
 function readPayloadCache(account, eventId) {
   const key = buildPayloadCacheKey(account, eventId);
   const rec = payloadCache.get(key);
@@ -831,6 +837,19 @@ function renderFlowList() {
   }
 }
 
+function resetEventStateForFlowChange() {
+  state.dumpScrollLeft.clear();
+  state.events = [];
+  state.afterId = null;
+  state.hasMore = true;
+  state.expandedIds.clear();
+  state.collapsedIds.clear();
+  state.hitEventIds = [];
+  state.hitCursor = -1;
+  state.filteredCount = 0;
+  clearPayloadCache();
+}
+
 async function loadFlows(resetSelection = false, preferredFlowId = "") {
   const raw = await apiJson("/accounts");
   const data = normalizeAccounts(raw);
@@ -858,6 +877,10 @@ async function loadFlows(resetSelection = false, preferredFlowId = "") {
 
   if (state.flowId && !visible.some((x) => String(x.account || "") === state.flowId)) {
     state.flowId = visible.length > 0 ? String(visible[0].account || "") : "";
+  }
+
+  if (state.flowId !== prev) {
+    resetEventStateForFlowChange();
   }
 
   renderFlowList();
@@ -892,15 +915,7 @@ async function selectFlow(flowId) {
   if (state.flowId !== flowId) {
     state.flowId = flowId;
   }
-  state.dumpScrollLeft.clear();
-  state.events = [];
-  state.afterId = null;
-  state.hasMore = true;
-  state.expandedIds.clear();
-  state.collapsedIds.clear();
-  state.hitEventIds = [];
-  state.hitCursor = -1;
-  state.filteredCount = 0;
+  resetEventStateForFlowChange();
   renderFlowList();
   renderSelectedTitle();
   updateSearchUi();
