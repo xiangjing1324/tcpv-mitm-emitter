@@ -1988,10 +1988,6 @@ function buildTimestampRange(start, value, label) {
   };
 }
 
-function isZeroTimestampPlaceholder(rawText) {
-  return /^0{10}(?:0{3})?$/.test(String(rawText || "").trim());
-}
-
 function bytesToLatin1String(byteValues) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
   let out = "";
@@ -2020,8 +2016,7 @@ function collectObTimestampTripletRanges(byteValues, baseOffset = 0, sourceLabel
       cursor = end - groupStart + 1;
       if (index < 5 || index > 7) continue;
       const seconds = timestampSecondsFromToken(part);
-      const placeholder = isZeroTimestampPlaceholder(part);
-      if (!placeholder && !Number.isFinite(Number(seconds))) {
+      if (!Number.isFinite(Number(seconds))) {
         triplet.length = 0;
         break;
       }
@@ -2029,15 +2024,13 @@ function collectObTimestampTripletRanges(byteValues, baseOffset = 0, sourceLabel
         index,
         start: Number(baseOffset || 0) + start,
         end: Number(baseOffset || 0) + end,
-        value: placeholder ? null : Number(seconds),
+        value: Number(seconds),
         raw: part,
-        placeholder,
       });
     }
 
     if (triplet.length !== 3) continue;
-    const placeholderTriplet = triplet.every((item) => item.placeholder);
-    const clocks = triplet.map((item) => (item.placeholder ? item.raw : (formatTimestampClock(item.value) || item.raw)));
+    const clocks = triplet.map((item) => formatTimestampClock(item.value) || item.raw);
     const tripletText = clocks.join(" / ");
     for (const item of triplet) {
       const offsetText = formatHexValue(item.start);
@@ -2048,8 +2041,7 @@ function collectObTimestampTripletRanges(byteValues, baseOffset = 0, sourceLabel
         kind: `ob${item.index}_triplet`,
         triplet: true,
         tripletLabel: sourceLabel,
-        placeholder: item.placeholder,
-        text: `${placeholderTriplet ? "三时间戳占位" : "三时间戳"} ${sourceLabel}:ob${item.index} ${item.placeholder ? item.raw : (formatTimestampDateTime(item.value) || item.raw)} @${offsetText}；连续 ob5/ob6/ob7 ${tripletText}`,
+        text: `三时间戳 ${sourceLabel}:ob${item.index} ${formatTimestampDateTime(item.value) || item.raw} @${offsetText}；连续 ob5/ob6/ob7 ${tripletText}`,
       });
     }
   }
@@ -2141,7 +2133,7 @@ function summarizeTimestampHighlights(ranges) {
     if (ordered.length < 3) continue;
     const firstThree = ordered.slice(0, 3);
     if (![5, 6, 7].every((index, pos) => obTripletItemIndex(firstThree[pos]) === index)) continue;
-    const clocks = firstThree.map((item) => (item.placeholder ? String(item.raw || "") : (formatTimestampClock(item.value) || String(item.value || ""))));
+    const clocks = firstThree.map((item) => formatTimestampClock(item.value) || String(item.value || ""));
     const offsets = firstThree.map((item) => formatHexValue(item.start)).join(", ");
     const extra = items.length > 3 ? `, ...x${items.length}` : "";
     return `三时间 ${clocks.join(" / ")} (${label}: ${offsets})${extra}`;
@@ -2940,25 +2932,6 @@ function timestampSecondsFromDateTimeText(dateText) {
   return isPlausibleTimestampSeconds(seconds) ? seconds : null;
 }
 
-function compactTimePacketInsight(timePacket) {
-  const seconds = [];
-  for (const match of String(timePacket || "").matchAll(/\b(?:[12]\d{9}|[12]\d{12})\b/g)) {
-    const value = timestampSecondsFromToken(match[0]);
-    if (!Number.isFinite(Number(value))) continue;
-    const clock = shortClockFromEpochSeconds(value);
-    if (clock && !seconds.includes(clock)) seconds.push(clock);
-    if (seconds.length >= 3) break;
-  }
-  if (seconds.length <= 0) return null;
-  const shown = seconds.slice(0, 3);
-  return {
-    kind: "time",
-    text: `${timestampCountLabel(seconds.length, seconds.length >= 3)} ${shown.join(" / ")}`,
-    title: String(timePacket || ""),
-    triplet: seconds.length >= 3,
-  };
-}
-
 function parseSummaryChildTimestampHints(summaryText) {
   const analysis = extractSummarySection(summaryText, "时间分析");
   const out = new Map();
@@ -3024,12 +2997,6 @@ function compactTimeInsight(summaryText) {
     };
   }
 
-  const timePacket = extractSummarySection(summaryText, "时间包");
-  const timePacketInsight = compactTimePacketInsight(timePacket);
-  if (timePacketInsight && timePacketInsight.triplet) {
-    return timePacketInsight;
-  }
-
   const explicit = [];
   for (const item of analysisItems) {
     if (!item.clock || explicit.includes(item.clock)) continue;
@@ -3044,8 +3011,20 @@ function compactTimeInsight(summaryText) {
     };
   }
 
-  if (timePacketInsight) {
-    return timePacketInsight;
+  const timePacket = extractSummarySection(summaryText, "时间包");
+  const seconds = [];
+  for (const match of timePacket.matchAll(/\b1[5-9]\d{8}\b/g)) {
+    const clock = shortClockFromEpochSeconds(match[0]);
+    if (clock && !seconds.includes(clock)) seconds.push(clock);
+    if (seconds.length >= 3) break;
+  }
+  if (seconds.length > 0) {
+    const shown = seconds.slice(0, 3);
+    return {
+      kind: "time",
+      text: `${timestampCountLabel(seconds.length)} ${shown.join(" / ")}`,
+      title: timePacket,
+    };
   }
   return null;
 }
