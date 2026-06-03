@@ -116,7 +116,7 @@ const ANALYSIS_XOR_SCAN_MAX_BYTES = 768;
 const PRINTABLE_RUN_ANCHOR_PATTERNS = [
   /\d{10,24}/,
   /(idevhw|idevsysver|iappversion|iappname|iappinfo)/i,
-  /(model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrpcs_|com\.|cn=|ou=|ip(hone|ad)\d|android|tersafe|config2\.dat|config3\.dat|comm\.zip)/i,
+  /(cs:|ob:|state:|model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrpcs_|com\.|cn=|ou=|ip(hone|ad)\d|android|tersafe|config2\.dat|config3\.dat|comm\.zip)/i,
 ];
 const XOR_TEXT_KEYWORDS = [
   "/usr/sbin",
@@ -1997,6 +1997,200 @@ function bytesToLatin1String(byteValues) {
   return out;
 }
 
+function findPacketAsciiField(text, key) {
+  const raw = String(text || "");
+  const needle = `${String(key || "").toLowerCase()}:`;
+  if (!needle || needle === ":") return null;
+  const lower = raw.toLowerCase();
+  const start = lower.indexOf(needle);
+  if (start < 0) return null;
+  const valueStart = start + needle.length;
+  let end = valueStart;
+  while (end < raw.length) {
+    const code = raw.charCodeAt(end);
+    if (code === 0 || code === 10 || code === 13 || raw[end] === ";") break;
+    end += 1;
+  }
+  const value = raw.slice(valueStart, end).trim();
+  if (!value) return null;
+  return {
+    key,
+    start,
+    valueStart,
+    end,
+    raw: raw.slice(start, end),
+    value,
+  };
+}
+
+function parseStateFieldParts(value) {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^([^,\x00;\r\n]+)(?:,r:([^,\x00;\r\n]*))?(?:,p:([^\x00;\r\n]*))?/i);
+  if (!match) return { state: raw, r: "", p: "" };
+  return {
+    state: String(match[1] || "").trim(),
+    r: String(match[2] || "").trim(),
+    p: String(match[3] || "").trim(),
+  };
+}
+
+function describeObTriplet(value) {
+  const parts = String(value || "").split("/");
+  if (parts.length < 8) return null;
+  const triplet = parts.slice(5, 8).map((item) => String(item || "").trim());
+  if (triplet.some((item) => !item)) return null;
+  const zeroed = triplet.every((item) => /^0+$/.test(item));
+  const seconds = triplet.map((item) => timestampSecondsFromToken(item));
+  const active = seconds.every((item) => Number.isFinite(Number(item)));
+  const raw = triplet.join("/");
+  if (zeroed) {
+    return {
+      kind: "zeroed",
+      text: "ob5/6/7=zeroed",
+      title: `ob5/ob6/ob7 ${raw}`,
+    };
+  }
+  if (active) {
+    const clocks = seconds.map((item, index) => formatTimestampClock(item) || triplet[index]);
+    return {
+      kind: "active",
+      text: `ob5/6/7 ${clocks.join(" / ")}`,
+      title: `ob5/ob6/ob7 ${raw}`,
+    };
+  }
+  return {
+    kind: "present",
+    text: `ob5/6/7 ${raw}`,
+    title: `ob5/ob6/ob7 ${raw}`,
+  };
+}
+
+function packetSemanticInfoFromText(text) {
+  const raw = String(text || "");
+  if (!raw) return null;
+  const cs = findPacketAsciiField(raw, "cs");
+  const ob = findPacketAsciiField(raw, "ob");
+  const state = findPacketAsciiField(raw, "state");
+  if (!cs || (!ob && !state)) return null;
+
+  const labelParts = ["cs"];
+  if (ob) labelParts.push("ob");
+  if (state) labelParts.push("state");
+  const label = labelParts.join("/");
+  const stateParts = state ? parseStateFieldParts(state.value) : null;
+  const obTriplet = ob ? describeObTriplet(ob.value) : null;
+  const textSuffix = obTriplet && obTriplet.kind === "zeroed" ? " ob=0" : "";
+  const titleBits = [
+    `${label} @${formatHexValue(cs.start)}`,
+    cs ? `cs=${compactText(cs.value, 96)}` : "",
+    ob ? `ob=${compactText(ob.value, 96)}` : "",
+    obTriplet ? obTriplet.text : "",
+    stateParts ? `state=${stateParts.state}` : "",
+    stateParts && stateParts.r ? `r=${stateParts.r}` : "",
+    stateParts && stateParts.p ? `p=${stateParts.p}` : "",
+  ].filter(Boolean);
+  const annotations = [];
+  annotations.push({
+    off: cs.start,
+    text: `${label} cs=${compactText(cs.value, 84)}`,
+  });
+  if (ob) {
+    annotations.push({
+      off: ob.start,
+      text: obTriplet ? `${obTriplet.text}` : `ob=${compactText(ob.value, 84)}`,
+    });
+  }
+  if (state && stateParts) {
+    const stateText = [
+      `state=${stateParts.state}`,
+      stateParts.r ? `r=${stateParts.r}` : "",
+      stateParts.p ? `p=${stateParts.p}` : "",
+    ].filter(Boolean).join(" ");
+    annotations.push({
+      off: state.start,
+      text: stateText,
+    });
+  }
+  return {
+    kind: "semantic",
+    label,
+    text: `${label}${textSuffix}`,
+    title: titleBits.join(" | "),
+    cs,
+    ob,
+    state,
+    stateParts,
+    obTriplet,
+    annotations,
+  };
+}
+
+function collectPacketSemanticInfoFromBytes(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
+  return packetSemanticInfoFromText(bytesToLatin1String(byteValues));
+}
+
+function collectPacketSemanticInfoForPayload(base64Text) {
+  const bytes = b64ToBytes(base64Text);
+  return collectPacketSemanticInfoFromBytes(bytes);
+}
+
+function semanticCachePart(text) {
+  const raw = String(text || "");
+  if (!raw) return "0";
+  return `${raw.length}:${raw.slice(0, 256)}:${raw.slice(-64)}`;
+}
+
+function getEventPacketSemanticInfo(ev) {
+  const key = [
+    getEventId(ev),
+    semanticCachePart(ev && ev.before_pay),
+    semanticCachePart(ev && ev.pay),
+    String(ev && ev.pfx ? ev.pfx : "").slice(0, 384),
+    String(ev && ev.before_pfx ? ev.before_pfx : "").slice(0, 384),
+    String(ev && ev.full_pfx ? ev.full_pfx : "").slice(0, 384),
+  ].join("|");
+  if (ev && ev.__tcpvSemanticKey === key) {
+    return ev.__tcpvSemanticInfo || null;
+  }
+
+  let info = null;
+  for (const base64Text of [String(ev && ev.before_pay ? ev.before_pay : ""), String(ev && ev.pay ? ev.pay : "")]) {
+    if (!base64Text) continue;
+    info = collectPacketSemanticInfoForPayload(base64Text);
+    if (info) break;
+  }
+  if (!info) {
+    for (const keyName of ["before_pfx", "pfx", "full_pfx"]) {
+      const bytes = bytesFromHexPrefix(ev && ev[keyName], 256);
+      info = collectPacketSemanticInfoFromBytes(bytes);
+      if (info) break;
+    }
+  }
+  if (ev && typeof ev === "object") {
+    ev.__tcpvSemanticKey = key;
+    ev.__tcpvSemanticInfo = info || null;
+  }
+  return info || null;
+}
+
+function buildPacketSemanticAnnotationIndex(info, bytesPerRow) {
+  const grouped = new Map();
+  const annotations = info && Array.isArray(info.annotations) ? info.annotations : [];
+  if (annotations.length <= 0) return grouped;
+  const width = Math.max(1, Number(bytesPerRow || 16));
+  for (const item of annotations) {
+    const off = Number(item && item.off);
+    const text = normalizeDumpAnnotationText(item && item.text ? item.text : "");
+    if (!Number.isFinite(off) || off < 0 || !text) continue;
+    const rowBase = Math.floor(off / width) * width;
+    const bucket = grouped.get(rowBase) || [];
+    if (!bucket.includes(text) && bucket.length < 3) bucket.push(text);
+    grouped.set(rowBase, bucket);
+  }
+  return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
+}
+
 function collectObTimestampTripletRanges(byteValues, baseOffset = 0, sourceLabel = "ob") {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
   const text = bytesToLatin1String(byteValues);
@@ -2271,6 +2465,8 @@ function inferStringKind(text) {
   if (/[^\u0000-\u007f]/.test(normalized)) return "utf8";
   if (/^[A-Za-z0-9+/_-]{12,}={0,2}$/.test(normalized)) return "base64";
   if (normalized.startsWith("com.") || normalized.split(".").length >= 3) return "bundle";
+  if (/cs:[^\x00;]+(?:,ob:[^\x00;]+)?/i.test(normalized)) return /state:/i.test(normalized) ? "cs/ob/state" : "cs/ob";
+  if (/state:[^,\x00;]+,r:[^\x00;]+,p:[^\x00;]+/i.test(normalized)) return "state/r/p";
   if (normalized.includes("/") || lower.includes(".dylib") || lower.includes("springboard")) return "path";
   if (normalized.includes(":") && normalized.includes(";")) return "kv";
   if (normalized.includes(":") && normalized.length <= 64) return "field";
@@ -3029,6 +3225,16 @@ function compactTimeInsight(summaryText) {
   return null;
 }
 
+function compactPacketSemanticInsight(ev) {
+  const info = getEventPacketSemanticInfo(ev);
+  if (!info) return null;
+  return {
+    kind: "semantic",
+    text: info.text,
+    title: info.title || info.text,
+  };
+}
+
 function compactDeviceInsight(ev, summaryText) {
   const sourceText = `${String(summaryText || "")} ; ${eventPrefixText(ev)}`;
   const deviceMatch = sourceText.match(/model:[^;\s|]+(?:;ver:[^;\s|]+)?(?:;inc_id:[^;\s|]+)?(?:;obf_id:[^;\s|]+)?/i);
@@ -3105,6 +3311,7 @@ function compactTypeInsight(summaryText) {
 function buildSummaryInsightStrip(ev, summaryText) {
   if (!isDecodedFlowEvent(ev, summaryText)) return null;
   const candidates = [
+    compactPacketSemanticInsight(ev),
     compactTimeInsight(summaryText),
     compactDeviceInsight(ev, summaryText),
     compactChildInsight(summaryText),
@@ -7159,18 +7366,19 @@ function buildEventBody(ev, hideAscii, eventId = "") {
 	  body.appendChild(dumpGrid);
   let semanticCompareAdded = false;
 
-	  function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
-	    if (!base64Text) return;
-	    const collapsed = !!(dumpOptions && dumpOptions.collapsed);
-	    const panel = document.createElement(collapsed ? "details" : "section");
-	    panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
-	    if (collapsed && dumpOptions.open) panel.open = true;
-	    const timestampHighlights =
-	      sourceKey === "full" ? [] : collectTimestampHighlightsForPayload(base64Text);
+  function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
+    if (!base64Text) return;
+    const collapsed = !!(dumpOptions && dumpOptions.collapsed);
+    const panel = document.createElement(collapsed ? "details" : "section");
+    panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
+    if (collapsed && dumpOptions.open) panel.open = true;
+    const timestampHighlights =
+      sourceKey === "full" ? [] : collectTimestampHighlightsForPayload(base64Text);
+    const semanticInfo = sourceKey === "full" ? null : collectPacketSemanticInfoForPayload(base64Text);
     const timestampSummary = summarizeTimestampHighlights(timestampHighlights);
 
-	    const sectionTitle = document.createElement(collapsed ? "summary" : "div");
-	    sectionTitle.className = "dump-label";
+    const sectionTitle = document.createElement(collapsed ? "summary" : "div");
+    sectionTitle.className = "dump-label";
     sectionTitle.appendChild(
       document.createTextNode(
         Number.isFinite(Number(lengthValue))
@@ -7178,23 +7386,31 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           : title
       )
     );
-	    if (timestampHighlights.length > 0) {
+    if (semanticInfo) {
+      const semanticChip = document.createElement("span");
+      semanticChip.className = "dump-label-note dump-label-semantic";
+      semanticChip.textContent = semanticInfo.text;
+      semanticChip.title = semanticInfo.title || semanticInfo.text;
+      sectionTitle.appendChild(semanticChip);
+    }
+    if (timestampHighlights.length > 0) {
       const timestampChip = document.createElement("span");
       timestampChip.className = "dump-label-note dump-label-timestamp";
       timestampChip.textContent = `时间戳×${timestampHighlights.length}`;
       timestampChip.title = timestampSummary;
-	      sectionTitle.appendChild(timestampChip);
-	    }
-	    if (collapsed) {
-	      const foldNote = document.createElement("span");
-	      foldNote.className = "dump-label-note";
-	      foldNote.textContent = dumpOptions.foldNote || "参考";
-	      sectionTitle.appendChild(foldNote);
-	    }
-	    panel.appendChild(sectionTitle);
+      sectionTitle.appendChild(timestampChip);
+    }
+    if (collapsed) {
+      const foldNote = document.createElement("span");
+      foldNote.className = "dump-label-note";
+      foldNote.textContent = dumpOptions.foldNote || "参考";
+      sectionTitle.appendChild(foldNote);
+    }
+    panel.appendChild(sectionTitle);
 
     const annotationIndex = mergeDumpAnnotationIndexes(
       getDumpAnnotationIndex(ev, sourceKey),
+      buildPacketSemanticAnnotationIndex(semanticInfo, getBytesPerRow()),
       buildTimestampAnnotationIndex(timestampHighlights, getBytesPerRow())
     );
     const dump = formatHexDump(base64Text, hideAscii, annotationIndex, {

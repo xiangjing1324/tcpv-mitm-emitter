@@ -553,6 +553,7 @@ INDEX_HTML = """
 	    }
 
 	    .summary-insight-child,
+	    .summary-insight-semantic,
 	    .summary-insight-type,
 	    .summary-insight-time {
 	      flex-shrink: 0;
@@ -986,6 +987,12 @@ INDEX_HTML = """
       border-color: var(--hex-timestamp-line);
       background: var(--hex-timestamp-bg);
       color: var(--hex-timestamp-color);
+    }
+
+    .dump-label-semantic {
+      border-color: color-mix(in srgb, var(--accent) 38%, var(--chip-line));
+      background: color-mix(in srgb, var(--accent) 11%, var(--panel));
+      color: color-mix(in srgb, var(--text) 82%, var(--accent));
     }
 
     .dump-panel-full .dump-label {
