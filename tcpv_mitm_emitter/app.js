@@ -121,6 +121,7 @@ const PRINTABLE_RUN_ANCHOR_PATTERNS = [
 const PACKET_FILE_REFERENCE_REGEX = /\b(?:mrpcs?|mrcp|mrp)[A-Za-z0-9_.-]*(?:\.(?:data|dat|cfg|zip|bin))?\b|\b(?:config2|config3|comm|tersafe)[A-Za-z0-9_.-]*\.(?:dat|zip|data|cfg|bin)\b/gi;
 const PACKET_STATE_REFERENCE_REGEX = /\b(?:state|stat|status):[^\x00;\r\n|]+/gi;
 const IDFV_FIELD_REGEX = /\biDevIDFV[:=][0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b/g;
+const HISTORY_OPENID_FIELD_REGEX = /\bHistory(?:Open)?ID[:=][0-9A-Za-z_.-]+\b/g;
 const XOR_TEXT_KEYWORDS = [
   "/usr/sbin",
   "dylib",
@@ -1356,6 +1357,7 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
   const changedOffsets = options && options.changedOffsets instanceof Set ? options.changedOffsets : null;
   const timestampOffsets = buildRangeOffsetSet(options && Array.isArray(options.timestampRanges) ? options.timestampRanges : []);
   const idfvOffsets = buildRangeOffsetSet(options && Array.isArray(options.idfvRanges) ? options.idfvRanges : []);
+  const historyOffsets = buildRangeOffsetSet(options && Array.isArray(options.historyRanges) ? options.historyRanges : []);
   const groupWidths = groupSizes.map((size) => size * 3 - 1);
   const hexWidth = groupWidths.reduce((acc, width) => acc + width, 0) + groupGap.length * (groupSizes.length - 1);
 
@@ -1398,6 +1400,9 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
     const idfvIndexes = idfvOffsets
       ? chunk.map((_v, idx) => idfvOffsets.has(i + idx))
       : [];
+    const historyIndexes = historyOffsets
+      ? chunk.map((_v, idx) => historyOffsets.has(i + idx))
+      : [];
     if (hideAscii) {
       rows.push({
         offset,
@@ -1409,6 +1414,7 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
         changedIndexes,
         timestampIndexes,
         idfvIndexes,
+        historyIndexes,
         ascii: "",
         compactAscii,
         comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
@@ -1429,6 +1435,7 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
       changedIndexes,
       timestampIndexes,
       idfvIndexes,
+      historyIndexes,
       ascii,
       compactAscii,
       comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
@@ -1453,12 +1460,16 @@ function renderHexBytesHtml(row) {
     const idfvMarks = Array.isArray(row.idfvIndexes)
       ? row.idfvIndexes.slice(offsetInChunk, offsetInChunk + size)
       : [];
+    const historyMarks = Array.isArray(row.historyIndexes)
+      ? row.historyIndexes.slice(offsetInChunk, offsetInChunk + size)
+      : [];
     offsetInChunk += size;
     const html = bytes
       .map((value, idx) => {
         const hex = value.toString(16).padStart(2, "0");
         if (timestampMarks[idx]) return `<span class="hex-byte-timestamp">${hex}</span>`;
         if (idfvMarks[idx]) return `<span class="hex-byte-idfv">${hex}</span>`;
+        if (historyMarks[idx]) return `<span class="hex-byte-history">${hex}</span>`;
         return marks[idx] ? `<span class="hex-byte-changed">${hex}</span>` : escapeHtml(hex);
       })
       .join(" ");
@@ -2385,6 +2396,33 @@ function collectIdfvHighlightsForPayload(base64Text) {
   return collectIdfvHighlightsFromBytes(b64ToBytes(base64Text));
 }
 
+function collectHistoryOpenidHighlightsFromBytes(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const text = bytesToLatin1String(byteValues);
+  const ranges = [];
+  HISTORY_OPENID_FIELD_REGEX.lastIndex = 0;
+  for (const match of text.matchAll(HISTORY_OPENID_FIELD_REGEX)) {
+    const raw = String(match && match[0] ? match[0] : "");
+    const start = Number(match && match.index);
+    if (!raw || !Number.isFinite(start)) continue;
+    const sepIndex = raw.indexOf(":") >= 0 ? raw.indexOf(":") : raw.indexOf("=");
+    const value = sepIndex >= 0 ? raw.slice(sepIndex + 1) : "";
+    ranges.push({
+      start,
+      end: start + raw.length,
+      valueStart: sepIndex >= 0 ? start + sepIndex + 1 : start,
+      valueEnd: start + raw.length,
+      value,
+      text: `History ${value || raw} @${formatHexValue(start)}`,
+    });
+  }
+  return ranges;
+}
+
+function collectHistoryOpenidHighlightsForPayload(base64Text) {
+  return collectHistoryOpenidHighlightsFromBytes(b64ToBytes(base64Text));
+}
+
 function obTripletItemIndex(item) {
   const match = String(item && item.kind ? item.kind : "").match(/^ob([567])_/i);
   return match ? Number(match[1]) : NaN;
@@ -2439,6 +2477,22 @@ function summarizeIdfvHighlights(ranges) {
   return shown.length > 0 ? `IDFV ${shown.join(" / ")}${suffix}` : `IDFV x${items.length}`;
 }
 
+function summarizeHistoryOpenidHighlights(ranges) {
+  const items = Array.isArray(ranges) ? ranges : [];
+  if (items.length <= 0) return "8092 HistoryOpenID 已替换";
+  const seen = new Set();
+  const shown = [];
+  for (const item of items) {
+    const value = String(item && item.value ? item.value : "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    shown.push(value);
+    if (shown.length >= 3) break;
+  }
+  const suffix = items.length > shown.length ? `, ...x${items.length}` : "";
+  return shown.length > 0 ? `History ${shown.join(" / ")}${suffix}` : `History x${items.length}`;
+}
+
 function getEventTimestampHighlights(ev) {
   const eventId = getEventId(ev);
   const key = `${eventId}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
@@ -2488,6 +2542,32 @@ function getEventIdfvHighlights(ev, summaryText = "") {
   return result;
 }
 
+function getEventHistoryOpenidHighlights(ev, summaryText = "") {
+  if (!currentFlowLooksLikePort8092(ev, summaryText)) return [];
+  const eventId = getEventId(ev);
+  const key = `${eventId}|${String(summaryText || "").length}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
+  if (ev && ev.__tcpvHistoryOpenidCacheKey === key && Array.isArray(ev.__tcpvHistoryOpenidHighlights)) {
+    return ev.__tcpvHistoryOpenidHighlights;
+  }
+  const all = new Map();
+  for (const base64Text of [String(ev && ev.pay ? ev.pay : ""), String(ev && ev.before_pay ? ev.before_pay : "")]) {
+    if (!base64Text) continue;
+    for (const item of collectHistoryOpenidHighlightsForPayload(base64Text)) {
+      const value = String(item && item.value ? item.value : "");
+      const start = Number(item && item.start);
+      if (!Number.isFinite(start)) continue;
+      const keyPart = `${value || "history"}:${start}`;
+      if (!all.has(keyPart)) all.set(keyPart, item);
+    }
+  }
+  const result = Array.from(all.values()).sort((a, b) => Number(a.start) - Number(b.start));
+  if (ev && typeof ev === "object") {
+    ev.__tcpvHistoryOpenidCacheKey = key;
+    ev.__tcpvHistoryOpenidHighlights = result;
+  }
+  return result;
+}
+
 function syncSummaryTimestampBadge(summaryNode, ev) {
   if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
   for (const node of summaryNode.querySelectorAll(".summary-timestamp")) {
@@ -2526,6 +2606,28 @@ function syncSummaryIdfvBadge(summaryNode, ev, summaryText = "") {
     summaryNode.insertBefore(idfvSpan, tail);
   } else {
     summaryNode.appendChild(idfvSpan);
+  }
+}
+
+function syncSummaryHistoryOpenidBadge(summaryNode, ev, summaryText = "") {
+  if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
+  for (const node of summaryNode.querySelectorAll(".summary-history-openid")) {
+    node.remove();
+  }
+  if (!currentFlowLooksLikePort8092(ev, summaryText)) return;
+  const summaryCount = Number.parseInt(readSummaryValue(summaryText, "history") || "0", 10);
+  const historyHighlights = getEventHistoryOpenidHighlights(ev, summaryText);
+  const count = Math.max(Number.isFinite(summaryCount) ? summaryCount : 0, historyHighlights.length);
+  if (count <= 0) return;
+  const historySpan = document.createElement("span");
+  historySpan.className = "summary-history-openid";
+  historySpan.textContent = `History×${count}`;
+  historySpan.title = summarizeHistoryOpenidHighlights(historyHighlights);
+  const tail = summaryNode.querySelector(".summary-tail");
+  if (tail) {
+    summaryNode.insertBefore(historySpan, tail);
+  } else {
+    summaryNode.appendChild(historySpan);
   }
 }
 
@@ -7693,6 +7795,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       !isRawSource && currentFlowLooksLikePort8092(ev, summaryText)
         ? collectIdfvHighlightsForPayload(base64Text)
         : [];
+    const historyHighlights =
+      !isRawSource && currentFlowLooksLikePort8092(ev, summaryText)
+        ? collectHistoryOpenidHighlightsForPayload(base64Text)
+        : [];
     const semanticInfo = isRawSource ? null : collectPacketSemanticInfoForPayload(base64Text);
     const timestampSummary = summarizeTimestampHighlights(timestampHighlights);
 
@@ -7726,6 +7832,13 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       idfvChip.title = summarizeIdfvHighlights(idfvHighlights);
       sectionTitle.appendChild(idfvChip);
     }
+    if (historyHighlights.length > 0) {
+      const historyChip = document.createElement("span");
+      historyChip.className = "dump-label-note dump-label-history-openid";
+      historyChip.textContent = `History×${historyHighlights.length}`;
+      historyChip.title = summarizeHistoryOpenidHighlights(historyHighlights);
+      sectionTitle.appendChild(historyChip);
+    }
     if (collapsed) {
       const foldNote = document.createElement("span");
       foldNote.className = "dump-label-note";
@@ -7744,6 +7857,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       changedOffsets: dumpOptions.changedOffsets || null,
       timestampRanges: timestampHighlights,
       idfvRanges: idfvHighlights,
+      historyRanges: historyHighlights,
     });
     const hexShell = document.createElement("div");
     hexShell.className = "hex-shell";
@@ -8301,6 +8415,7 @@ function renderEvents() {
     summary.appendChild(tailSpan);
     syncSummaryTimestampBadge(summary, ev);
     syncSummaryIdfvBadge(summary, ev, summaryText);
+    syncSummaryHistoryOpenidBadge(summary, ev, summaryText);
 
     wrap.appendChild(summary);
     let prefetchTimer = 0;
@@ -8340,6 +8455,7 @@ function renderEvents() {
         if (!wrap.isConnected || state.flowId !== flowIdAtStart) return;
         syncSummaryTimestampBadge(summary, ev);
         syncSummaryIdfvBadge(summary, ev, summaryText);
+        syncSummaryHistoryOpenidBadge(summary, ev, summaryText);
         if (loading.isConnected) loading.remove();
         const bodyNode = buildEventBody(ev, hideAscii, eventId);
         wrap.appendChild(bodyNode);

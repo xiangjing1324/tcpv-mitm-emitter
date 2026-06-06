@@ -32,6 +32,9 @@ INDEX_HTML = """
       --hex-idfv-color: #7c3aed;
       --hex-idfv-bg: rgba(124, 58, 237, 0.12);
       --hex-idfv-line: rgba(124, 58, 237, 0.22);
+      --hex-history-color: #b45309;
+      --hex-history-bg: rgba(180, 83, 9, 0.12);
+      --hex-history-line: rgba(180, 83, 9, 0.22);
     }
 
     :root[data-theme="dark"] {
@@ -59,6 +62,9 @@ INDEX_HTML = """
       --hex-idfv-color: #c4b5fd;
       --hex-idfv-bg: rgba(167, 139, 250, 0.13);
       --hex-idfv-line: rgba(167, 139, 250, 0.22);
+      --hex-history-color: #fdba74;
+      --hex-history-bg: rgba(251, 146, 60, 0.13);
+      --hex-history-line: rgba(251, 146, 60, 0.22);
     }
 
     :root[data-theme="github-dark"] {
@@ -86,6 +92,9 @@ INDEX_HTML = """
       --hex-idfv-color: #c4b5fd;
       --hex-idfv-bg: rgba(167, 139, 250, 0.12);
       --hex-idfv-line: rgba(167, 139, 250, 0.20);
+      --hex-history-color: #fdba74;
+      --hex-history-bg: rgba(251, 146, 60, 0.12);
+      --hex-history-line: rgba(251, 146, 60, 0.20);
     }
 
     * { box-sizing: border-box; }
@@ -592,7 +601,8 @@ INDEX_HTML = """
     }
 
     .summary-timestamp,
-    .summary-idfv {
+    .summary-idfv,
+    .summary-history-openid {
       flex: 0 0 auto;
       padding: 1px 6px;
       border-radius: 999px;
@@ -611,6 +621,12 @@ INDEX_HTML = """
       border: 1px solid var(--hex-idfv-line);
       background: var(--hex-idfv-bg);
       color: var(--hex-idfv-color);
+    }
+
+    .summary-history-openid {
+      border: 1px solid var(--hex-history-line);
+      background: var(--hex-history-bg);
+      color: var(--hex-history-color);
     }
 
     .summary-tail {
@@ -1053,6 +1069,12 @@ INDEX_HTML = """
       color: var(--hex-idfv-color);
     }
 
+    .dump-label-history-openid {
+      border-color: var(--hex-history-line);
+      background: var(--hex-history-bg);
+      color: var(--hex-history-color);
+    }
+
     .dump-label-semantic {
       border-color: color-mix(in srgb, var(--accent) 38%, var(--chip-line));
       background: color-mix(in srgb, var(--accent) 11%, var(--panel));
@@ -1239,6 +1261,13 @@ INDEX_HTML = """
       background: var(--hex-idfv-bg);
       border-radius: 3px;
       box-shadow: 0 0 0 1px var(--hex-idfv-line);
+    }
+
+    .hex-byte-history {
+      color: var(--hex-history-color);
+      background: var(--hex-history-bg);
+      border-radius: 3px;
+      box-shadow: 0 0 0 1px var(--hex-history-line);
     }
 
     .hex-ascii {
