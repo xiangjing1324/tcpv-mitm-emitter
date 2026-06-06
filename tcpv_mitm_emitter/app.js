@@ -101,6 +101,8 @@ const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
 const WINDOW_PREFETCH_BUDGET_AUTO = 16;
 const WINDOW_PREFETCH_BUDGET_MANUAL = 48;
+const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 96;
+const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 192;
 const MAX_RENDER_EVENTS_AUTO = 2000;
 const MAX_RENDER_EVENTS_MANUAL = 5000;
 const DUMP_SCROLL_CACHE_MAX = 800;
@@ -3619,6 +3621,60 @@ function buildSummaryInsightStrip(ev, summaryText) {
     strip.appendChild(chip);
   }
   return strip;
+}
+
+function syncSummaryInsightStrip(summaryNode, ev, summaryText = "") {
+  if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
+  for (const node of summaryNode.querySelectorAll(".summary-insights")) {
+    node.remove();
+  }
+  const strip = buildSummaryInsightStrip(ev, summaryText);
+  if (!strip) return;
+  const extra = summaryNode.querySelector(".summary-extra");
+  const tail = summaryNode.querySelector(".summary-tail");
+  if (extra) {
+    summaryNode.insertBefore(strip, extra);
+  } else if (tail) {
+    summaryNode.insertBefore(strip, tail);
+  } else {
+    summaryNode.appendChild(strip);
+  }
+}
+
+function shouldHydrateSummaryBadges(ev, summaryText = "") {
+  if (!ev || typeof ev !== "object") return false;
+  if (Number(ev.dir) !== 0) return false;
+  if (!isDecodedFlowEvent(ev, summaryText)) return false;
+  if (ev.__tcpvSummaryHydrated || ev.__tcpvSummaryHydrateStarted) return false;
+  if (String(ev.pay || "") || String(ev.before_pay || "")) return false;
+  return true;
+}
+
+function hydrateSummaryBadges(summaryNode, ev, summaryText = "", eventId = "") {
+  const accountText = String(state.flowId || "").trim();
+  const idText = String(eventId || getEventId(ev) || "").trim();
+  if (!accountText || !idText || !shouldHydrateSummaryBadges(ev, summaryText)) return false;
+
+  ev.__tcpvSummaryHydrateStarted = true;
+  fetchEventPayload(accountText, idText)
+    .then((detail) => {
+      if (state.flowId !== accountText) return;
+      if (!applyEventPayloadDetail(ev, detail)) return;
+      ev.__tcpvPayloadDetailFetched = true;
+      ev.__tcpvSummaryHydrated = true;
+      if (summaryNode && summaryNode.isConnected) {
+        syncSummaryInsightStrip(summaryNode, ev, summaryText);
+        syncSummaryTimestampBadge(summaryNode, ev);
+        syncSummaryIdfvBadge(summaryNode, ev, summaryText);
+        syncSummaryHistoryOpenidBadge(summaryNode, ev, summaryText);
+      } else {
+        schedulePreviewOffsetRender();
+      }
+    })
+    .catch((_e) => {
+      ev.__tcpvSummaryHydrateStarted = false;
+    });
+  return true;
 }
 
 function printableStats(byteValues) {
@@ -8287,11 +8343,14 @@ function renderEvents() {
   const listFrag = document.createDocumentFragment();
   const nextHitEventIds = [];
   let windowPrefetchBudget = state.autoRefresh ? WINDOW_PREFETCH_BUDGET_AUTO : WINDOW_PREFETCH_BUDGET_MANUAL;
+  let summaryHydrateBudget = state.autoRefresh
+    ? SUMMARY_BADGE_HYDRATE_BUDGET_AUTO
+    : SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL;
 
   for (const ev of visibleEvents) {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
-    if (!needFullScan && !state.expandedIds.has(eventId)) {
+    if (!needFullScan && !state.expandedIds.has(eventId) && !ev.__tcpvSummaryHydrated) {
       ev.pay = "";
     }
 	    wrap.dataset.eventId = eventId;
@@ -8389,10 +8448,7 @@ function renderEvents() {
 	    previewWrap.appendChild(document.createTextNode("]"));
 	    summary.appendChild(previewWrap);
 
-	    const insightStrip = buildSummaryInsightStrip(ev, summaryText);
-	    if (insightStrip) {
-	      summary.appendChild(insightStrip);
-	    }
+	    syncSummaryInsightStrip(summary, ev, summaryText);
 
 	    if (preview.needsWindowFetch && windowPrefetchBudget > 0 && state.flowId) {
 	      prefetchEventPayload(state.flowId, eventId);
@@ -8412,6 +8468,12 @@ function renderEvents() {
     syncSummaryTimestampBadge(summary, ev);
     syncSummaryIdfvBadge(summary, ev, summaryText);
     syncSummaryHistoryOpenidBadge(summary, ev, summaryText);
+    if (
+      summaryHydrateBudget > 0
+      && hydrateSummaryBadges(summary, ev, summaryText, eventId)
+    ) {
+      summaryHydrateBudget -= 1;
+    }
 
     wrap.appendChild(summary);
     let prefetchTimer = 0;
@@ -8484,7 +8546,7 @@ function renderEvents() {
             node.remove();
           }
           wrap.dataset.bodyReady = "0";
-          if (!needFullScan) {
+          if (!needFullScan && !ev.__tcpvSummaryHydrated) {
             ev.pay = "";
           }
         }
