@@ -1294,6 +1294,10 @@ function canonicalDumpAnnotationKey(text) {
       String(state[3] || "").toLowerCase(),
     ].join("|");
   }
+  const cs = normalized.match(/\bcs[:=]([^,\s;|]+)/i);
+  if (cs) {
+    return ["cs", String(cs[1] || "").toLowerCase()].join("|");
+  }
   return normalized.toLowerCase();
 }
 
