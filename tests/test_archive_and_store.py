@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -164,6 +165,25 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertFalse(has_more)
         self.assertFalse(accounts[0]["trimmed_possible"])
         self.assertEqual(accounts[0]["last_seq"], 3)
+
+    def test_store_decodes_raw_after_payload(self):
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.append_event(
+            "acct",
+            "cid",
+            0,
+            b"decoded-after",
+            full_payload=b"encrypted-before",
+            before_payload=b"decoded-before",
+            raw_payload=b"encrypted-after",
+            ts_ms=1000,
+        )
+        event = store.get_event("acct", "1")
+        self.assertEqual(event["full_len"], len(b"encrypted-before"))
+        self.assertEqual(event["before_len"], len(b"decoded-before"))
+        self.assertEqual(event["raw_len"], len(b"encrypted-after"))
+        self.assertEqual(event["raw_pfx"], b"encrypted-after".hex())
+        self.assertEqual(event["raw_pay"], base64.b64encode(b"encrypted-after").decode("ascii"))
 
 
 if __name__ == "__main__":

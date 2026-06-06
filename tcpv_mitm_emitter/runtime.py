@@ -169,6 +169,8 @@ class TcpvRuntime:
         full_packet_len: int | None = None,
         before_packet_data: Any | None = None,
         before_packet_len: int | None = None,
+        raw_packet_data: Any | None = None,
+        raw_packet_len: int | None = None,
     ) -> None:
         if not self.enabled or self.store is None:
             return
@@ -202,6 +204,13 @@ class TcpvRuntime:
             real_before_packet_len = len(before_payload)
         if real_before_packet_len <= 0:
             real_before_packet_len = len(before_payload)
+        raw_payload = self._to_bytes(raw_packet_data)
+        try:
+            real_raw_packet_len = int(raw_packet_len) if raw_packet_len is not None else len(raw_payload)
+        except (TypeError, ValueError):
+            real_raw_packet_len = len(raw_payload)
+        if real_raw_packet_len <= 0:
+            real_raw_packet_len = len(raw_payload)
 
         event = {
             "account": account,
@@ -215,6 +224,8 @@ class TcpvRuntime:
             "full_packet_len": real_full_packet_len,
             "before_payload": before_payload,
             "before_packet_len": real_before_packet_len,
+            "raw_payload": raw_payload,
+            "raw_packet_len": real_raw_packet_len,
             "ts_ms": int(ts_ms or (time.time() * 1000)),
             "msg_idx": msg_idx,
             "chunk_idx": chunk_idx,
@@ -254,6 +265,8 @@ class TcpvRuntime:
         full_packet_len: int | None = None,
         before_packet_data: Any | None = None,
         before_packet_len: int | None = None,
+        raw_packet_data: Any | None = None,
+        raw_packet_len: int | None = None,
     ) -> None:
         account_value = account
         if account_value is None and flow is not None:
@@ -286,6 +299,8 @@ class TcpvRuntime:
             full_packet_len=full_packet_len,
             before_packet_data=before_packet_data,
             before_packet_len=before_packet_len,
+            raw_packet_data=raw_packet_data,
+            raw_packet_len=raw_packet_len,
         )
 
     def tcp_start(
@@ -526,6 +541,8 @@ class TcpvRuntime:
             full_packet_len=item.get("full_packet_len"),
             before_payload=item.get("before_payload"),
             before_packet_len=item.get("before_packet_len"),
+            raw_payload=item.get("raw_payload"),
+            raw_packet_len=item.get("raw_packet_len"),
             proxy_username=item.get("proxy_username", ""),
             summary=item.get("summary", ""),
             ts_ms=item["ts_ms"],
@@ -564,6 +581,8 @@ class TcpvRuntime:
                 "full_packet_len": item.get("full_packet_len", 0),
                 "before_payload": _bytes_to_b64(item.get("before_payload")),
                 "before_packet_len": item.get("before_packet_len", 0),
+                "raw_payload": _bytes_to_b64(item.get("raw_payload")),
+                "raw_packet_len": item.get("raw_packet_len", 0),
                 "ts_ms": item.get("ts_ms", 0),
                 "msg_idx": item.get("msg_idx"),
                 "chunk_idx": item.get("chunk_idx"),
@@ -670,6 +689,8 @@ def emit_lobby_packet(
     full_packet_len: int | None = None,
     before_packet_data: Any | None = None,
     before_packet_len: int | None = None,
+    raw_packet_data: Any | None = None,
+    raw_packet_len: int | None = None,
 ) -> None:
     """Safe no-op when runtime is disabled.
 
@@ -693,6 +714,8 @@ def emit_lobby_packet(
         full_packet_len=full_packet_len,
         before_packet_data=before_packet_data,
         before_packet_len=before_packet_len,
+        raw_packet_data=raw_packet_data,
+        raw_packet_len=raw_packet_len,
     )
 
 

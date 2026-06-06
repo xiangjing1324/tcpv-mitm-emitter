@@ -116,8 +116,11 @@ const ANALYSIS_XOR_SCAN_MAX_BYTES = 768;
 const PRINTABLE_RUN_ANCHOR_PATTERNS = [
   /\d{10,24}/,
   /(idevhw|idevsysver|iappversion|iappname|iappinfo)/i,
-  /(cs:|ob:|state:|model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrpcs_|com\.|cn=|ou=|ip(hone|ad)\d|android|tersafe|config2\.dat|config3\.dat|comm\.zip)/i,
+  /(cs:|ob:|state:|stat:|status:|model:|ver:|inc_id:|obf_id:|appname:|appid:|uuid:|client:|bundle:|mrp|mrpcs_|mrcp|\.data|com\.|cn=|ou=|ip(hone|ad)\d|android|tersafe|config2\.dat|config3\.dat|comm\.zip)/i,
 ];
+const PACKET_FILE_REFERENCE_REGEX = /\b(?:mrpcs?|mrcp|mrp)[A-Za-z0-9_.-]*(?:\.(?:data|dat|cfg|zip|bin))?\b|\b(?:config2|config3|comm|tersafe)[A-Za-z0-9_.-]*\.(?:dat|zip|data|cfg|bin)\b/gi;
+const PACKET_STATE_REFERENCE_REGEX = /\b(?:state|stat|status):[^\x00;\r\n|]+/gi;
+const IDFV_FIELD_REGEX = /\biDevIDFV[:=][0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b/g;
 const XOR_TEXT_KEYWORDS = [
   "/usr/sbin",
   "dylib",
@@ -142,6 +145,15 @@ const XOR_TEXT_KEYWORDS = [
   "airdropalertui",
   "sharing",
   "tersafe",
+  "mrp",
+  "mrpcs",
+  "mrcp",
+  "mrpcs_",
+  "mrpcs_i",
+  "mrpcs_i_vv",
+  "mrpcs_i_vv.data",
+  "i_vv.data",
+  ".data",
   "config2.dat",
   "config3.dat",
   "comm.zip",
@@ -396,6 +408,9 @@ function writePayloadCache(account, eventId, detail) {
       before_pay: String(normalized.before_pay || ""),
       before_len: Number.isFinite(Number(normalized.before_len)) ? Number(normalized.before_len) : undefined,
       before_pfx: String(normalized.before_pfx || ""),
+      raw_pay: String(normalized.raw_pay || ""),
+      raw_len: Number.isFinite(Number(normalized.raw_len)) ? Number(normalized.raw_len) : undefined,
+      raw_pfx: String(normalized.raw_pfx || ""),
       pfx: String(normalized.pfx || ""),
       cid: String(normalized.cid || ""),
       proxy_username: String(normalized.proxy_username || ""),
@@ -404,7 +419,11 @@ function writePayloadCache(account, eventId, detail) {
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
     },
-    size: pay.length + String(normalized.full_pay || "").length + String(normalized.before_pay || "").length,
+    size:
+      pay.length
+      + String(normalized.full_pay || "").length
+      + String(normalized.before_pay || "").length
+      + String(normalized.raw_pay || "").length,
   };
   payloadCache.set(key, rec);
   payloadCacheBytes += rec.size;
@@ -910,6 +929,23 @@ function renderSelectedTitle() {
   el.selectedTitle.textContent = `${dateText} ${text || "Flow selected"}`.trim();
 }
 
+function getCurrentFlowMeta() {
+  if (!state.flowId) return null;
+  return state.flows.find((x) => String(x.account || "") === state.flowId) || null;
+}
+
+function currentFlowLooksLikePort8092(ev = null, summaryText = "") {
+  const flow = getCurrentFlowMeta();
+  const parts = [
+    summaryText,
+    ev && ev.summary,
+    flow && flow.listen_tag,
+    flow && flow.source_port,
+  ];
+  const raw = parts.map((part) => String(part || "")).join(" ").toLowerCase();
+  return /\bport8092\b|(?:^|\D)8092(?:\D|$)/.test(raw);
+}
+
 async function selectFlow(flowId) {
   if (!flowId) return;
   if (state.flowId !== flowId) {
@@ -1249,6 +1285,14 @@ function getDumpAnnotationIndex(ev, source) {
     ];
     return buildDumpAnnotationIndex(items, bytesPerRow);
   }
+  if (source === "before") {
+    const items = [
+      ...(Array.isArray(analysis.beforeStrings) ? analysis.beforeStrings : []),
+      ...(Array.isArray(analysis.beforeUtf8Strings) ? analysis.beforeUtf8Strings : []),
+      ...(Array.isArray(analysis.beforeBase64Strings) ? analysis.beforeBase64Strings : []),
+    ];
+    return buildDumpAnnotationIndex(items, bytesPerRow);
+  }
   if (source !== "decoded") return new Map();
   const items = [
     ...(Array.isArray(analysis.decodedStrings) ? analysis.decodedStrings : []),
@@ -1311,6 +1355,7 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
   const compactAscii = !!(options && options.compactAscii);
   const changedOffsets = options && options.changedOffsets instanceof Set ? options.changedOffsets : null;
   const timestampOffsets = buildRangeOffsetSet(options && Array.isArray(options.timestampRanges) ? options.timestampRanges : []);
+  const idfvOffsets = buildRangeOffsetSet(options && Array.isArray(options.idfvRanges) ? options.idfvRanges : []);
   const groupWidths = groupSizes.map((size) => size * 3 - 1);
   const hexWidth = groupWidths.reduce((acc, width) => acc + width, 0) + groupGap.length * (groupSizes.length - 1);
 
@@ -1350,6 +1395,9 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
     const timestampIndexes = timestampOffsets
       ? chunk.map((_v, idx) => timestampOffsets.has(i + idx))
       : [];
+    const idfvIndexes = idfvOffsets
+      ? chunk.map((_v, idx) => idfvOffsets.has(i + idx))
+      : [];
     if (hideAscii) {
       rows.push({
         offset,
@@ -1360,6 +1408,7 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
         groupGap,
         changedIndexes,
         timestampIndexes,
+        idfvIndexes,
         ascii: "",
         compactAscii,
         comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
@@ -1379,6 +1428,7 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
       groupGap,
       changedIndexes,
       timestampIndexes,
+      idfvIndexes,
       ascii,
       compactAscii,
       comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
@@ -1400,11 +1450,15 @@ function renderHexBytesHtml(row) {
     const timestampMarks = Array.isArray(row.timestampIndexes)
       ? row.timestampIndexes.slice(offsetInChunk, offsetInChunk + size)
       : [];
+    const idfvMarks = Array.isArray(row.idfvIndexes)
+      ? row.idfvIndexes.slice(offsetInChunk, offsetInChunk + size)
+      : [];
     offsetInChunk += size;
     const html = bytes
       .map((value, idx) => {
         const hex = value.toString(16).padStart(2, "0");
         if (timestampMarks[idx]) return `<span class="hex-byte-timestamp">${hex}</span>`;
+        if (idfvMarks[idx]) return `<span class="hex-byte-idfv">${hex}</span>`;
         return marks[idx] ? `<span class="hex-byte-changed">${hex}</span>` : escapeHtml(hex);
       })
       .join(" ");
@@ -2304,6 +2358,33 @@ function collectTimestampHighlightsForPayload(base64Text) {
   return collectTimestampHighlightsFromBytes(bytes);
 }
 
+function collectIdfvHighlightsFromBytes(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const text = bytesToLatin1String(byteValues);
+  const ranges = [];
+  IDFV_FIELD_REGEX.lastIndex = 0;
+  for (const match of text.matchAll(IDFV_FIELD_REGEX)) {
+    const raw = String(match && match[0] ? match[0] : "");
+    const start = Number(match && match.index);
+    if (!raw || !Number.isFinite(start)) continue;
+    const sepIndex = raw.indexOf(":") >= 0 ? raw.indexOf(":") : raw.indexOf("=");
+    const uuid = sepIndex >= 0 ? raw.slice(sepIndex + 1).toUpperCase() : "";
+    ranges.push({
+      start,
+      end: start + raw.length,
+      valueStart: sepIndex >= 0 ? start + sepIndex + 1 : start,
+      valueEnd: start + raw.length,
+      uuid,
+      text: `IDFV ${uuid || raw} @${formatHexValue(start)}`,
+    });
+  }
+  return ranges;
+}
+
+function collectIdfvHighlightsForPayload(base64Text) {
+  return collectIdfvHighlightsFromBytes(b64ToBytes(base64Text));
+}
+
 function obTripletItemIndex(item) {
   const match = String(item && item.kind ? item.kind : "").match(/^ob([567])_/i);
   return match ? Number(match[1]) : NaN;
@@ -2342,6 +2423,22 @@ function summarizeTimestampHighlights(ranges) {
   return items.length > 3 ? `${preview}, ...x${items.length}` : preview;
 }
 
+function summarizeIdfvHighlights(ranges) {
+  const items = Array.isArray(ranges) ? ranges : [];
+  if (items.length <= 0) return "8092 iDevIDFV 已替换";
+  const seen = new Set();
+  const shown = [];
+  for (const item of items) {
+    const uuid = String(item && item.uuid ? item.uuid : "").trim();
+    if (!uuid || seen.has(uuid)) continue;
+    seen.add(uuid);
+    shown.push(uuid);
+    if (shown.length >= 2) break;
+  }
+  const suffix = items.length > shown.length ? `, ...x${items.length}` : "";
+  return shown.length > 0 ? `IDFV ${shown.join(" / ")}${suffix}` : `IDFV x${items.length}`;
+}
+
 function getEventTimestampHighlights(ev) {
   const eventId = getEventId(ev);
   const key = `${eventId}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
@@ -2365,6 +2462,32 @@ function getEventTimestampHighlights(ev) {
   return result;
 }
 
+function getEventIdfvHighlights(ev, summaryText = "") {
+  if (!currentFlowLooksLikePort8092(ev, summaryText)) return [];
+  const eventId = getEventId(ev);
+  const key = `${eventId}|${String(summaryText || "").length}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
+  if (ev && ev.__tcpvIdfvCacheKey === key && Array.isArray(ev.__tcpvIdfvHighlights)) {
+    return ev.__tcpvIdfvHighlights;
+  }
+  const all = new Map();
+  for (const base64Text of [String(ev && ev.pay ? ev.pay : ""), String(ev && ev.before_pay ? ev.before_pay : "")]) {
+    if (!base64Text) continue;
+    for (const item of collectIdfvHighlightsForPayload(base64Text)) {
+      const uuid = String(item && item.uuid ? item.uuid : "");
+      const start = Number(item && item.start);
+      if (!Number.isFinite(start)) continue;
+      const keyPart = `${uuid || "idfv"}:${start}`;
+      if (!all.has(keyPart)) all.set(keyPart, item);
+    }
+  }
+  const result = Array.from(all.values()).sort((a, b) => Number(a.start) - Number(b.start));
+  if (ev && typeof ev === "object") {
+    ev.__tcpvIdfvCacheKey = key;
+    ev.__tcpvIdfvHighlights = result;
+  }
+  return result;
+}
+
 function syncSummaryTimestampBadge(summaryNode, ev) {
   if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
   for (const node of summaryNode.querySelectorAll(".summary-timestamp")) {
@@ -2381,6 +2504,28 @@ function syncSummaryTimestampBadge(summaryNode, ev) {
     summaryNode.insertBefore(timestampSpan, tail);
   } else {
     summaryNode.appendChild(timestampSpan);
+  }
+}
+
+function syncSummaryIdfvBadge(summaryNode, ev, summaryText = "") {
+  if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
+  for (const node of summaryNode.querySelectorAll(".summary-idfv")) {
+    node.remove();
+  }
+  if (!currentFlowLooksLikePort8092(ev, summaryText)) return;
+  const summaryCount = Number.parseInt(readSummaryValue(summaryText, "idfv") || "0", 10);
+  const idfvHighlights = getEventIdfvHighlights(ev, summaryText);
+  const count = Math.max(Number.isFinite(summaryCount) ? summaryCount : 0, idfvHighlights.length);
+  if (count <= 0) return;
+  const idfvSpan = document.createElement("span");
+  idfvSpan.className = "summary-idfv";
+  idfvSpan.textContent = `IDFV×${count}`;
+  idfvSpan.title = summarizeIdfvHighlights(idfvHighlights);
+  const tail = summaryNode.querySelector(".summary-tail");
+  if (tail) {
+    summaryNode.insertBefore(idfvSpan, tail);
+  } else {
+    summaryNode.appendChild(idfvSpan);
   }
 }
 
@@ -2886,6 +3031,7 @@ function translatedReasonText(reason) {
     response_isolated_original: "响应异常隔离，保留原包",
     target_preserve: "命中保护目标策略",
     neutralized_fallback: "无可用安全替换源，已执行兜底清理",
+    child_request_flag_0x11_patch: "0102000a 请求标志 0x11->0x01 修补",
   };
   if (exact[raw]) return `${exact[raw]}（${raw}）`;
   if (raw.includes("strict_preserve_whitelist")) return `严格白名单保护（${raw}）`;
@@ -3045,10 +3191,28 @@ function bytesFromHexPrefix(hexText, maxBytes = 192) {
 
 function eventPrefixText(ev) {
   const chunks = [];
-  for (const key of ["pfx", "before_pfx", "full_pfx"]) {
+  for (const key of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
     const bytes = bytesFromHexPrefix(ev && ev[key], 192);
     if (bytes.length <= 0) continue;
     const text = extractPrintableRuns(bytes, 3, 8)
+      .map((item) => String(item && item.text ? item.text : "").trim())
+      .filter(Boolean)
+      .join(" ; ");
+    if (text) chunks.push(text);
+  }
+  return chunks.join(" ; ");
+}
+
+function eventDecodedSignalText(ev) {
+  const chunks = [];
+  const seenPayloads = new Set();
+  for (const key of ["before_pay", "pay", "full_pay"]) {
+    const base64Text = String(ev && ev[key] ? ev[key] : "");
+    if (!base64Text || seenPayloads.has(base64Text)) continue;
+    seenPayloads.add(base64Text);
+    const bytes = b64ToBytesLimited(base64Text, 512);
+    if (bytes.length <= 0) continue;
+    const text = extractPrintableRuns(bytes, 3, 14)
       .map((item) => String(item && item.text ? item.text : "").trim())
       .filter(Boolean)
       .join(" ; ");
@@ -3235,23 +3399,52 @@ function compactPacketSemanticInsight(ev) {
   };
 }
 
-function compactDeviceInsight(ev, summaryText) {
-  const sourceText = `${String(summaryText || "")} ; ${eventPrefixText(ev)}`;
+function collectPacketSignalMatches(sourceText, regex, maxItems = 2) {
+  const out = [];
+  const seen = new Set();
+  regex.lastIndex = 0;
+  for (const match of String(sourceText || "").matchAll(regex)) {
+    const raw = String(match && match[0] ? match[0] : "")
+      .replace(/^[,;|\s]+|[,;|\s]+$/g, "")
+      .trim();
+    if (!raw) continue;
+    const key = raw.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(raw);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function compactPacketTextInsights(ev, summaryText) {
+  const sourceText = `${String(summaryText || "")} ; ${eventPrefixText(ev)} ; ${eventDecodedSignalText(ev)}`;
+  const items = [];
+  const seen = new Set();
+  const add = (kind, prefix, value, maxLen = 58) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    const key = `${kind}:${text.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({
+      kind,
+      text: `${prefix} ${compactText(text, maxLen)}`,
+      title: text,
+    });
+  };
+
+  for (const value of collectPacketSignalMatches(sourceText, PACKET_FILE_REFERENCE_REGEX, 2)) {
+    add("file", "文件", value, 48);
+  }
+  for (const value of collectPacketSignalMatches(sourceText, PACKET_STATE_REFERENCE_REGEX, 1)) {
+    add("state", "状态", value, 58);
+  }
   const deviceMatch = sourceText.match(/model:[^;\s|]+(?:;ver:[^;\s|]+)?(?:;inc_id:[^;\s|]+)?(?:;obf_id:[^;\s|]+)?/i);
   if (deviceMatch) {
-    return {
-      text: `设备 ${compactText(deviceMatch[0], 58)}`,
-      title: deviceMatch[0],
-    };
+    add("device", "设备", deviceMatch[0], 58);
   }
-  const pathMatch = sourceText.match(/\b(?:mrpcs?|mrcp)[\w.-]*\.data\b|\b(?:config2|config3|comm)\.(?:dat|zip)\b/i);
-  if (pathMatch) {
-    return {
-      text: `文件 ${compactText(pathMatch[0], 42)}`,
-      title: pathMatch[0],
-    };
-  }
-  return null;
+  return items;
 }
 
 function compactChildInsight(summaryText) {
@@ -3313,14 +3506,14 @@ function buildSummaryInsightStrip(ev, summaryText) {
   const candidates = [
     compactPacketSemanticInsight(ev),
     compactTimeInsight(summaryText),
-    compactDeviceInsight(ev, summaryText),
+    ...compactPacketTextInsights(ev, summaryText),
     compactChildInsight(summaryText),
     compactTypeInsight(summaryText),
   ].filter(Boolean);
   if (candidates.length <= 0) return null;
   const strip = document.createElement("span");
   strip.className = "summary-insights";
-  for (const item of candidates.slice(0, 4)) {
+  for (const item of candidates.slice(0, 5)) {
     const chip = document.createElement("span");
     chip.className = `summary-insight-chip${item.kind ? ` summary-insight-${item.kind}` : ""}`;
     chip.textContent = item.text;
@@ -4238,7 +4431,7 @@ function childActionSummaryCounts(summaryText) {
     if (code === "KEEP") counts.keep += 1;
     else if (code === "CLEAN") counts.clean += 1;
     else if (code === "DROP") counts.drop += 1;
-    else if (["SL", "FS", "VL", "F11", "CR", "BLK", "ND", "R11"].includes(code)) counts.replace += 1;
+    else if (["SL", "FS", "VL", "F11", "CR", "BLK", "ND", "R11", "REQ11"].includes(code)) counts.replace += 1;
   }
   return counts;
 }
@@ -4273,6 +4466,7 @@ function childActionLabel(action, result = null) {
     BLK: "黑名单安全替换",
     ND: "非设备安全替换",
     R11: "稀有叶子",
+    REQ11: "0x11标志修补",
     KEEP: "保留目标",
     CLEAN: "兜底清理",
     DROP: "删除目标",
@@ -4316,7 +4510,7 @@ function compactSemanticSignal(text) {
     const idx = raw.search(/dylib|framework|usr\/lib|privateframework|\.so\b/i);
     if (idx >= 0) add(shortenText(raw.slice(Math.max(0, idx - 36), idx + 84), 120));
   }
-  for (const match of raw.matchAll(/(?:mrpcs?|mrcp)[\w.-]*|tersafe|config2\.dat|config3\.dat|comm\.zip/gi)) {
+  for (const match of raw.matchAll(/(?:mrpcs?|mrcp|mrp)[\w.-]*(?:\.(?:data|dat|cfg|zip|bin))?|tersafe|config2\.dat|config3\.dat|comm\.zip/gi)) {
     add(match[0]);
   }
   if (matches.length > 0) return matches.slice(0, 6).join(" | ");
@@ -4412,7 +4606,7 @@ function childRuleAnnotations(beforeChild, afterChild, action) {
   const semanticText = [mergedChildSemanticText(beforeChild, afterChild), action && action.reason]
     .join(" ")
     .toLowerCase();
-  if (/\bmrp\b|\bmrpcs\b|\bmrcp\b|mrpcs_i\.data/.test(semanticText)) add("mrp/mrpcs/mrcp：高级白名单规则");
+  if (/\bmrp\b|\bmrpcs\b|\bmrcp\b|mrpcs_i|mrpcs_i_vv\.data/.test(semanticText)) add("mrp/mrpcs/mrcp：高级白名单规则");
   if (/tersafe|config2\.dat|config3\.dat|comm\.zip/.test(semanticText)) {
     add("tersafe/config2.dat/config3.dat/comm.zip：高级白名单规则");
   }
@@ -4476,6 +4670,7 @@ function compactText(text, maxLen = 90) {
 function childDecisionText(kind, result) {
   const resultText = result && result.label ? result.label : "";
   if (kind === "replace") return `找到 source，执行安全替换${resultText ? ` / ${resultText}` : ""}`;
+  if (kind === "patch") return `本地规则修补${resultText ? ` / ${resultText}` : ""}`;
   if (kind === "clean") return `未找到安全 source，执行兜底清理${resultText ? ` / ${resultText}` : ""}`;
   if (kind === "keep") return `保护保留${resultText ? ` / ${resultText}` : ""}`;
   if (kind === "drop") return "删除该 child";
@@ -4497,6 +4692,7 @@ function childActionKind(actionCode, reason = "") {
   if (value === "KEEP") return "keep";
   if (value === "CLEAN") return "clean";
   if (value === "DROP") return "drop";
+  if (value === "REQ11") return "patch";
   if (
     value === "SL"
     || value === "FS"
@@ -4518,6 +4714,7 @@ function childActionObservation(action, result) {
   const resultText = result && result.label ? result.label : "";
   if (kind === "neutral") return `观察：目标已是中和/清理形态，before/after ${resultText || "一致"}，不需要重复修改`;
   if (kind === "keep") return `观察：命中保护/白名单，保留目标；字节结果 ${resultText || "未变化"}`;
+  if (kind === "patch") return `观察：0102000a 运行态叶子执行请求标志 0x11->0x01 修补；字节结果 ${resultText || "已处理"}`;
   if (kind === "clean") return `观察：命中清理/兜底规则，已清理高风险字段；字节结果 ${resultText || "已处理"}`;
   if (kind === "drop") return "观察：规则判断为删除该 child";
   if (kind === "replace") return `观察：命中可用录制源，执行替换/重组；字节结果 ${resultText || "已处理"}`;
@@ -4528,6 +4725,7 @@ function childActionBadgeText(action, result) {
   const kind = childActionKind(action && action.action, action && action.reason);
   if (kind === "neutral") return "已清理形态";
   if (kind === "keep") return "保护保留";
+  if (kind === "patch") return "标志修补";
   if (kind === "clean") return "兜底清理";
   if (kind === "drop") return "删除";
   if (kind === "replace") return "替换";
@@ -4775,6 +4973,10 @@ function ensureChildCommonStyles() {
     .child-decision-replace {
       border-color: color-mix(in srgb, #22c55e 62%, var(--line));
       color: color-mix(in srgb, #22c55e 82%, var(--text));
+    }
+    .child-decision-patch {
+      border-color: color-mix(in srgb, #38bdf8 62%, var(--line));
+      color: color-mix(in srgb, #38bdf8 82%, var(--text));
     }
     .child-decision-clean,
     .child-decision-drop,
@@ -6568,6 +6770,38 @@ function childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes) {
   return { label: "结果一样", kind: "same", diff };
 }
 
+function isRequestFlagPatchDiff(beforeChild, afterChild, beforeBytes, afterBytes, result, summaryKv = null) {
+  const beforeReport = parseReportCodeNumber(beforeChild && beforeChild.reportCode);
+  const afterReport = parseReportCodeNumber(afterChild && afterChild.reportCode);
+  if (beforeReport !== 0x0102000a || afterReport !== 0x0102000a) return false;
+  const left = Array.isArray(beforeBytes) ? beforeBytes : [];
+  const right = Array.isArray(afterBytes) ? afterBytes : [];
+  if (left.length <= 0 || left.length !== right.length) return false;
+  const diff = result && result.diff ? result.diff : countChangedBytes(left, right);
+  if (Number(diff.lenDelta || 0) !== 0 || Number(diff.changed || 0) <= 0 || Number(diff.changed || 0) > 2) {
+    return false;
+  }
+  const changedOffsets = [];
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) changedOffsets.push(i);
+  }
+  if (!changedOffsets.length || !changedOffsets.every((offset) => left[offset] === 0x00 && right[offset] === 0x01)) {
+    return false;
+  }
+  const mode = String(summaryKv && summaryKv.mode ? summaryKv.mode : "").trim();
+  if (mode === "child_request_flag_0x11_patch") return true;
+  return changedOffsets.some((offset) => offset === 0x11);
+}
+
+function requestFlagPatchAction(beforeChild, afterChild) {
+  return {
+    action: "REQ11",
+    reason: "child_request_flag_0x11_patch",
+    source: "",
+    report: childReportText(afterChild || beforeChild),
+  };
+}
+
 function childReportText(child) {
   if (!child || child.truncated || child.reportCode === null || child.reportCode === undefined) return "-";
   return formatHexValue(child.reportCode, 8);
@@ -6628,8 +6862,11 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   const beforeBytes = childBytesFromParsed(beforeBytesAll, beforeChild);
   const afterBytes = childBytesFromParsed(afterBytesAll, afterChild);
   const result = childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes);
-  const action = (actionMap instanceof Map ? actionMap.get(index) : null)
+  let action = (actionMap instanceof Map ? actionMap.get(index) : null)
     || inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild);
+  if (isRequestFlagPatchDiff(beforeChild, afterChild, beforeBytes, afterBytes, result, summaryKv)) {
+    action = requestFlagPatchAction(beforeChild, afterChild);
+  }
   const nodeLabel = childNodeName(afterChild || beforeChild || { index });
   const ruleText = childRuleAnnotations(beforeChild, afterChild, action);
   const ruleCompact = compactRuleText(ruleText);
@@ -7081,16 +7318,33 @@ function getEventAnalysis(ev) {
   if (!summaryText) {
     return null;
   }
-  const cacheKey = `${getEventId(ev)}|${String(ev?.summary || "")}|${String(ev?.pay || "").length}|${String(ev?.full_pay || "").length}`;
+  const cacheKey = [
+    getEventId(ev),
+    String(ev?.summary || ""),
+    String(ev?.pay || "").length,
+    String(ev?.before_pay || "").length,
+    String(ev?.full_pay || "").length,
+    String(ev?.raw_pay || "").length,
+  ].join("|");
   if (ev && ev.__tcpvAnalysisKey === cacheKey && ev.__tcpvAnalysis) {
     return ev.__tcpvAnalysis;
   }
   const decodedBytes = b64ToBytes(String(ev && ev.pay ? ev.pay : ""));
+  const beforeBytes = b64ToBytes(String(ev && ev.before_pay ? ev.before_pay : ""));
   const fullBytes = b64ToBytes(String(ev && ev.full_pay ? ev.full_pay : ""));
   const summary = parseTssSummary(ev && ev.summary ? ev.summary : "");
   const decodedStrings = extractPrintableRuns(decodedBytes, ANALYSIS_ASCII_MIN_LEN, ANALYSIS_ASCII_MAX_ITEMS);
   const decodedUtf8Strings = extractUtf8Runs(decodedBytes, ANALYSIS_UTF8_MIN_CHARS, ANALYSIS_UTF8_MAX_ITEMS);
   const decodedBase64Strings = extractBase64DecodedRuns(decodedBytes, ANALYSIS_BASE64_MAX_ITEMS);
+  const beforeStrings = beforeBytes.length > 0
+    ? extractPrintableRuns(beforeBytes, ANALYSIS_ASCII_MIN_LEN, ANALYSIS_ASCII_MAX_ITEMS)
+    : [];
+  const beforeUtf8Strings = beforeBytes.length > 0
+    ? extractUtf8Runs(beforeBytes, ANALYSIS_UTF8_MIN_CHARS, ANALYSIS_UTF8_MAX_ITEMS)
+    : [];
+  const beforeBase64Strings = beforeBytes.length > 0
+    ? extractBase64DecodedRuns(beforeBytes, ANALYSIS_BASE64_MAX_ITEMS)
+    : [];
   const fullStrings =
     fullBytes.length > 0 && String(ev && ev.full_pay ? ev.full_pay : "") !== String(ev && ev.pay ? ev.pay : "")
       ? extractPrintableRuns(fullBytes, 6, 6)
@@ -7108,6 +7362,9 @@ function getEventAnalysis(ev) {
     decodedStrings,
     decodedUtf8Strings,
     decodedBase64Strings,
+    beforeStrings,
+    beforeUtf8Strings,
+    beforeBase64Strings,
     fullStrings,
     fullUtf8Strings,
     xor: xor || (summary && summary.xor ? summary.xor : null),
@@ -7200,6 +7457,34 @@ function appendAnalysisStringList(container, items, options = {}) {
   container.appendChild(list);
 }
 
+function collectAnalysisStringItems(...groups) {
+  const out = [];
+  const seen = new Set();
+  for (const group of groups) {
+    for (const item of Array.isArray(group) ? group : []) {
+      const text = String(item && item.text ? item.text : "").trim();
+      if (!text) continue;
+      const off = Number(item && item.off);
+      const key = `${Number.isFinite(off) ? off : ""}:${text}:${String(item && item.kind ? item.kind : "")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function appendAnalysisStringSide(container, title, items, source) {
+  const side = document.createElement("div");
+  side.className = `analysis-string-side analysis-string-side-${source || "current"}`;
+  const label = document.createElement("div");
+  label.className = "analysis-string-side-label";
+  label.textContent = title;
+  side.appendChild(label);
+  appendAnalysisStringList(side, items, { source });
+  container.appendChild(side);
+}
+
 function appendAnalysisHint(container, text) {
   const note = document.createElement("div");
   note.className = "analysis-note";
@@ -7267,6 +7552,26 @@ function buildEventAnalysisGrid(ev) {
     appendAnalysisEmpty(xorCard.body, "当前切片没有命中明显的单字节 XOR 文本特征。");
   }
   grid.appendChild(xorCard.card);
+
+  const beforeStringItems = collectAnalysisStringItems(
+    analysis.beforeStrings,
+    analysis.beforeUtf8Strings,
+    analysis.beforeBase64Strings
+  );
+  const afterStringItems = collectAnalysisStringItems(
+    analysis.decodedStrings,
+    analysis.decodedUtf8Strings,
+    analysis.decodedBase64Strings
+  );
+  if (beforeStringItems.length > 0 || afterStringItems.length > 0) {
+    const stringCard = createAnalysisCard("字符串", "analysis-card-strings");
+    const compare = document.createElement("div");
+    compare.className = "analysis-string-compare";
+    appendAnalysisStringSide(compare, "修改前", beforeStringItems, "before");
+    appendAnalysisStringSide(compare, "修改后", afterStringItems, "after");
+    stringCard.body.appendChild(compare);
+    grid.appendChild(stringCard.card);
+  }
 
   return grid;
 }
@@ -7344,26 +7649,35 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
   const decodedPay = String(ev && ev.pay ? ev.pay : "");
+  const rawAfterPay = String(ev && ev.raw_pay ? ev.raw_pay : "");
   const hasFullDump = !!fullPay;
   const hasBeforeDump = !!beforePay;
-	  const hasDecodedDump = !!decodedPay;
-	  const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
-	  const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
-	  const isRequest = Number(ev && ev.dir) === 0;
-	  const isDecodedRequest = isRequest && isDecodedFlowEvent(ev, summaryText) && (hasFullDump || hasBeforeDump || hasDecodedDump);
-	  const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
-	    ? buildChangedOffsetSet(beforePay, decodedPay)
-	    : null;
+  const hasRawAfterDump = !!rawAfterPay;
+  const hasDecodedDump = !!decodedPay;
+  const fullDumpSameAsDecoded = hasFullDump && hasDecodedDump && fullPay === decodedPay;
+  const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
+  const isRequest = Number(ev && ev.dir) === 0;
+  const isDecodedRequest = isRequest && isDecodedFlowEvent(ev, summaryText) && (hasFullDump || hasBeforeDump || hasDecodedDump);
+  const showRawCompare =
+    isDecodedRequest
+    && currentFlowLooksLikePort8092(ev, summaryText)
+    && hasFullDump
+    && hasRawAfterDump
+    && fullPay !== rawAfterPay;
+  const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
+    ? buildChangedOffsetSet(beforePay, decodedPay)
+    : null;
 
 	  if (isDecodedRequest) {
 	    const timeStrip = buildEventTimestampStrip(summaryText, beforePay, decodedPay);
 	    if (timeStrip) body.appendChild(timeStrip);
 	  }
 
-	  const dumpGrid = document.createElement("div");
-	  dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
-	  if (isDecodedRequest) dumpGrid.classList.add("dump-grid-decrypted");
-	  body.appendChild(dumpGrid);
+  const dumpGrid = document.createElement("div");
+  dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
+  if (isDecodedRequest) dumpGrid.classList.add("dump-grid-decrypted");
+  if (showRawCompare) dumpGrid.classList.add("has-raw-compare");
+  body.appendChild(dumpGrid);
   let semanticCompareAdded = false;
 
   function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
@@ -7372,9 +7686,14 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const panel = document.createElement(collapsed ? "details" : "section");
     panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
     if (collapsed && dumpOptions.open) panel.open = true;
+    const isRawSource = sourceKey === "full" || sourceKey === "raw_after";
     const timestampHighlights =
-      sourceKey === "full" ? [] : collectTimestampHighlightsForPayload(base64Text);
-    const semanticInfo = sourceKey === "full" ? null : collectPacketSemanticInfoForPayload(base64Text);
+      isRawSource ? [] : collectTimestampHighlightsForPayload(base64Text);
+    const idfvHighlights =
+      !isRawSource && currentFlowLooksLikePort8092(ev, summaryText)
+        ? collectIdfvHighlightsForPayload(base64Text)
+        : [];
+    const semanticInfo = isRawSource ? null : collectPacketSemanticInfoForPayload(base64Text);
     const timestampSummary = summarizeTimestampHighlights(timestampHighlights);
 
     const sectionTitle = document.createElement(collapsed ? "summary" : "div");
@@ -7400,6 +7719,13 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       timestampChip.title = timestampSummary;
       sectionTitle.appendChild(timestampChip);
     }
+    if (idfvHighlights.length > 0) {
+      const idfvChip = document.createElement("span");
+      idfvChip.className = "dump-label-note dump-label-idfv";
+      idfvChip.textContent = `IDFV×${idfvHighlights.length}`;
+      idfvChip.title = summarizeIdfvHighlights(idfvHighlights);
+      sectionTitle.appendChild(idfvChip);
+    }
     if (collapsed) {
       const foldNote = document.createElement("span");
       foldNote.className = "dump-label-note";
@@ -7414,9 +7740,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       buildTimestampAnnotationIndex(timestampHighlights, getBytesPerRow())
     );
     const dump = formatHexDump(base64Text, hideAscii, annotationIndex, {
-      compactAscii: sourceKey === "full",
+      compactAscii: isRawSource,
       changedOffsets: dumpOptions.changedOffsets || null,
       timestampRanges: timestampHighlights,
+      idfvRanges: idfvHighlights,
     });
     const hexShell = document.createElement("div");
     hexShell.className = "hex-shell";
@@ -7450,14 +7777,34 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     dumpGrid.appendChild(panel);
   }
 
-	  if (isRequest) {
-	    if (hasFullDump) {
-	      appendDumpSection("原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full", {
-	        collapsed: isDecodedRequest,
-	        foldNote: "raw 参考",
-	      });
-	    } else {
+  if (isRequest) {
+    if (hasFullDump) {
+      appendDumpSection(
+        showRawCompare ? "修改前加密 [raw before]" : "原始封包 [raw]",
+        fullPay,
+        ev.full_len,
+        "dump-panel-full",
+        "full",
+        {
+          collapsed: isDecodedRequest,
+          foldNote: showRawCompare ? "修改前" : "raw 参考",
+        }
+      );
+    } else {
       appendEmptyDumpSection("原始封包 [raw]", "当前事件没有 full_pay，无法显示完整原始封包。", "dump-panel-full");
+    }
+    if (showRawCompare) {
+      appendDumpSection(
+        "修改后加密 [raw after]",
+        rawAfterPay,
+        ev.raw_len,
+        "dump-panel-raw-after",
+        "raw_after",
+        {
+          collapsed: true,
+          foldNote: "8092 after",
+        }
+      );
     }
     if (hasBeforeDump) {
       appendDumpSection("修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
@@ -7496,8 +7843,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
   }
 
-	  if (isRequest && (hasBeforeDump || hasDecodedDump) && !isDecodedRequest) {
-	    const stringResult = buildStringResultPanel(beforePay, decodedPay, summaryText);
+  if (isRequest && (hasBeforeDump || hasDecodedDump)) {
+    const stringResult = buildStringResultPanel(beforePay, decodedPay, summaryText);
     if (stringResult) {
       stringResult.classList.add("string-result-inline");
       dumpGrid.classList.add("has-string-results");
@@ -7563,6 +7910,10 @@ function applyEventPayloadDetail(ev, detail) {
   const beforeLen = Number(detail.before_len);
   if (Number.isFinite(beforeLen)) ev.before_len = beforeLen;
   if (detail.before_pfx !== undefined) ev.before_pfx = String(detail.before_pfx || "");
+  if (detail.raw_pay !== undefined) ev.raw_pay = String(detail.raw_pay || "");
+  const rawLen = Number(detail.raw_len);
+  if (Number.isFinite(rawLen)) ev.raw_len = rawLen;
+  if (detail.raw_pfx !== undefined) ev.raw_pfx = String(detail.raw_pfx || "");
   if (detail.pfx) ev.pfx = String(detail.pfx);
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
@@ -7587,9 +7938,16 @@ async function ensureEventPayload(ev, account, eventId) {
   }
   const hasPayload = !!String(ev.pay || "");
   const isRequest = Number(ev.dir) === 0;
+  const summaryText = String(ev && ev.summary ? ev.summary : "");
+  const needsRawPayload =
+    isRequest
+    && isDecodedFlowEvent(ev, summaryText)
+    && currentFlowLooksLikePort8092(ev, summaryText)
+    && !String(ev.raw_pay || "")
+    && !ev.__tcpvPayloadDetailFetched;
   const needsFullPayload = !String(ev.full_pay || "");
   const needsBeforePayload = isRequest && !String(ev.before_pay || "") && !ev.__tcpvPayloadDetailFetched;
-  if (hasPayload && !needsFullPayload && !needsBeforePayload) {
+  if (hasPayload && !needsFullPayload && !needsBeforePayload && !needsRawPayload) {
     return ev;
   }
 
@@ -7601,12 +7959,15 @@ async function ensureEventPayload(ev, account, eventId) {
 
   const cached = readPayloadCache(accountText, idText);
   const cachedHasNeededBefore = !needsBeforePayload || !!String(cached && cached.before_pay ? cached.before_pay : "");
-  if (cached && cachedHasNeededBefore && applyEventPayloadDetail(ev, cached)) {
+  const cachedHasNeededRaw = !needsRawPayload || !!String(cached && cached.raw_pay ? cached.raw_pay : "");
+  if (cached && cachedHasNeededBefore && cachedHasNeededRaw && applyEventPayloadDetail(ev, cached)) {
     ev.__tcpvPayloadDetailFetched = true;
     return ev;
   }
 
-  const detail = needsBeforePayload ? await apiGetEvent(accountText, idText) : await fetchEventPayload(accountText, idText);
+  const detail = (needsBeforePayload || needsRawPayload)
+    ? await apiGetEvent(accountText, idText)
+    : await fetchEventPayload(accountText, idText);
   if (!applyEventPayloadDetail(ev, detail)) {
     throw new Error("event payload is empty");
   }
@@ -7939,6 +8300,7 @@ function renderEvents() {
     tailSpan.title = `seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
     summary.appendChild(tailSpan);
     syncSummaryTimestampBadge(summary, ev);
+    syncSummaryIdfvBadge(summary, ev, summaryText);
 
     wrap.appendChild(summary);
     let prefetchTimer = 0;
@@ -7977,6 +8339,7 @@ function renderEvents() {
         await ensureEventPayload(ev, flowIdAtStart, eventId);
         if (!wrap.isConnected || state.flowId !== flowIdAtStart) return;
         syncSummaryTimestampBadge(summary, ev);
+        syncSummaryIdfvBadge(summary, ev, summaryText);
         if (loading.isConnected) loading.remove();
         const bodyNode = buildEventBody(ev, hideAscii, eventId);
         wrap.appendChild(bodyNode);
