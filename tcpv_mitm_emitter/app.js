@@ -2386,7 +2386,7 @@ function collectIdfvHighlightsFromBytes(byteValues) {
       valueStart: sepIndex >= 0 ? start + sepIndex + 1 : start,
       valueEnd: start + raw.length,
       uuid,
-      text: `IDFV ${uuid || raw} @${formatHexValue(start)}`,
+      text: `iDevIDFV ${uuid || raw} @${formatHexValue(start)}`,
     });
   }
   return ranges;
@@ -2413,7 +2413,7 @@ function collectHistoryOpenidHighlightsFromBytes(byteValues) {
       valueStart: sepIndex >= 0 ? start + sepIndex + 1 : start,
       valueEnd: start + raw.length,
       value,
-      text: `History ${value || raw} @${formatHexValue(start)}`,
+      text: `HistoryOpenID ${value || raw} @${formatHexValue(start)}`,
     });
   }
   return ranges;
@@ -2463,7 +2463,7 @@ function summarizeTimestampHighlights(ranges) {
 
 function summarizeIdfvHighlights(ranges) {
   const items = Array.isArray(ranges) ? ranges : [];
-  if (items.length <= 0) return "8092 iDevIDFV 已替换";
+  if (items.length <= 0) return "iDevIDFV 已标注";
   const seen = new Set();
   const shown = [];
   for (const item of items) {
@@ -2474,12 +2474,12 @@ function summarizeIdfvHighlights(ranges) {
     if (shown.length >= 2) break;
   }
   const suffix = items.length > shown.length ? `, ...x${items.length}` : "";
-  return shown.length > 0 ? `IDFV ${shown.join(" / ")}${suffix}` : `IDFV x${items.length}`;
+  return shown.length > 0 ? `iDevIDFV ${shown.join(" / ")}${suffix}` : `iDevIDFV x${items.length}`;
 }
 
 function summarizeHistoryOpenidHighlights(ranges) {
   const items = Array.isArray(ranges) ? ranges : [];
-  if (items.length <= 0) return "8092 HistoryOpenID 已替换";
+  if (items.length <= 0) return "HistoryOpenID 已标注";
   const seen = new Set();
   const shown = [];
   for (const item of items) {
@@ -2490,7 +2490,7 @@ function summarizeHistoryOpenidHighlights(ranges) {
     if (shown.length >= 3) break;
   }
   const suffix = items.length > shown.length ? `, ...x${items.length}` : "";
-  return shown.length > 0 ? `History ${shown.join(" / ")}${suffix}` : `History x${items.length}`;
+  return shown.length > 0 ? `HistoryOpenID ${shown.join(" / ")}${suffix}` : `HistoryOpenID x${items.length}`;
 }
 
 function getEventTimestampHighlights(ev) {
@@ -2517,7 +2517,6 @@ function getEventTimestampHighlights(ev) {
 }
 
 function getEventIdfvHighlights(ev, summaryText = "") {
-  if (!currentFlowLooksLikePort8092(ev, summaryText)) return [];
   const eventId = getEventId(ev);
   const key = `${eventId}|${String(summaryText || "").length}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
   if (ev && ev.__tcpvIdfvCacheKey === key && Array.isArray(ev.__tcpvIdfvHighlights)) {
@@ -2543,7 +2542,6 @@ function getEventIdfvHighlights(ev, summaryText = "") {
 }
 
 function getEventHistoryOpenidHighlights(ev, summaryText = "") {
-  if (!currentFlowLooksLikePort8092(ev, summaryText)) return [];
   const eventId = getEventId(ev);
   const key = `${eventId}|${String(summaryText || "").length}|${String(ev && ev.pay ? ev.pay : "").length}|${String(ev && ev.before_pay ? ev.before_pay : "").length}`;
   if (ev && ev.__tcpvHistoryOpenidCacheKey === key && Array.isArray(ev.__tcpvHistoryOpenidHighlights)) {
@@ -2592,14 +2590,13 @@ function syncSummaryIdfvBadge(summaryNode, ev, summaryText = "") {
   for (const node of summaryNode.querySelectorAll(".summary-idfv")) {
     node.remove();
   }
-  if (!currentFlowLooksLikePort8092(ev, summaryText)) return;
   const summaryCount = Number.parseInt(readSummaryValue(summaryText, "idfv") || "0", 10);
   const idfvHighlights = getEventIdfvHighlights(ev, summaryText);
   const count = Math.max(Number.isFinite(summaryCount) ? summaryCount : 0, idfvHighlights.length);
   if (count <= 0) return;
   const idfvSpan = document.createElement("span");
   idfvSpan.className = "summary-idfv";
-  idfvSpan.textContent = `IDFV×${count}`;
+  idfvSpan.textContent = `iDevIDFV×${count}`;
   idfvSpan.title = summarizeIdfvHighlights(idfvHighlights);
   const tail = summaryNode.querySelector(".summary-tail");
   if (tail) {
@@ -2614,14 +2611,13 @@ function syncSummaryHistoryOpenidBadge(summaryNode, ev, summaryText = "") {
   for (const node of summaryNode.querySelectorAll(".summary-history-openid")) {
     node.remove();
   }
-  if (!currentFlowLooksLikePort8092(ev, summaryText)) return;
   const summaryCount = Number.parseInt(readSummaryValue(summaryText, "history") || "0", 10);
   const historyHighlights = getEventHistoryOpenidHighlights(ev, summaryText);
   const count = Math.max(Number.isFinite(summaryCount) ? summaryCount : 0, historyHighlights.length);
   if (count <= 0) return;
   const historySpan = document.createElement("span");
   historySpan.className = "summary-history-openid";
-  historySpan.textContent = `History×${count}`;
+  historySpan.textContent = `HistoryOpenID×${count}`;
   historySpan.title = summarizeHistoryOpenidHighlights(historyHighlights);
   const tail = summaryNode.querySelector(".summary-tail");
   if (tail) {
@@ -7792,11 +7788,11 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const timestampHighlights =
       isRawSource ? [] : collectTimestampHighlightsForPayload(base64Text);
     const idfvHighlights =
-      !isRawSource && currentFlowLooksLikePort8092(ev, summaryText)
+      !isRawSource
         ? collectIdfvHighlightsForPayload(base64Text)
         : [];
     const historyHighlights =
-      !isRawSource && currentFlowLooksLikePort8092(ev, summaryText)
+      !isRawSource
         ? collectHistoryOpenidHighlightsForPayload(base64Text)
         : [];
     const semanticInfo = isRawSource ? null : collectPacketSemanticInfoForPayload(base64Text);
@@ -7828,14 +7824,14 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     if (idfvHighlights.length > 0) {
       const idfvChip = document.createElement("span");
       idfvChip.className = "dump-label-note dump-label-idfv";
-      idfvChip.textContent = `IDFV×${idfvHighlights.length}`;
+      idfvChip.textContent = `iDevIDFV×${idfvHighlights.length}`;
       idfvChip.title = summarizeIdfvHighlights(idfvHighlights);
       sectionTitle.appendChild(idfvChip);
     }
     if (historyHighlights.length > 0) {
       const historyChip = document.createElement("span");
       historyChip.className = "dump-label-note dump-label-history-openid";
-      historyChip.textContent = `History×${historyHighlights.length}`;
+      historyChip.textContent = `HistoryOpenID×${historyHighlights.length}`;
       historyChip.title = summarizeHistoryOpenidHighlights(historyHighlights);
       sectionTitle.appendChild(historyChip);
     }
