@@ -1276,6 +1276,49 @@ function normalizeDumpAnnotationText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+function splitDumpAnnotationLines(text) {
+  return String(text || "")
+    .split(/\n\s*(?:(?=\/\/)|\/\/\s*)?/)
+    .map((part) => normalizeDumpAnnotationText(part.replace(/^\/\/\s*/, "")))
+    .filter(Boolean);
+}
+
+function canonicalDumpAnnotationKey(text) {
+  const normalized = normalizeDumpAnnotationText(text);
+  const state = normalized.match(/\bstate[:=]([^,\s]+)(?:[, ]+r[:=]([^,\s]+))?(?:[, ]+p[:=]([^,\s]+))?/i);
+  if (state) {
+    return [
+      "state",
+      String(state[1] || "").toLowerCase(),
+      String(state[2] || "").toLowerCase(),
+      String(state[3] || "").toLowerCase(),
+    ].join("|");
+  }
+  return normalized.toLowerCase();
+}
+
+function addDumpAnnotationLine(bucket, text, maxLines = 4) {
+  const line = normalizeDumpAnnotationText(text);
+  if (!line) return;
+  const key = canonicalDumpAnnotationKey(line);
+  for (let index = 0; index < bucket.length; index += 1) {
+    const existing = bucket[index];
+    const existingKey = canonicalDumpAnnotationKey(existing);
+    if (existingKey === key) {
+      if (line.length > existing.length) bucket[index] = line;
+      return;
+    }
+    const lowerLine = line.toLowerCase();
+    const lowerExisting = existing.toLowerCase();
+    if (lowerExisting.includes(lowerLine)) return;
+    if (lowerLine.includes(lowerExisting)) {
+      bucket[index] = line;
+      return;
+    }
+  }
+  if (bucket.length < maxLines) bucket.push(line);
+}
+
 function trimPrintableRunPrefix(start, text, minLen = ANALYSIS_ASCII_MIN_LEN) {
   let off = Number(start || 0);
   let current = String(text || "");
@@ -1328,8 +1371,7 @@ function buildDumpAnnotationIndex(items, bytesPerRow) {
     if (!Number.isFinite(off) || off < 0 || !rawText) continue;
     const rowBase = Math.floor(off / width) * width;
     const bucket = grouped.get(rowBase) || [];
-    if (bucket.includes(rawText) || bucket.length >= 2) continue;
-    bucket.push(rawText);
+    addDumpAnnotationLine(bucket, rawText, 2);
     grouped.set(rowBase, bucket);
   }
   return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
@@ -1340,10 +1382,13 @@ function mergeDumpAnnotationIndexes(...indexes) {
   for (const index of indexes) {
     if (!(index instanceof Map)) continue;
     for (const [rowBase, text] of index.entries()) {
-      const normalized = normalizeDumpAnnotationText(text);
-      if (!normalized) continue;
-      const previous = normalizeDumpAnnotationText(merged.get(rowBase) || "");
-      merged.set(rowBase, previous ? `${previous}\n// ${normalized}` : normalized);
+      const lines = splitDumpAnnotationLines(text);
+      if (lines.length <= 0) continue;
+      const bucket = splitDumpAnnotationLines(merged.get(rowBase) || "");
+      for (const line of lines) {
+        addDumpAnnotationLine(bucket, line, 4);
+      }
+      if (bucket.length > 0) merged.set(rowBase, bucket.join("\n// "));
     }
   }
   return merged;
@@ -1387,8 +1432,7 @@ function buildTimestampAnnotationIndex(items, bytesPerRow) {
     if (!Number.isFinite(off) || off < 0 || !text) continue;
     const rowBase = Math.floor(off / width) * width;
     const bucket = grouped.get(rowBase) || [];
-    if (bucket.includes(text) || bucket.length >= 3) continue;
-    bucket.push(text);
+    addDumpAnnotationLine(bucket, text, 3);
     grouped.set(rowBase, bucket);
   }
   return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
@@ -2324,7 +2368,7 @@ function buildPacketSemanticAnnotationIndex(info, bytesPerRow) {
     if (!Number.isFinite(off) || off < 0 || !text) continue;
     const rowBase = Math.floor(off / width) * width;
     const bucket = grouped.get(rowBase) || [];
-    if (!bucket.includes(text) && bucket.length < 3) bucket.push(text);
+    addDumpAnnotationLine(bucket, text, 3);
     grouped.set(rowBase, bucket);
   }
   return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
@@ -2441,6 +2485,58 @@ function collectTimestampHighlightsFromBytes(byteValues) {
 function collectTimestampHighlightsForPayload(base64Text) {
   const bytes = b64ToBytes(base64Text);
   return collectTimestampHighlightsFromBytes(bytes);
+}
+
+function mergeTimestampHighlightItems(...groups) {
+  const byStart = new Map();
+  for (const group of groups) {
+    for (const item of Array.isArray(group) ? group : []) {
+      const start = Number(item && item.start);
+      const end = Number(item && item.end);
+      if (!Number.isFinite(start) || start < 0 || !Number.isFinite(end) || end <= start) continue;
+      const previous = byStart.get(start);
+      if (!previous) {
+        byStart.set(start, item);
+        continue;
+      }
+      const previousText = String(previous && previous.text ? previous.text : "");
+      const text = String(item && item.text ? item.text : "");
+      const previousCandidate = /候选/.test(previousText);
+      const currentCandidate = /候选/.test(text);
+      if (previousCandidate && !currentCandidate) byStart.set(start, item);
+    }
+  }
+  return Array.from(byStart.values()).sort((a, b) => Number(a.start) - Number(b.start));
+}
+
+function collectChildTimestampHighlightsForPayload(base64Text, summaryText = "") {
+  const bytes = b64ToBytes(base64Text);
+  if (!Array.isArray(bytes) || bytes.length <= 0) return [];
+  const nodes = comparableNodesFromBytes(bytes);
+  if (!Array.isArray(nodes) || nodes.length <= 0) return [];
+  const timestampHintMap = parseSummaryChildTimestampHints(summaryText);
+  const out = [];
+  for (const node of nodes) {
+    const childBytes = comparableNodeBytes(bytes, node);
+    if (!Array.isArray(childBytes) || childBytes.length <= 0) continue;
+    const recordStart = Number(childRecordAbsoluteStart(node));
+    if (!Number.isFinite(recordStart) || recordStart < 0) continue;
+    const hints = normalizeChildTimestampHints(node, childBytes, timestampHintMap);
+    const structure = childHexStructure(node, childBytes, { timestampHints: hints });
+    for (const item of Array.isArray(structure.timestamps) ? structure.timestamps : []) {
+      const start = recordStart + Number(item && item.start);
+      const end = recordStart + Number(item && item.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end > bytes.length) continue;
+      const childLabel = Number.isFinite(Number(node && node.index)) ? `child${Number(node.index)}` : "node";
+      out.push({
+        ...item,
+        start,
+        end,
+        text: `${childLabel} ${String(item && item.text ? item.text : "时间戳")}`,
+      });
+    }
+  }
+  return mergeTimestampHighlightItems(out);
 }
 
 function collectIdfvHighlightsFromBytes(byteValues) {
@@ -6907,7 +7003,7 @@ function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", befor
   }
   row.appendChild(makeChildPreviewBox(beforeChild, `${labelBase} 修改前`, "before", beforeBytes, {
     changedOffsets,
-    showInsights: false,
+    showInsights: true,
     timestampHints: beforeTimestampHints,
   }));
   const afterExtra = [];
@@ -7917,7 +8013,12 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     if (collapsed && dumpOptions.open) panel.open = true;
     const isRawSource = sourceKey === "full" || sourceKey === "raw_after";
     const timestampHighlights =
-      isRawSource ? [] : collectTimestampHighlightsForPayload(base64Text);
+      isRawSource
+        ? []
+        : mergeTimestampHighlightItems(
+          collectTimestampHighlightsForPayload(base64Text),
+          collectChildTimestampHighlightsForPayload(base64Text, summaryText)
+        );
     const idfvHighlights =
       !isRawSource
         ? collectIdfvHighlightsForPayload(base64Text)
@@ -8082,15 +8183,6 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     appendDumpSection("响应解密 [decoded]", decodedPay, ev.len, "dump-panel-decoded", "decoded");
   } else {
     appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
-  }
-
-  if (isRequest && (hasBeforeDump || hasDecodedDump)) {
-    const stringResult = buildStringResultPanel(beforePay, decodedPay, summaryText);
-    if (stringResult) {
-      stringResult.classList.add("string-result-inline");
-      dumpGrid.classList.add("has-string-results");
-      dumpGrid.appendChild(stringResult);
-    }
   }
 
   if (isRequest && (hasBeforeDump || hasDecodedDump)) {
