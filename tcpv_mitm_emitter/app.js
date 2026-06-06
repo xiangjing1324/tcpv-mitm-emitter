@@ -229,6 +229,78 @@ function applyBodyTone() {
   rootStyle.setProperty("--hex-accent-color", tone.accent);
 }
 
+function installPreviewSummaryStyles() {
+  const styleId = "tcpv-preview-summary-style";
+  let style = document.getElementById(styleId);
+  if (!style) {
+    style = document.createElement("style");
+    style.id = styleId;
+    document.head.appendChild(style);
+  }
+  style.textContent = `
+    .summary-preview {
+      flex: 0 0 auto;
+      min-width: max-content;
+      overflow: visible;
+    }
+    .summary-insights {
+      flex: 1 1 auto;
+      overflow: visible;
+    }
+    .summary-insight-chip {
+      flex: 0 0 auto;
+      max-width: none;
+      border-color: var(--summary-chip-line, color-mix(in srgb, var(--accent) 42%, var(--line)));
+      background: var(--summary-chip-bg, color-mix(in srgb, var(--accent) 8%, var(--panel)));
+      color: var(--summary-chip-color, color-mix(in srgb, var(--text) 88%, var(--accent)));
+      overflow: visible;
+      text-overflow: clip;
+    }
+    .summary-insight-semantic {
+      --summary-chip-color: var(--hex-idfv-color);
+      --summary-chip-bg: var(--hex-idfv-bg);
+      --summary-chip-line: var(--hex-idfv-line);
+      font-weight: 700;
+    }
+    .summary-insight-device {
+      --summary-chip-color: #7dd3fc;
+      --summary-chip-bg: rgba(14, 165, 233, 0.12);
+      --summary-chip-line: rgba(14, 165, 233, 0.28);
+    }
+    .summary-insight-file {
+      --summary-chip-color: #93c5fd;
+      --summary-chip-bg: rgba(59, 130, 246, 0.12);
+      --summary-chip-line: rgba(59, 130, 246, 0.26);
+    }
+    .summary-insight-state {
+      --summary-chip-color: #86efac;
+      --summary-chip-bg: rgba(34, 197, 94, 0.12);
+      --summary-chip-line: rgba(34, 197, 94, 0.26);
+    }
+    .summary-insight-type {
+      --summary-chip-color: #cbd5e1;
+      --summary-chip-bg: rgba(148, 163, 184, 0.12);
+      --summary-chip-line: rgba(148, 163, 184, 0.22);
+    }
+    .summary-insight-child {
+      --summary-chip-color: #fde68a;
+      --summary-chip-bg: rgba(245, 158, 11, 0.13);
+      --summary-chip-line: rgba(245, 158, 11, 0.26);
+    }
+    .summary-insight-time {
+      --summary-chip-color: var(--hex-timestamp-color);
+      --summary-chip-bg: var(--hex-timestamp-bg);
+      --summary-chip-line: var(--hex-timestamp-line);
+      font-weight: 700;
+    }
+    .preview-hex {
+      max-width: none;
+      overflow: visible;
+      text-overflow: clip;
+    }
+  `;
+}
+
 function normalizeFilterDir(rawDir) {
   const dir = String(rawDir || "").trim().toLowerCase();
   if (dir === "req" || dir === "resp") {
@@ -3527,9 +3599,12 @@ function compactPacketTextInsights(ev, summaryText) {
     const key = `${kind}:${text.toLowerCase()}`;
     if (seen.has(key)) return;
     seen.add(key);
+    const displayText = Number.isFinite(Number(maxLen)) && Number(maxLen) > 0
+      ? compactText(text, Number(maxLen))
+      : text;
     items.push({
       kind,
-      text: `${prefix} ${compactText(text, maxLen)}`,
+      text: `${prefix} ${displayText}`,
       title: text,
     });
   };
@@ -3542,7 +3617,7 @@ function compactPacketTextInsights(ev, summaryText) {
   }
   const deviceMatch = sourceText.match(/model:[^;\s|]+(?:;ver:[^;\s|]+)?(?:;inc_id:[^;\s|]+)?(?:;obf_id:[^;\s|]+)?/i);
   if (deviceMatch) {
-    add("device", "设备", deviceMatch[0], 58);
+    add("device", "设备", deviceMatch[0], 0);
   }
   return items;
 }
@@ -3605,10 +3680,10 @@ function buildSummaryInsightStrip(ev, summaryText) {
   if (!isDecodedFlowEvent(ev, summaryText)) return null;
   const candidates = [
     compactPacketSemanticInsight(ev),
-    compactTimeInsight(summaryText),
     ...compactPacketTextInsights(ev, summaryText),
     compactChildInsight(summaryText),
     compactTypeInsight(summaryText),
+    compactTimeInsight(summaryText),
   ].filter(Boolean);
   if (candidates.length <= 0) return null;
   const strip = document.createElement("span");
@@ -8875,6 +8950,7 @@ if (systemThemeQuery) {
 }
 
 (async function main() {
+  installPreviewSummaryStyles();
   loadRules();
   setupSplitter();
   setupWheelRouting();

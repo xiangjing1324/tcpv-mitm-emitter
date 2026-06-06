@@ -537,46 +537,82 @@ INDEX_HTML = """
     }
 
 	    .summary-preview {
-	      flex: 0 1 36ch;
-	      min-width: 0;
+	      flex: 0 0 auto;
+	      min-width: max-content;
 	      display: flex;
 	      align-items: center;
-	      overflow: hidden;
+	      overflow: visible;
 	      white-space: nowrap;
 	    }
 
 	    .summary-insights {
-	      flex: 2 1 38ch;
+	      flex: 1 1 auto;
 	      min-width: 0;
 	      display: flex;
 	      align-items: center;
 	      gap: 4px;
-	      overflow: hidden;
+	      overflow: visible;
 	      white-space: nowrap;
 	    }
 
 	    .summary-insight-chip {
-	      flex: 0 1 auto;
+	      flex: 0 0 auto;
 	      min-width: 0;
-	      max-width: 30ch;
+	      max-width: none;
 	      padding: 1px 6px;
-	      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+	      border: 1px solid var(--summary-chip-line, color-mix(in srgb, var(--accent) 42%, var(--line)));
 	      border-radius: 999px;
-	      background: color-mix(in srgb, var(--accent) 8%, var(--panel));
-	      color: color-mix(in srgb, var(--text) 88%, var(--accent));
+	      background: var(--summary-chip-bg, color-mix(in srgb, var(--accent) 8%, var(--panel)));
+	      color: var(--summary-chip-color, color-mix(in srgb, var(--text) 88%, var(--accent)));
 	      font-size: 11px;
 	      line-height: 1.35;
-	      overflow: hidden;
-	      text-overflow: ellipsis;
+	      overflow: visible;
+	      text-overflow: clip;
 	    }
 
-	    .summary-insight-child,
-	    .summary-insight-semantic,
-	    .summary-insight-type,
-	    .summary-insight-time {
-	      flex-shrink: 0;
-	      max-width: none;
-	    }
+    .summary-insight-semantic {
+      --summary-chip-color: var(--hex-idfv-color);
+      --summary-chip-bg: var(--hex-idfv-bg);
+      --summary-chip-line: var(--hex-idfv-line);
+      font-weight: 700;
+    }
+
+    .summary-insight-device {
+      --summary-chip-color: #7dd3fc;
+      --summary-chip-bg: rgba(14, 165, 233, 0.12);
+      --summary-chip-line: rgba(14, 165, 233, 0.28);
+    }
+
+    .summary-insight-file {
+      --summary-chip-color: #93c5fd;
+      --summary-chip-bg: rgba(59, 130, 246, 0.12);
+      --summary-chip-line: rgba(59, 130, 246, 0.26);
+    }
+
+    .summary-insight-state {
+      --summary-chip-color: #86efac;
+      --summary-chip-bg: rgba(34, 197, 94, 0.12);
+      --summary-chip-line: rgba(34, 197, 94, 0.26);
+    }
+
+    .summary-insight-type {
+      --summary-chip-color: #cbd5e1;
+      --summary-chip-bg: rgba(148, 163, 184, 0.12);
+      --summary-chip-line: rgba(148, 163, 184, 0.22);
+    }
+
+    .summary-insight-child {
+      --summary-chip-color: #fde68a;
+      --summary-chip-bg: rgba(245, 158, 11, 0.13);
+      --summary-chip-line: rgba(245, 158, 11, 0.26);
+    }
+
+    .summary-insight-time {
+      --summary-chip-color: var(--hex-timestamp-color);
+      --summary-chip-bg: var(--hex-timestamp-bg);
+      --summary-chip-line: var(--hex-timestamp-line);
+      font-weight: 700;
+    }
 
     .summary-ts,
     .summary-len {
@@ -656,7 +692,7 @@ INDEX_HTML = """
     .preview-hex {
       display: inline-block;
       min-width: 0;
-      max-width: 100%;
+      max-width: none;
       white-space: pre;
       line-height: 1.25;
       background: color-mix(in srgb, var(--preview-bg) 38%, transparent);
@@ -664,8 +700,8 @@ INDEX_HTML = """
       border-radius: 3px;
       padding: 0 2px;
       color: var(--text);
-      overflow: hidden;
-      text-overflow: ellipsis;
+      overflow: visible;
+      text-overflow: clip;
       vertical-align: bottom;
     }
 
