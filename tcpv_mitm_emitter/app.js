@@ -5425,9 +5425,10 @@ function ensureChildCommonStyles() {
       padding: 3px 5px;
       background: color-mix(in srgb, var(--dump-bg) 76%, var(--panel));
       color: color-mix(in srgb, var(--muted) 80%, var(--text));
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
 	    .child-rail-meta-changed {
 	      border-color: color-mix(in srgb, #ffd36a 56%, var(--line));
@@ -5442,9 +5443,10 @@ function ensureChildCommonStyles() {
       margin-bottom: 4px;
     }
     .child-side-compact .child-card-parse {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: pre-wrap;
+      overflow: visible;
+      text-overflow: clip;
+      overflow-wrap: anywhere;
       max-width: 100%;
     }
     .child-side-compact .child-debug-details {
@@ -5780,15 +5782,17 @@ function ensureChildCommonStyles() {
 	    }
 	    .child-hex-time-note {
 	      color: color-mix(in srgb, #f59e0b 74%, var(--muted));
-	      white-space: nowrap;
-	      overflow: hidden;
-	      text-overflow: ellipsis;
+	      white-space: normal;
+	      overflow: visible;
+	      text-overflow: clip;
+	      overflow-wrap: anywhere;
 	    }
 	    .child-hex-string-note {
 	      color: color-mix(in srgb, #67e8f9 72%, var(--muted));
-	      white-space: nowrap;
-	      overflow: hidden;
-	      text-overflow: ellipsis;
+	      white-space: normal;
+	      overflow: visible;
+	      text-overflow: clip;
+	      overflow-wrap: anywhere;
 	    }
     .child-hex-note {
       min-width: 0;
@@ -5844,12 +5848,14 @@ function ensureChildCommonStyles() {
     .child-hex-insight-time span {
       color: color-mix(in srgb, #f59e0b 82%, var(--text));
     }
-	    .child-hex-insight span {
-	      min-width: 0;
-	      overflow: hidden;
-	      text-overflow: ellipsis;
-	      white-space: nowrap;
-	    }
+    .child-hex-insight span {
+      min-width: 0;
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .child-preview-empty {
       color: var(--muted);
       font-size: 12px;
@@ -6698,7 +6704,7 @@ function makeChildCommonStrip(beforeChild, afterChild, action, result, ruleCompa
       const strong = document.createElement("strong");
       strong.textContent = `${label} `;
       row.appendChild(strong);
-      row.appendChild(document.createTextNode(compactText(value, 110)));
+      row.appendChild(document.createTextNode(normalizeVisibleText(value)));
       rowWrap.appendChild(row);
     }
     strip.appendChild(rowWrap);
@@ -6752,7 +6758,7 @@ function childPreviewLines(child, maxLines = 2) {
   const semanticRows = splitChildSemanticRows(child);
   const lines = [];
   for (const [label, value] of semanticRows.primaryRows) {
-    const text = compactText(value, 120);
+    const text = normalizeVisibleText(value);
     if (text) lines.push(`${label} ${text}`);
     if (lines.length >= maxLines) break;
   }
