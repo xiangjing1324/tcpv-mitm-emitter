@@ -1330,10 +1330,13 @@ INDEX_HTML = """
     }
 
     .hex-comment-block {
-      display: inline-block;
+      display: block;
       margin-left: 8ch;
       margin-top: 1px;
-      max-width: none;
+      max-width: min(148ch, calc(100vw - 240px));
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: normal;
     }
 
     .tree-shell {

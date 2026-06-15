@@ -1381,6 +1381,49 @@ function buildDumpAnnotationIndex(items, bytesPerRow) {
   return new Map(Array.from(grouped.entries(), ([rowBase, bucket]) => [rowBase, bucket.join("\n// ")]));
 }
 
+function extractPrintableRunsForDumpAnnotations(byteValues, minLen = ANALYSIS_ASCII_MIN_LEN, maxItems = ANALYSIS_ASCII_MAX_ITEMS) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const out = [];
+  let start = -1;
+  let chars = [];
+  const flush = () => {
+    if (start >= 0 && chars.length >= minLen) {
+      const refined = trimPrintableRunPrefix(start, chars.join(""), minLen);
+      const text = normalizeDumpAnnotationText(refined.text);
+      if (text.length >= minLen) {
+        out.push({
+          off: refined.off,
+          text,
+          kind: refined.kind || inferStringKind(text),
+        });
+      }
+    }
+    start = -1;
+    chars = [];
+  };
+  for (let i = 0; i < byteValues.length; i += 1) {
+    const byte = byteValues[i];
+    if (byte >= 32 && byte < 127) {
+      if (start < 0) start = i;
+      chars.push(String.fromCharCode(byte));
+    } else {
+      flush();
+    }
+  }
+  flush();
+
+  const unique = [];
+  const seen = new Set();
+  for (const item of out) {
+    const key = `${item.off}|${item.text}|${item.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(item);
+    if (unique.length >= maxItems) break;
+  }
+  return unique;
+}
+
 function mergeDumpAnnotationIndexes(...indexes) {
   const merged = new Map();
   for (const index of indexes) {
@@ -1398,8 +1441,21 @@ function mergeDumpAnnotationIndexes(...indexes) {
   return merged;
 }
 
-function getDumpAnnotationIndex(ev, source) {
+function dumpAnnotationItemsFromBase64(base64Text) {
+  const bytes = b64ToBytes(base64Text);
+  if (!Array.isArray(bytes) || bytes.length <= 0) return [];
+  return collectAnalysisStringItems(
+    extractPrintableRunsForDumpAnnotations(bytes, ANALYSIS_ASCII_MIN_LEN, ANALYSIS_ASCII_MAX_ITEMS * 2),
+    extractUtf8Runs(bytes, ANALYSIS_UTF8_MIN_CHARS, ANALYSIS_UTF8_MAX_ITEMS),
+    extractBase64DecodedRuns(bytes, ANALYSIS_BASE64_MAX_ITEMS)
+  );
+}
+
+function getDumpAnnotationIndex(ev, source, base64Text = "") {
   const bytesPerRow = getBytesPerRow();
+  if (base64Text) {
+    return buildDumpAnnotationIndex(dumpAnnotationItemsFromBase64(base64Text), bytesPerRow);
+  }
   const analysis = getEventAnalysis(ev);
   if (!analysis) return new Map();
   if (source === "full") {
@@ -8080,7 +8136,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     panel.appendChild(sectionTitle);
 
     const annotationIndex = mergeDumpAnnotationIndexes(
-      getDumpAnnotationIndex(ev, sourceKey),
+      getDumpAnnotationIndex(ev, sourceKey, base64Text),
       buildPacketSemanticAnnotationIndex(semanticInfo, getBytesPerRow()),
       buildTimestampAnnotationIndex(timestampHighlights, getBytesPerRow())
     );
@@ -8099,7 +8155,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     hexHead.textContent = dump.header;
     const pre = document.createElement("pre");
     pre.className = "hex-body";
-    pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: sourceKey === "full" });
+    pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: true });
 
     hexShell.appendChild(hexHead);
     hexShell.appendChild(pre);
