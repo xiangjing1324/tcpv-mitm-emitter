@@ -3161,8 +3161,9 @@ function extractBase64DecodedRuns(byteValues, maxItems = ANALYSIS_BASE64_MAX_ITE
   return out;
 }
 
-function extractPrintableRuns(byteValues, minLen = ANALYSIS_ASCII_MIN_LEN, maxItems = ANALYSIS_ASCII_MAX_ITEMS) {
+function extractPrintableRuns(byteValues, minLen = ANALYSIS_ASCII_MIN_LEN, maxItems = ANALYSIS_ASCII_MAX_ITEMS, options = {}) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const keepFullText = Boolean(options && options.fullText);
   const out = [];
   let start = -1;
   let chars = [];
@@ -3190,7 +3191,7 @@ function extractPrintableRuns(byteValues, minLen = ANALYSIS_ASCII_MIN_LEN, maxIt
   const unique = [];
   const seen = new Set();
   for (const item of out) {
-    const text = shortenText(item.text, 96);
+    const text = keepFullText ? String(item.text || "") : shortenText(item.text, 96);
     const key = `${item.off}|${text}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -6105,7 +6106,7 @@ function childBestDecodedOverlay(childBytes) {
     const xorKey = Number(key) & 0xff;
     if (!Number.isFinite(safeStart) || safeStart >= childBytes.length) return null;
     const decoded = xorByteValues(childBytes.slice(safeStart), xorKey);
-    const runsRaw = extractPrintableRuns(decoded, 3, 48);
+    const runsRaw = extractPrintableRuns(decoded, 3, 48, { fullText: true });
     if (runsRaw.length <= 0) return null;
     const scored = scoreXorCandidate(decoded, runsRaw);
     const meaningfulRunLen = runsRaw.reduce((maxLen, item) => Math.max(maxLen, String(item.text || "").length), 0);
@@ -6188,7 +6189,7 @@ function childBestDecodedOverlay(childBytes) {
     return candidates[0];
   }
 
-  const rawRuns = extractPrintableRuns(childBytes, 4, 48).map((item) => {
+  const rawRuns = extractPrintableRuns(childBytes, 4, 48, { fullText: true }).map((item) => {
     const start = Number(item.off || 0);
     const text = String(item.text || "");
     return {
