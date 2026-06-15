@@ -6604,7 +6604,7 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
       insights.push({
         kind: "string",
         label: model.overlay.label || "string",
-        value: `${hexOffsetText(run.start)}-${hexOffsetText(Math.max(Number(run.start), Number(run.end) - 1))} ${run.kind ? `${run.kind} ` : ""}"${shortenText(run.text, 120)}"`,
+        value: `${hexOffsetText(run.start)}-${hexOffsetText(Math.max(Number(run.start), Number(run.end) - 1))} ${run.kind ? `${run.kind} ` : ""}"${normalizeVisibleText(run.text)}"`,
       });
     }
   }
@@ -7542,7 +7542,7 @@ function nodeReadableStringRows(node, nodeBytes, side, actionText = "", ruleText
     childRichTypeText(node),
   ].filter(Boolean).join(" | ");
   const add = (label, value, offsetText = "") => {
-    const text = compactText(value, 150);
+    const text = normalizeVisibleText(value);
     if (!text || text.length < 3) return;
     const parts = [
       prefix,
