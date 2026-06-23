@@ -310,11 +310,33 @@ INDEX_HTML = """
     .filterbar {
       border-bottom: 1px solid var(--line);
       display: grid;
-      grid-template-columns: minmax(260px, 1fr) 146px 56px 72px 62px 62px 74px 88px 94px 94px 72px 72px;
+      grid-template-columns: minmax(260px, 1fr) 146px 56px 72px 62px 62px 74px 88px 94px 94px 96px 72px 72px;
       gap: 8px;
       align-items: center;
       padding: 8px 10px;
       min-width: 0;
+    }
+
+    .filter-check {
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--chip-bg);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .filter-check input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
     }
 
     .toolbar .headline {
@@ -719,6 +741,20 @@ INDEX_HTML = """
     .preview-hit-outside {
       border-style: dashed;
       border-width: 1px;
+    }
+
+    .preview-hi {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0 5px;
+      border: 1px solid var(--hex-history-line);
+      border-radius: 999px;
+      background: var(--hex-history-bg);
+      color: var(--hex-history-color);
+      font-weight: 700;
+      line-height: 1.25;
+      white-space: nowrap;
+      vertical-align: bottom;
     }
 
     .body {
@@ -1952,6 +1988,10 @@ INDEX_HTML = """
         </select>
         <input id="filterMinLen" type="number" min="0" step="1" placeholder="最小长度" />
         <input id="filterMaxLen" type="number" min="0" step="1" placeholder="最大长度" />
+        <label class="filter-check" title="只显示包含 cs/ob/state 的 CSOB 包">
+          <input id="filterCsobOnly" type="checkbox" />
+          <span>CSOB</span>
+        </label>
         <button id="filterApplyBtn" title="Apply current filters.">过滤</button>
         <button id="filterClearBtn" title="Clear all filters.">清空</button>
       </div>

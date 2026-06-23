@@ -23,6 +23,7 @@ const state = {
     dir: "all",
     minLen: "",
     maxLen: "",
+    csobOnly: false,
   },
   hitEventIds: [],
   hitCursor: -1,
@@ -57,6 +58,7 @@ const el = {
   filterDir: document.getElementById("filterDir"),
   filterMinLen: document.getElementById("filterMinLen"),
   filterMaxLen: document.getElementById("filterMaxLen"),
+  filterCsobOnly: document.getElementById("filterCsobOnly"),
   filterApply: document.getElementById("filterApplyBtn"),
   filterClear: document.getElementById("filterClearBtn"),
   hideAscii: document.getElementById("hideAscii"),
@@ -298,6 +300,19 @@ function installPreviewSummaryStyles() {
       overflow: visible;
       text-overflow: clip;
     }
+    .preview-hi {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0 5px;
+      border: 1px solid var(--hex-history-line);
+      border-radius: 999px;
+      background: var(--hex-history-bg);
+      color: var(--hex-history-color);
+      font-weight: 700;
+      line-height: 1.25;
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
   `;
 }
 
@@ -317,7 +332,7 @@ function normalizeFilterLen(rawValue) {
   return String(Math.floor(num));
 }
 
-function normalizeFilterState(rawDir, rawMinLen, rawMaxLen) {
+function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false) {
   let minLen = normalizeFilterLen(rawMinLen);
   let maxLen = normalizeFilterLen(rawMaxLen);
   if (minLen && maxLen && Number(minLen) > Number(maxLen)) {
@@ -329,6 +344,7 @@ function normalizeFilterState(rawDir, rawMinLen, rawMaxLen) {
     dir: normalizeFilterDir(rawDir),
     minLen,
     maxLen,
+    csobOnly: rawCsobOnly === true || rawCsobOnly === "1",
   };
 }
 
@@ -551,6 +567,7 @@ function loadRules() {
   const appliedFilterDir = localStorage.getItem("tcpv_applied_filter_dir") || "all";
   const appliedFilterMinLen = localStorage.getItem("tcpv_applied_filter_min_len") || "";
   const appliedFilterMaxLen = localStorage.getItem("tcpv_applied_filter_max_len") || "";
+  const appliedFilterCsobOnly = localStorage.getItem("tcpv_applied_filter_csob_only") === "1";
   const previewOffset = localStorage.getItem("tcpv_preview_offset") || "0";
 
   el.prefix.value = draftSearchText !== null ? draftSearchText : appliedSearchText;
@@ -566,6 +583,10 @@ function loadRules() {
   }
   if (el.filterMaxLen) {
     el.filterMaxLen.value = localStorage.getItem("tcpv_filter_max_len_draft") || appliedFilterMaxLen;
+  }
+  if (el.filterCsobOnly) {
+    const draftCsobOnly = localStorage.getItem("tcpv_filter_csob_only_draft");
+    el.filterCsobOnly.checked = draftCsobOnly !== null ? draftCsobOnly === "1" : appliedFilterCsobOnly;
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   const savedPreviewBytes = String(localStorage.getItem("tcpv_preview_bytes") || "").trim();
@@ -603,7 +624,12 @@ function loadRules() {
   state.themeMode = el.themeMode.value;
   setSidebarHidden(localStorage.getItem("tcpv_sidebar_hidden") === "1", false);
   state.search = buildAppliedSearchState(appliedSearchText, appliedSearchMode, appliedSearchColor);
-  state.filters = normalizeFilterState(appliedFilterDir, appliedFilterMinLen, appliedFilterMaxLen);
+  state.filters = normalizeFilterState(
+    appliedFilterDir,
+    appliedFilterMinLen,
+    appliedFilterMaxLen,
+    appliedFilterCsobOnly,
+  );
   applyTheme();
   applyBodyTone();
   updateSearchDraftState();
@@ -628,6 +654,9 @@ function saveRules() {
   }
   if (el.filterMaxLen) {
     localStorage.setItem("tcpv_filter_max_len_draft", el.filterMaxLen.value || "");
+  }
+  if (el.filterCsobOnly) {
+    localStorage.setItem("tcpv_filter_csob_only_draft", el.filterCsobOnly.checked ? "1" : "0");
   }
   localStorage.setItem("tcpv_hide_ascii", el.hideAscii.value);
   localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
@@ -655,6 +684,7 @@ function saveAppliedFilters() {
   localStorage.setItem("tcpv_applied_filter_dir", state.filters.dir || "all");
   localStorage.setItem("tcpv_applied_filter_min_len", state.filters.minLen || "");
   localStorage.setItem("tcpv_applied_filter_max_len", state.filters.maxLen || "");
+  localStorage.setItem("tcpv_applied_filter_csob_only", state.filters.csobOnly ? "1" : "0");
 }
 
 function getExpandMode() {
@@ -1862,6 +1892,7 @@ function getFilterDraftState() {
     el.filterDir ? el.filterDir.value : "all",
     el.filterMinLen ? el.filterMinLen.value : "",
     el.filterMaxLen ? el.filterMaxLen.value : "",
+    el.filterCsobOnly ? el.filterCsobOnly.checked : false,
   );
 }
 
@@ -1954,6 +1985,97 @@ function formatPreviewBytesText(byteValues) {
     previewText += byteValues[i].toString(16).padStart(2, "0");
   }
   return previewText;
+}
+
+function collect010a0011HiLabelsFromBytes(byteValues, maxItems = 3) {
+  if (!Array.isArray(byteValues) || byteValues.length < 8) return [];
+  const limit = Math.max(1, Number(maxItems || 3));
+  const labels = [];
+  const seen = new Set();
+  const marker = [0x01, 0x0a, 0x00, 0x11];
+  for (let offset = 0; offset + marker.length <= byteValues.length; offset += 1) {
+    if (!marker.every((value, index) => byteValues[offset + index] === value)) continue;
+    const windowBytes = byteValues.slice(offset + marker.length, Math.min(byteValues.length, offset + 80));
+    const text = bytesToLatin1String(windowBytes);
+    const match = text.match(/(?:^|[^0-9A-Za-z_])(hi_?(?:x|[0-9]{1,6}))(?![0-9A-Za-z_])/i);
+    if (!match) continue;
+    const label = match[1].replace(/^hi_/i, "hi");
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    labels.push(label);
+    if (labels.length >= limit) break;
+  }
+  return labels;
+}
+
+function collectEvent010a0011HiLabels(ev, previewBytes) {
+  const sources = [];
+  if (Array.isArray(previewBytes) && previewBytes.length > 0) sources.push(previewBytes);
+  for (const key of ["pfx", "full_pfx", "before_pfx", "raw_pfx"]) {
+    const bytes = bytesFromHexPrefix(ev && ev[key], 384);
+    if (bytes.length > 0) sources.push(bytes);
+  }
+  for (const key of ["pay", "full_pay", "before_pay", "raw_pay"]) {
+    const bytes = b64ToBytesLimited(String(ev && ev[key] ? ev[key] : ""), 2048);
+    if (bytes.length > 0) sources.push(bytes);
+  }
+
+  const labels = [];
+  const seen = new Set();
+  for (const source of sources) {
+    for (const label of collect010a0011HiLabelsFromBytes(source, 3)) {
+      const key = label.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      labels.push(label);
+      if (labels.length >= 3) return labels;
+    }
+  }
+  return labels;
+}
+
+function getEvent010a0011HiLabels(ev, previewBytes) {
+  if (!ev || typeof ev !== "object") return [];
+  if (Array.isArray(ev.__tcpvHiPreviewLabels)) {
+    return ev.__tcpvHiPreviewLabels;
+  }
+  const labels = collectEvent010a0011HiLabels(ev, previewBytes);
+  ev.__tcpvHiPreviewLabels = labels;
+  return labels;
+}
+
+function eventPayloadSearchText(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  const parts = [String(ev.summary || "")];
+  for (const key of ["pfx", "full_pfx", "before_pfx", "raw_pfx"]) {
+    const bytes = bytesFromHexPrefix(ev[key], 4096);
+    if (bytes.length > 0) parts.push(bytesToLatin1String(bytes));
+  }
+  for (const key of ["pay", "full_pay", "before_pay", "raw_pay"]) {
+    const bytes = b64ToBytesLimited(String(ev[key] || ""), 8192);
+    if (bytes.length > 0) parts.push(bytesToLatin1String(bytes));
+  }
+  return parts.join("\n");
+}
+
+function eventHasCsob(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  if (typeof ev.__tcpvHasCsob === "boolean") return ev.__tcpvHasCsob;
+  const text = eventPayloadSearchText(ev);
+  const hasCsOb = /cs:[^\x00;]{1,240},ob:/i.test(text);
+  const hasState = /state:[0-9a-f]{8},r:/i.test(text);
+  const hasCsobSummary = /cs\/ob\/state|状态\s+state:/i.test(text);
+  const hasReport = /0x010a001b|010a001b/i.test(text) || /\x01\x0a\x00\x1b/.test(text);
+  const matched = hasCsobSummary || (hasCsOb && (hasState || hasReport));
+  ev.__tcpvHasCsob = matched;
+  return matched;
+}
+
+function primeCompactEventCaches(ev) {
+  if (!ev || typeof ev !== "object") return;
+  getEvent010a0011HiLabels(ev, []);
+  eventHasCsob(ev);
 }
 
 function renderPreviewBytes(previewSpan, byteValues, highlightRanges, plainTextHint = "") {
@@ -2056,6 +2178,7 @@ function getPreviewInfo(ev, needFullScan = false) {
     missingWindowBytes,
     needsWindowFetch,
     previewText: formatPreviewBytesText(previewBytes),
+    hiPreviewLabels: getEvent010a0011HiLabels(ev, previewBytes),
   };
   if (!needFullScan && ev && typeof ev === "object") {
     ev.__tcpvPreviewCacheKey = cacheKey;
@@ -8329,6 +8452,8 @@ function applyEventPayloadDetail(ev, detail) {
   ev.__tcpvPreviewCacheKey = "";
   ev.__tcpvPreviewInfo = null;
   ev.__tcpvPayloadLen = undefined;
+  ev.__tcpvHiPreviewLabels = undefined;
+  ev.__tcpvHasCsob = undefined;
   return true;
 }
 
@@ -8387,6 +8512,7 @@ function eventMatchesFilters(ev) {
   const maxLen = state.filters.maxLen ? Number(state.filters.maxLen) : null;
   if (minLen !== null && Number.isFinite(minLen) && len < minLen) return false;
   if (maxLen !== null && Number.isFinite(maxLen) && len > maxLen) return false;
+  if (state.filters.csobOnly && !eventHasCsob(ev)) return false;
   return true;
 }
 
@@ -8468,6 +8594,9 @@ function clearFilters() {
   }
   if (el.filterMaxLen) {
     el.filterMaxLen.value = "";
+  }
+  if (el.filterCsobOnly) {
+    el.filterCsobOnly.checked = false;
   }
   state.filters = getFilterDraftState();
   saveRules();
@@ -8585,17 +8714,18 @@ function renderEvents() {
     const wrap = document.createElement("details");
     const eventId = getEventId(ev);
     if (!needFullScan && !state.expandedIds.has(eventId) && !ev.__tcpvSummaryHydrated) {
+      primeCompactEventCaches(ev);
       ev.pay = "";
     }
-	    wrap.dataset.eventId = eventId;
-	    wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
-	    const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
-	    if (isDecodedFlowEvent(ev, summaryText)) {
-	      wrap.classList.add("event-decoded-detail");
-	    }
-	    if (allowExpand && (state.expandedIds.has(eventId) || autoExpandIds.has(eventId))) {
-	      wrap.open = true;
-	    }
+    wrap.dataset.eventId = eventId;
+    wrap.className = ev.dir === 0 ? "event-req" : "event-resp";
+    const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
+    if (isDecodedFlowEvent(ev, summaryText)) {
+      wrap.classList.add("event-decoded-detail");
+    }
+    if (allowExpand && (state.expandedIds.has(eventId) || autoExpandIds.has(eventId))) {
+      wrap.open = true;
+    }
     if (!allowExpand) {
       wrap.classList.add("no-expand");
     }
@@ -8678,14 +8808,21 @@ function renderEvents() {
         previewSpan.style.borderColor = firstColor;
       }
     }
-	    previewWrap.appendChild(previewSpan);
-	    previewWrap.appendChild(document.createTextNode("]"));
-	    summary.appendChild(previewWrap);
+    previewWrap.appendChild(previewSpan);
+    if (Array.isArray(preview.hiPreviewLabels) && preview.hiPreviewLabels.length > 0) {
+      const hiPreview = document.createElement("span");
+      hiPreview.className = "preview-hi";
+      hiPreview.textContent = preview.hiPreviewLabels.join(" ");
+      hiPreview.title = `010a0011 hi preview: ${preview.hiPreviewLabels.join(" ")}`;
+      previewWrap.appendChild(hiPreview);
+    }
+    previewWrap.appendChild(document.createTextNode("]"));
+    summary.appendChild(previewWrap);
 
-	    syncSummaryInsightStrip(summary, ev, summaryText);
+    syncSummaryInsightStrip(summary, ev, summaryText);
 
-	    if (preview.needsWindowFetch && windowPrefetchBudget > 0 && state.flowId) {
-	      prefetchEventPayload(state.flowId, eventId);
+    if (preview.needsWindowFetch && windowPrefetchBudget > 0 && state.flowId) {
+      prefetchEventPayload(state.flowId, eventId);
       windowPrefetchBudget -= 1;
     }
 
@@ -8998,6 +9135,12 @@ if (el.filterMaxLen) {
       applyFilters();
       ev.preventDefault();
     }
+  });
+}
+
+if (el.filterCsobOnly) {
+  el.filterCsobOnly.addEventListener("change", () => {
+    saveRules();
   });
 }
 
