@@ -8691,7 +8691,7 @@ async function ensureEventPayload(ev, account, eventId) {
     && !String(ev.raw_pay || "")
     && !ev.__tcpvPayloadDetailFetched;
   const needsFullPayload = !String(ev.full_pay || "");
-  const needsBeforePayload = isRequest && !String(ev.before_pay || "") && !ev.__tcpvPayloadDetailFetched;
+  const needsBeforePayload = !String(ev.before_pay || "") && !ev.__tcpvPayloadDetailFetched;
   if (hasPayload && !needsFullPayload && !needsBeforePayload && !needsRawPayload) {
     return ev;
   }
