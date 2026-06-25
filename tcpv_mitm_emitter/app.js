@@ -316,6 +316,81 @@ function installPreviewSummaryStyles() {
   `;
 }
 
+function installFlowListBadgeStyles() {
+  const styleId = "tcpv-flow-list-badge-style";
+  let style = document.getElementById(styleId);
+  if (!style) {
+    style = document.createElement("style");
+    style.id = styleId;
+    document.head.appendChild(style);
+  }
+  style.textContent = `
+    .flow-path {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.25;
+      min-width: 0;
+    }
+    .badge-tcp {
+      flex: 0 0 auto;
+      margin-right: 0;
+    }
+    .badge-kp {
+      color: #ffe082;
+      background: rgba(245, 158, 11, 0.14);
+      border: 1px solid rgba(245, 158, 11, 0.64);
+      border-radius: 3px;
+      font-weight: 800;
+      padding: 0 4px;
+      display: inline-block;
+      flex: 0 0 auto;
+    }
+    .flow-cid {
+      color: var(--text);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  `;
+}
+
+function installDumpAsciiRowStyles() {
+  const styleId = "tcpv-dump-ascii-row-style";
+  let style = document.getElementById(styleId);
+  if (!style) {
+    style = document.createElement("style");
+    style.id = styleId;
+    document.head.appendChild(style);
+  }
+  style.textContent = `
+    .hex-ascii-under-line {
+      color: color-mix(in srgb, var(--hex-ascii-color) 86%, var(--muted));
+      opacity: 0.96;
+    }
+    .hex-ascii-under-label {
+      color: color-mix(in srgb, var(--hex-ascii-color) 76%, var(--muted));
+      font-weight: 700;
+    }
+    .hex-ascii-under {
+      color: color-mix(in srgb, var(--hex-ascii-color) 92%, var(--text));
+    }
+    .hex-ascii-under-note {
+      color: color-mix(in srgb, var(--hex-ascii-color) 72%, var(--muted));
+    }
+    .hex-byte-crc-tail {
+      color: color-mix(in srgb, #facc15 88%, var(--text));
+      background: color-mix(in srgb, #facc15 22%, transparent);
+      border-radius: 2px;
+      font-weight: 850;
+    }
+  `;
+}
+
 function normalizeFilterDir(rawDir) {
   const dir = String(rawDir || "").trim().toLowerCase();
   if (dir === "req" || dir === "resp") {
@@ -829,11 +904,7 @@ function getHexGroupSizes(bytesPerRow) {
 function getFlowRowPath(item) {
   const rawCid = String(item.last_cid || "");
   const cid = stripDecoratorsFromCid(rawCid);
-  const proxyUsername = getProxyUsername(item && item.proxy_username);
-  const proxyBadge = proxyUsername ? `[kp:${proxyUsername}]` : "";
-  if (proxyBadge && cid) return `${proxyBadge} ${cid}`;
   if (cid) return cid;
-  if (proxyBadge) return proxyBadge;
   return "(waiting cid)";
 }
 
@@ -934,7 +1005,21 @@ function renderFlowList() {
 
     const path = document.createElement("div");
     path.className = "flow-path";
-    path.innerHTML = `<span class="badge-tcp">TCP</span>${escapeHtml(getFlowRowPath(item))}`;
+    const tcpBadge = document.createElement("span");
+    tcpBadge.className = "badge-tcp";
+    tcpBadge.textContent = "TCP";
+    path.appendChild(tcpBadge);
+    const proxyUsername = getProxyUsername(item && item.proxy_username);
+    if (proxyUsername) {
+      const proxyBadge = document.createElement("span");
+      proxyBadge.className = "badge-kp";
+      proxyBadge.textContent = `kp:${proxyUsername}`;
+      path.appendChild(proxyBadge);
+    }
+    const cidText = document.createElement("span");
+    cidText.className = "flow-cid";
+    cidText.textContent = getFlowRowPath(item);
+    path.appendChild(cidText);
 
     const proto = document.createElement("div");
     proto.textContent = "TCP";
@@ -1556,6 +1641,42 @@ function buildRangeOffsetSet(ranges) {
   return offsets.size > 0 ? offsets : null;
 }
 
+function findTrailingChecksumCandidate(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length < 8) return null;
+  const sepOffset = byteValues.length - 5;
+  if (byteValues[sepOffset] !== 0) return null;
+  const tail = byteValues.slice(byteValues.length - 4);
+  if (tail.length !== 4 || tail.every((byte) => Number(byte || 0) === 0)) return null;
+  const report = detectTssReport(byteValues);
+  const nearby = byteValues.slice(Math.max(0, sepOffset - 96), sepOffset);
+  const textBeforeTail = extractPrintableRuns(nearby, 4, 8, { fullText: true })
+    .map((item) => String(item.text || ""))
+    .join(" ");
+  const hasSemanticText = /(?:mrp|mrpc|mrpcs|mrcp)[\w.-]*|\.data\b|model:|ver:|state:|\d{10,24}/i.test(textBeforeTail);
+  if (!report && !hasSemanticText) return null;
+  const tailHex = tail.map((byte) => childHexByteText(byte)).join(" ");
+  return {
+    sepOffset,
+    tailStart: byteValues.length - 4,
+    tailEnd: byteValues.length,
+    tailHex,
+    text: `尾部候选 ${hexOffsetText(sepOffset)}=00 分割；${hexOffsetText(byteValues.length - 4)}-${hexOffsetText(byteValues.length - 1)} CRC?/校验尾 ${tailHex}`,
+  };
+}
+
+function mergeAnnotationLine(annotationIndex, rowBase, text) {
+  const base = Math.max(0, Math.floor(Number(rowBase)));
+  const value = String(text || "").trim();
+  if (!(annotationIndex instanceof Map) || !Number.isFinite(base) || !value) return;
+  const existing = String(annotationIndex.get(base) || "").trim();
+  if (!existing) {
+    annotationIndex.set(base, value);
+    return;
+  }
+  if (existing.includes(value)) return;
+  annotationIndex.set(base, `${existing}\n// ${value}`);
+}
+
 function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = {}) {
   const bytes = b64ToBytes(base64Text);
   const bytesPerRow = getBytesPerRow();
@@ -1566,6 +1687,18 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
   const timestampOffsets = buildRangeOffsetSet(options && Array.isArray(options.timestampRanges) ? options.timestampRanges : []);
   const idfvOffsets = buildRangeOffsetSet(options && Array.isArray(options.idfvRanges) ? options.idfvRanges : []);
   const historyOffsets = buildRangeOffsetSet(options && Array.isArray(options.historyRanges) ? options.historyRanges : []);
+  const checksumTail = options && options.showTailChecksum ? findTrailingChecksumCandidate(bytes) : null;
+  const checksumTailOffsets = checksumTail
+    ? buildRangeOffsetSet([{ start: checksumTail.sepOffset, end: checksumTail.tailEnd }])
+    : null;
+  const annotations = annotationIndex instanceof Map ? new Map(annotationIndex) : new Map();
+  if (checksumTail) {
+    mergeAnnotationLine(
+      annotations,
+      Math.floor(Number(checksumTail.sepOffset) / bytesPerRow) * bytesPerRow,
+      checksumTail.text,
+    );
+  }
   const groupWidths = groupSizes.map((size) => size * 3 - 1);
   const hexWidth = groupWidths.reduce((acc, width) => acc + width, 0) + groupGap.length * (groupSizes.length - 1);
 
@@ -1611,6 +1744,9 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
     const historyIndexes = historyOffsets
       ? chunk.map((_v, idx) => historyOffsets.has(i + idx))
       : [];
+    const checksumTailIndexes = checksumTailOffsets
+      ? chunk.map((_v, idx) => checksumTailOffsets.has(i + idx))
+      : [];
     if (hideAscii) {
       rows.push({
         offset,
@@ -1623,9 +1759,10 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
         timestampIndexes,
         idfvIndexes,
         historyIndexes,
+        checksumTailIndexes,
         ascii: "",
         compactAscii,
-        comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
+        comment: String(annotations.get(i) || ""),
       });
       continue;
     }
@@ -1644,12 +1781,13 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
       timestampIndexes,
       idfvIndexes,
       historyIndexes,
+      checksumTailIndexes,
       ascii,
       compactAscii,
-      comment: annotationIndex instanceof Map ? String(annotationIndex.get(i) || "") : "",
+      comment: String(annotations.get(i) || ""),
     });
   }
-  return { header, rows };
+  return { header, rows, checksumTail };
 }
 
 function renderHexBytesHtml(row) {
@@ -1671,6 +1809,9 @@ function renderHexBytesHtml(row) {
     const historyMarks = Array.isArray(row.historyIndexes)
       ? row.historyIndexes.slice(offsetInChunk, offsetInChunk + size)
       : [];
+    const checksumTailMarks = Array.isArray(row.checksumTailIndexes)
+      ? row.checksumTailIndexes.slice(offsetInChunk, offsetInChunk + size)
+      : [];
     offsetInChunk += size;
     const html = bytes
       .map((value, idx) => {
@@ -1678,6 +1819,7 @@ function renderHexBytesHtml(row) {
         if (timestampMarks[idx]) return `<span class="hex-byte-timestamp">${hex}</span>`;
         if (idfvMarks[idx]) return `<span class="hex-byte-idfv">${hex}</span>`;
         if (historyMarks[idx]) return `<span class="hex-byte-history">${hex}</span>`;
+        if (checksumTailMarks[idx]) return `<span class="hex-byte-crc-tail">${hex}</span>`;
         return marks[idx] ? `<span class="hex-byte-changed">${hex}</span>` : escapeHtml(hex);
       })
       .join(" ");
@@ -1688,19 +1830,41 @@ function renderHexBytesHtml(row) {
   return `<span class="hex-bytes">${parts.join(gap)}</span>`;
 }
 
+function dumpAsciiChar(byte) {
+  const value = Number(byte || 0) & 0xff;
+  if (value >= 32 && value <= 126) return String.fromCharCode(value);
+  return ".";
+}
+
+function renderHexAsciiUnderHtml(row) {
+  if (!row || !Array.isArray(row.bytes) || !Array.isArray(row.groupSizes)) return "";
+  let offsetInChunk = 0;
+  const parts = row.groupSizes.map((size, groupIndex) => {
+    const bytes = row.bytes.slice(offsetInChunk, offsetInChunk + size);
+    offsetInChunk += size;
+    const text = bytes.map((byte) => ` ${dumpAsciiChar(byte)}`).join(" ");
+    const width = Array.isArray(row.groupWidths) ? Number(row.groupWidths[groupIndex]) : size * 3 - 1;
+    return escapeHtml(text.padEnd(Math.max(0, width), " "));
+  });
+  const gap = escapeHtml(String(row.groupGap || "  "));
+  const note = row.comment ? ` <span class="hex-ascii-under-note">ASCII row</span>` : "";
+  return `<span class="hex-ascii-under-line"><span class="hex-ascii-under-label">ascii </span> <span class="hex-ascii-under">${parts.join(gap)}</span>${note}</span>`;
+}
+
 function renderHexBodyHtml(dump, hideAscii, options = {}) {
   if (!dump || !Array.isArray(dump.rows) || dump.rows.length === 0) {
     return "";
   }
   const blockComments = !!(options && options.blockComments);
+  const asciiRows = !!(options && options.asciiRows);
   return dump.rows
     .map((row) => {
       const offsetHtml = `<span class="hex-offset">${escapeHtml(row.offset)}</span>`;
       const hexHtml = renderHexBytesHtml(row);
-      const blockCommentHtml = blockComments && row.comment
-        ? `\n<span class="hex-comment hex-comment-block">// ${escapeHtml(row.comment)}</span>`
-        : "";
       if (hideAscii) {
+        const blockCommentHtml = blockComments && row.comment
+          ? `\n<span class="hex-comment hex-comment-block">// ${escapeHtml(row.comment)}</span>`
+          : "";
         const commentHtml = !blockComments && row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
         return `${offsetHtml} ${hexHtml}${commentHtml}${blockCommentHtml}`;
       }
@@ -1709,7 +1873,11 @@ function renderHexBodyHtml(dump, hideAscii, options = {}) {
         `<span class="hex-ascii${row.compactAscii ? " hex-ascii-compact" : ""}">${escapeHtml(row.ascii)}</span>` +
         `<span class="hex-ascii-bar">|</span>`;
       const commentHtml = !blockComments && row.comment ? ` <span class="hex-comment">// ${escapeHtml(row.comment)}</span>` : "";
-      return `${offsetHtml} ${hexHtml} ${asciiHtml}${commentHtml}${blockCommentHtml}`;
+      const asciiUnderHtml = asciiRows ? `\n${renderHexAsciiUnderHtml(row)}` : "";
+      const blockCommentHtml = blockComments && row.comment
+        ? `\n<span class="hex-comment hex-comment-block">// ${escapeHtml(row.comment)}</span>`
+        : "";
+      return `${offsetHtml} ${hexHtml} ${asciiHtml}${commentHtml}${asciiUnderHtml}${blockCommentHtml}`;
     })
     .join("\n");
 }
@@ -6221,8 +6389,61 @@ function isDisplayableDecodedRun(text, kind = "") {
   return false;
 }
 
+function buildPlainDecodedOverlay(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
+  const runs = extractPrintableRuns(byteValues, 4, 48, { fullText: true }).map((item) => {
+    const start = Number(item.off || 0);
+    const text = String(item.text || "");
+    return {
+      start,
+      end: start + text.length,
+      text,
+      kind: inferStringKind(text),
+    };
+  }).filter((run) => isDisplayableDecodedRun(run.text, run.kind));
+  if (runs.length <= 0 || runs.every((run) => String(run.text || "").length < 8)) return null;
+  return {
+    mode: "ascii",
+    key: null,
+    label: "ascii",
+    start: 0,
+    decoded: byteValues.slice(),
+    runs,
+  };
+}
+
+function plainOverlayHasSemanticSignal(overlay) {
+  const runs = Array.isArray(overlay && overlay.runs) ? overlay.runs : [];
+  if (runs.length <= 0) return false;
+  let hasAccountLike = false;
+  let hasFileLike = false;
+  for (const run of runs) {
+    const text = normalizeVisibleText(run && run.text);
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    if (compactSemanticSignal(text)) return true;
+    if (/(?:^|[^a-z0-9])mrp(?:c|cs)?[a-z0-9_.-]*|mrcp|\.data\b/.test(lower)) return true;
+    if (/(model:|ver:|inc_id:|obf_id:|state:|appid:|uuid:|bundle:)/i.test(text)) return true;
+    if (/\d{10,24}/.test(text)) hasAccountLike = true;
+    if (/[a-z0-9_./-]+\.(?:data|dylib|framework|plist|txt)\b/i.test(text)) hasFileLike = true;
+  }
+  return hasAccountLike && hasFileLike;
+}
+
+function shouldPreferPlainDecodedOverlay(byteValues, reportCode, plainOverlay) {
+  if (!plainOverlay || !Array.isArray(byteValues) || byteValues.length <= 0) return false;
+  const report = Number(reportCode);
+  if (Number(report) === 0x0102000a && isBinaryLikeLeafRecord(byteValues, report)) return false;
+  return plainOverlayHasSemanticSignal(plainOverlay);
+}
+
 function childBestDecodedOverlay(childBytes) {
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return null;
+  const detected = detectTssReport(childBytes);
+  const plainOverlay = buildPlainDecodedOverlay(childBytes);
+  if (shouldPreferPlainDecodedOverlay(childBytes, detected ? Number(detected.value) : NaN, plainOverlay)) {
+    return plainOverlay;
+  }
 
   const makeXorCandidate = (start, key, source = "common") => {
     const safeStart = Math.max(0, Math.floor(Number(start)));
@@ -6269,7 +6490,6 @@ function childBestDecodedOverlay(childBytes) {
   };
 
   const candidates = [];
-  const detected = detectTssReport(childBytes);
   const layout = detected && Number(detected.value) === 0x0102000a ? read0102000aLayout(childBytes, detected) : null;
   const layoutValueStart = layout ? Number(layout.shift) + 0x24 : NaN;
   const starts = [
@@ -6312,25 +6532,7 @@ function childBestDecodedOverlay(childBytes) {
     return candidates[0];
   }
 
-  const rawRuns = extractPrintableRuns(childBytes, 4, 48, { fullText: true }).map((item) => {
-    const start = Number(item.off || 0);
-    const text = String(item.text || "");
-    return {
-      start,
-      end: start + text.length,
-      text,
-      kind: inferStringKind(text),
-    };
-  }).filter((run) => isDisplayableDecodedRun(run.text, run.kind));
-  if (rawRuns.length <= 0 || rawRuns.every((run) => String(run.text || "").length < 8)) return null;
-  return {
-    mode: "ascii",
-    key: null,
-    label: "ascii",
-    start: 0,
-    decoded: childBytes.slice(),
-    runs: rawRuns,
-  };
+  return plainOverlay;
 }
 
 function childDecodedCellsForRange(overlay, offset, end) {
@@ -8195,6 +8397,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   body.appendChild(dumpGrid);
   let semanticCompareAdded = false;
 
+  const sourceShowsDecodedAsciiRows = (sourceKey) => (
+    sourceKey === "decoded" || sourceKey === "before"
+  );
+
   function appendDumpSection(title, base64Text, lengthValue, toneClass, sourceKey, dumpOptions = {}) {
     if (!base64Text) return;
     const collapsed = !!(dumpOptions && dumpOptions.collapsed);
@@ -8202,6 +8408,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
     if (collapsed && dumpOptions.open) panel.open = true;
     const isRawSource = sourceKey === "full" || sourceKey === "raw_after";
+    const showDecodedAsciiRows = sourceShowsDecodedAsciiRows(sourceKey);
+    const tailChecksum = showDecodedAsciiRows ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
     const timestampHighlights =
       isRawSource
         ? []
@@ -8257,6 +8465,13 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       historyChip.title = summarizeHistoryOpenidHighlights(historyHighlights);
       sectionTitle.appendChild(historyChip);
     }
+    if (tailChecksum) {
+      const crcChip = document.createElement("span");
+      crcChip.className = "dump-label-note";
+      crcChip.textContent = "00+CRC?";
+      crcChip.title = tailChecksum.text;
+      sectionTitle.appendChild(crcChip);
+    }
     if (collapsed) {
       const foldNote = document.createElement("span");
       foldNote.className = "dump-label-note";
@@ -8276,6 +8491,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       timestampRanges: timestampHighlights,
       idfvRanges: idfvHighlights,
       historyRanges: historyHighlights,
+      showTailChecksum: showDecodedAsciiRows,
     });
     const hexShell = document.createElement("div");
     hexShell.className = "hex-shell";
@@ -8285,7 +8501,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     hexHead.textContent = dump.header;
     const pre = document.createElement("pre");
     pre.className = "hex-body";
-    pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: true });
+    pre.innerHTML = renderHexBodyHtml(dump, hideAscii, {
+      blockComments: true,
+      asciiRows: showDecodedAsciiRows,
+    });
 
     hexShell.appendChild(hexHead);
     hexShell.appendChild(pre);
@@ -9253,6 +9472,8 @@ if (systemThemeQuery) {
 
 (async function main() {
   installPreviewSummaryStyles();
+  installFlowListBadgeStyles();
+  installDumpAsciiRowStyles();
   loadRules();
   setupSplitter();
   setupWheelRouting();
