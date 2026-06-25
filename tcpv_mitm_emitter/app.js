@@ -8607,12 +8607,13 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       }
     }
   } else if (!isRequest && hasDecodedDump) {
-    const childCompare = buildChildComparePanel("", decodedPay, summaryText);
+    const responseBeforePay = hasBeforeDump ? beforePay : "";
+    const childCompare = buildChildComparePanel(responseBeforePay, decodedPay, summaryText);
     if (childCompare) {
       body.appendChild(childCompare);
       semanticCompareAdded = true;
     } else {
-      const treeRow = buildTreeCompareRow("", decodedPay, summaryText);
+      const treeRow = buildTreeCompareRow(responseBeforePay, decodedPay, summaryText);
       if (treeRow) {
         body.appendChild(treeRow);
       }
