@@ -3106,6 +3106,30 @@ function syncSummaryTimestampBadge(summaryNode, ev) {
   }
 }
 
+function syncSummaryHiBadge(summaryNode, ev) {
+  if (!summaryNode || typeof summaryNode.querySelector !== "function") return;
+  const previewWrap = summaryNode.querySelector(".summary-preview");
+  if (!previewWrap || typeof previewWrap.querySelectorAll !== "function") return;
+  for (const node of previewWrap.querySelectorAll(".preview-hi")) {
+    node.remove();
+  }
+  const preview = getPreviewInfo(ev, false);
+  const labels = Array.isArray(preview && preview.hiPreviewLabels) ? preview.hiPreviewLabels : [];
+  if (labels.length <= 0) return;
+  const hiPreview = document.createElement("span");
+  hiPreview.className = "preview-hi";
+  hiPreview.textContent = labels.join(" ");
+  hiPreview.title = `010a0011 hi preview: ${labels.join(" ")}`;
+  const closingBracket = Array.from(previewWrap.childNodes)
+    .reverse()
+    .find((node) => node.nodeType === Node.TEXT_NODE && String(node.textContent || "").includes("]"));
+  if (closingBracket) {
+    previewWrap.insertBefore(hiPreview, closingBracket);
+  } else {
+    previewWrap.appendChild(hiPreview);
+  }
+}
+
 function syncSummaryIdfvBadge(summaryNode, ev, summaryText = "") {
   if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
   for (const node of summaryNode.querySelectorAll(".summary-idfv")) {
@@ -4187,6 +4211,7 @@ function hydrateSummaryBadges(summaryNode, ev, summaryText = "", eventId = "") {
       ev.__tcpvSummaryHydrated = true;
       if (summaryNode && summaryNode.isConnected) {
         syncSummaryInsightStrip(summaryNode, ev, summaryText);
+        syncSummaryHiBadge(summaryNode, ev);
         syncSummaryTimestampBadge(summaryNode, ev);
         syncSummaryIdfvBadge(summaryNode, ev, summaryText);
         syncSummaryHistoryOpenidBadge(summaryNode, ev, summaryText);
@@ -9102,6 +9127,7 @@ function renderEvents() {
       try {
         await ensureEventPayload(ev, flowIdAtStart, eventId);
         if (!wrap.isConnected || state.flowId !== flowIdAtStart) return;
+        syncSummaryHiBadge(summary, ev);
         syncSummaryTimestampBadge(summary, ev);
         syncSummaryIdfvBadge(summary, ev, summaryText);
         syncSummaryHistoryOpenidBadge(summary, ev, summaryText);
