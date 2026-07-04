@@ -7808,18 +7808,33 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   const parsedBeforeChildren = Array.isArray(beforeParsed.children) ? beforeParsed.children : [];
   const parsedAfterChildren = Array.isArray(afterParsed.children) ? afterParsed.children : [];
   const hasChildRecords = parsedBeforeChildren.length > 0 || parsedAfterChildren.length > 0;
-  const beforeRootNode = !hasChildRecords ? makeRootComparableNode(beforeBytes) : null;
-  const afterRootNode = !hasChildRecords ? makeRootComparableNode(afterBytes) : null;
-  const beforeChildren = hasChildRecords ? parsedBeforeChildren : (beforeRootNode ? [beforeRootNode] : []);
-  const afterChildren = hasChildRecords ? parsedAfterChildren : (afterRootNode ? [afterRootNode] : []);
-  const total = Math.max(beforeChildren.length, afterChildren.length);
+  const beforeRootNode = parsedBeforeChildren.length > 0 ? null : makeRootComparableNode(beforeBytes);
+  const afterRootNode = parsedAfterChildren.length > 0 ? null : makeRootComparableNode(afterBytes);
+  const beforeChildren = parsedBeforeChildren.length > 0 ? parsedBeforeChildren : (beforeRootNode ? [beforeRootNode] : []);
+  const afterChildren = parsedAfterChildren.length > 0 ? parsedAfterChildren : (afterRootNode ? [afterRootNode] : []);
+  const actionMap = parseChildActionDetails(summaryText);
+  const actionMaxIndex = actionMap instanceof Map
+    ? Math.max(-1, ...Array.from(actionMap.keys()).filter((value) => Number.isFinite(Number(value))).map(Number))
+    : -1;
+  const total = Math.max(beforeChildren.length, afterChildren.length, actionMaxIndex + 1);
   if (total <= 0) return null;
 
-  const actionMap = parseChildActionDetails(summaryText);
   const summaryKv = parseSummaryKeyValues(summaryText);
   const timestampHintMap = parseSummaryChildTimestampHints(summaryText);
   const counts = parseChildSummaryCounts(summaryText);
-  const visible = Math.min(total, 8);
+  const visibleIndices = [];
+  const addVisibleIndex = (value) => {
+    const index = Number.parseInt(value, 10);
+    if (!Number.isFinite(index) || index < 0 || index >= total) return;
+    if (!visibleIndices.includes(index)) visibleIndices.push(index);
+  };
+  if (actionMap instanceof Map) {
+    Array.from(actionMap.keys()).sort((left, right) => Number(left) - Number(right)).forEach(addVisibleIndex);
+  }
+  for (let index = 0; index < total && visibleIndices.length < 8; index += 1) {
+    addVisibleIndex(index);
+  }
+  const visible = visibleIndices.length;
   const panel = document.createElement("section");
   panel.className = "child-compare";
 
@@ -7855,8 +7870,8 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
 
   const grid = document.createElement("div");
   grid.className = "child-compare-grid";
-  for (let i = 0; i < visible; i += 1) {
-    grid.appendChild(makeChildCard(beforeChildren, afterChildren, beforeBytes, afterBytes, i, actionMap, summaryKv, timestampHintMap));
+  for (const childIndex of visibleIndices) {
+    grid.appendChild(makeChildCard(beforeChildren, afterChildren, beforeBytes, afterBytes, childIndex, actionMap, summaryKv, timestampHintMap));
   }
   panel.appendChild(grid);
 
