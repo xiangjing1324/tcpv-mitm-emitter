@@ -4093,9 +4093,10 @@ function compactStructuredSemanticInsights(ev) {
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
   if (!semantic || semantic.schema !== "tersafe.semantic.v1") return [];
   const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
-  const firstAction = Array.isArray(semantic.actions) && semantic.actions.length > 0
-    ? semantic.actions[0]
-    : {};
+  const semanticActions = Array.isArray(semantic.actions) ? semantic.actions : [];
+  const firstAction = semanticActions.find((item) => (
+    item && item.source_seq !== undefined && item.source_seq !== null
+  )) || semanticActions[0] || {};
   const rolePhase = [packet.role || "未知角色", semantic.state_phase || "unknown"].filter(Boolean).join(" / ");
   const sourceBits = [];
   if (firstAction.source_seq !== undefined && firstAction.source_seq !== null) {
@@ -4104,6 +4105,7 @@ function compactStructuredSemanticInsights(ev) {
   if (Number.isFinite(Number(semantic.source_age_ms))) {
     sourceBits.push(`${Number(semantic.source_age_ms)}ms`);
   }
+  if (firstAction.shape_match) sourceBits.push(String(firstAction.shape_match));
   sourceBits.push(String(semantic.action || "passthrough"));
   const out = [
     { kind: "state", text: rolePhase, title: `report=${packet.report_code || "-"} family=${packet.report_family || "-"}` },
@@ -8361,11 +8363,24 @@ function buildEventAnalysisGrid(ev) {
       { label: "Report", value: packet.report_code || "-" },
       { label: "Role", value: packet.role || "目前不能证明含义" },
       { label: "Phase", value: semantic.state_phase || "unknown" },
-      { label: "Mirror", value: `${semantic.mode || "-"} / ${semantic.action || "passthrough"}` },
+      { label: "执行", value: `${semantic.mode || "active"} / ${semantic.action || "passthrough"}` },
       { label: "Reason", value: semantic.reason || "-" },
       { label: "Source", value: semantic.source_key || "-" },
       { label: "Delay", value: Number.isFinite(Number(semantic.source_age_ms)) ? `${Number(semantic.source_age_ms)} ms` : "-" },
       { label: "Consistency", value: Number.isFinite(Number(semantic.consistency)) ? `${(Number(semantic.consistency) * 100).toFixed(1)}%` : "-" },
+      {
+        label: "Shape",
+        value: Array.isArray(semantic.match_kinds) && semantic.match_kinds.length > 0
+          ? semantic.match_kinds.join(" / ")
+          : "-",
+      },
+      {
+        label: "长度变化",
+        value: [
+          Number.isFinite(Number(semantic.length_delta)) ? `解密 ${Number(semantic.length_delta) >= 0 ? "+" : ""}${Number(semantic.length_delta)}` : "",
+          Number.isFinite(Number(semantic.packet_length_delta)) ? `线上 ${Number(semantic.packet_length_delta) >= 0 ? "+" : ""}${Number(semantic.packet_length_delta)}` : "",
+        ].filter(Boolean).join(" / ") || "0",
+      },
       {
         label: "65010",
         value: semantic.connection_65010 && semantic.connection_65010.status
@@ -8393,6 +8408,7 @@ function buildEventAnalysisGrid(ev) {
               Number(semantic.response_feedback.risk_0024_count_2s || 0) > 0
                 ? `risk×${Number(semantic.response_feedback.risk_0024_count_2s)}`
                 : "",
+              semantic.response_feedback.safety_alert_reason || "",
               semantic.response_feedback.reason || "observed",
             ].filter(Boolean).join(" / ")
           : "-",
@@ -8405,8 +8421,8 @@ function buildEventAnalysisGrid(ev) {
     for (const action of actions) {
       for (const field of Array.isArray(action && action.fields) ? action.fields : []) {
         fieldRows.push({
-          label: `${field.field || "field"} · ${field.action || action.action || "observe"}`,
-          value: `8091=${field.source ?? "-"} | 8092 before=${field.before ?? "-"} | output=${field.after ?? "-"}`,
+          label: `${field.field || "field"} · ${field.action || action.action || "observe"}${Number(field.length_delta || 0) ? ` · len ${Number(field.length_delta) > 0 ? "+" : ""}${Number(field.length_delta)}` : ""}`,
+          value: `8091=${field.source ?? "-"} | 8092 before=${field.before ?? "-"} | 实际上传=${field.after ?? "-"}`,
         });
       }
     }
@@ -8492,9 +8508,11 @@ function buildEventReadableSummary(ev, summaryText) {
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
   if (semantic) {
     const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
-    const sourceSeq = Array.isArray(semantic.actions) && semantic.actions[0]
-      ? semantic.actions[0].source_seq
-      : null;
+    const semanticActions = Array.isArray(semantic.actions) ? semantic.actions : [];
+    const sourceAction = semanticActions.find((item) => (
+      item && item.source_seq !== undefined && item.source_seq !== null
+    )) || semanticActions[0] || null;
+    const sourceSeq = sourceAction ? sourceAction.source_seq : null;
     const semanticValues = [
       packet.role ? `角色 ${packet.role}` : "",
       semantic.state_phase ? `阶段 ${semantic.state_phase}` : "",

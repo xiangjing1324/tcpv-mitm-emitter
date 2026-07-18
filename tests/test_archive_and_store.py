@@ -204,7 +204,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
                 "display": request.hex(),
                 "analysis": {
                     "actions": [
-                        {"action": "candidate", "reason": "ok"},
+                        {"action": "candidate", "reason": "ok", "shape_match": "semantic_compatible"},
                         {"action": "passthrough", "reason": "opaque_or_non_csob_target_owned"},
                     ],
                     "consistency": 1.0,
@@ -221,6 +221,8 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(deep["response_bursts"]["max_per_request_2s"]["0x010a0024"], 4)
         self.assertEqual(deep["traffic"]["response_request_ratio"], 4.0)
         self.assertEqual(deep["mirror"]["exact_shape_hit_rate"], 1.0)
+        self.assertEqual(deep["mirror"]["shape_match_rate"], 1.0)
+        self.assertEqual(deep["mirror"]["shape_match_kinds"], {"semantic_compatible": 1})
         self.assertEqual(deep["mirror"]["opaque_passthrough_rate"], 1.0)
         markdown = render_markdown(summary)
         self.assertIn("低字节只表示动态 subtype", markdown)

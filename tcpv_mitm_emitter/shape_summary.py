@@ -379,8 +379,9 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
     mirror_reasons: Counter[str] = Counter()
     consistency_values: list[float] = []
     source_ages: list[int] = []
-    exact_shape_candidates = 0
-    exact_shape_matches = 0
+    pairable_shape_candidates = 0
+    pairable_shape_matches = 0
+    shape_match_kinds: Counter[str] = Counter()
     opaque_nodes = 0
     opaque_passthrough = 0
     request_count = 0
@@ -491,10 +492,11 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
                 continue
             reason = str(action.get("reason") or "")
             child_action = str(action.get("action") or "")
-            if reason in {"exact_shape_mismatch", "ok"} or child_action == "candidate":
-                exact_shape_candidates += 1
+            if reason == "exact_shape_mismatch" or child_action == "candidate":
+                pairable_shape_candidates += 1
                 if child_action == "candidate" and reason == "ok":
-                    exact_shape_matches += 1
+                    pairable_shape_matches += 1
+                    shape_match_kinds[str(action.get("shape_match") or "exact")] += 1
             if reason in {"opaque_or_non_csob_target_owned", "protected_or_unknown_target_owned"}:
                 opaque_nodes += 1
                 if child_action == "passthrough":
@@ -552,10 +554,19 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             "reasons": dict(mirror_reasons.most_common()),
             "average_consistency": (sum(consistency_values) / len(consistency_values)) if consistency_values else None,
             "max_source_age_ms": max(source_ages) if source_ages else None,
-            "exact_shape_candidates": exact_shape_candidates,
-            "exact_shape_matches": exact_shape_matches,
+            "shape_match_kinds": dict(shape_match_kinds.most_common()),
+            "pairable_shape_candidates": pairable_shape_candidates,
+            "pairable_shape_matches": pairable_shape_matches,
+            "shape_match_rate": (
+                pairable_shape_matches / pairable_shape_candidates if pairable_shape_candidates else None
+            ),
+            # Backward-compatible aliases for older report consumers.  The
+            # rate now includes exact typed-leaf and semantic-compatible CSOB
+            # matches; `shape_match_kinds` is authoritative.
+            "exact_shape_candidates": pairable_shape_candidates,
+            "exact_shape_matches": pairable_shape_matches,
             "exact_shape_hit_rate": (
-                exact_shape_matches / exact_shape_candidates if exact_shape_candidates else None
+                pairable_shape_matches / pairable_shape_candidates if pairable_shape_candidates else None
             ),
             "opaque_nodes": opaque_nodes,
             "opaque_passthrough": opaque_passthrough,
@@ -1079,7 +1090,8 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
             f"- mirror actions: `{_counter_text(mirror.get('actions') or {}, 8)}`",
             f"- average consistency: `{mirror.get('average_consistency')}`",
             f"- max source age ms: `{mirror.get('max_source_age_ms')}`",
-            f"- exact shape hit rate: `{mirror.get('exact_shape_hit_rate')}` ({mirror.get('exact_shape_matches', 0)}/{mirror.get('exact_shape_candidates', 0)})",
+            f"- validated shape match rate: `{mirror.get('shape_match_rate', mirror.get('exact_shape_hit_rate'))}` ({mirror.get('pairable_shape_matches', mirror.get('exact_shape_matches', 0))}/{mirror.get('pairable_shape_candidates', mirror.get('exact_shape_candidates', 0))})",
+            f"- shape match kinds: `{_counter_text(mirror.get('shape_match_kinds') or {}, 8)}`",
             f"- opaque pass-through rate: `{mirror.get('opaque_passthrough_rate')}` ({mirror.get('opaque_passthrough', 0)}/{mirror.get('opaque_nodes', 0)})",
             f"- response burst max/request/2s: `{_counter_text(bursts.get('max_per_request_2s') or {}, 12)}`",
             f"- burst requests over 3: `{_counter_text(bursts.get('requests_over_3') or {}, 12)}`",

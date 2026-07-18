@@ -72,7 +72,7 @@ emit_lobby_packet(
     cid="10.0.0.1:50000->1.2.3.4:65010",
     packet_data=packet_data,
     from_client=True,
-    analysis={"schema": "tersafe.semantic.v1", "action": "shadow_candidate"},  # optional
+    analysis={"schema": "tersafe.semantic.v1", "mode": "active", "action": "active_modified"},  # optional
 )
 
 # Preview-only mode (store first N bytes but keep real packet length in UI)
@@ -188,7 +188,7 @@ export TCPV_EVENTS_FETCH_LIMIT=2000
 
 ## Semantic deep report
 
-Event rows prioritize semantic role, state phase, 8091 source sequence/age, mirror action, consistency, and response correlation. Hex remains available as a drill-down view. Report-code naming follows evidence boundaries:
+Event rows prioritize semantic role, state phase, 8091 source sequence/age, actual upload action, exact/semantic-compatible match kind, plaintext/wire length delta, consistency, and response correlation. There is no CSOB candidate-only shadow state: `active_modified` means a changed packet was uploaded, `active_consistent` means all mirrored fields were already equal and the unchanged packet was uploaded, while `active_blocked`/`validation_failed` means the CSOB request was not uploaded. Hex remains available as a drill-down view. Report-code naming follows evidence boundaries:
 
 - `0x010A001B`: parent container.
 - `0x011223xx`: dynamic metadata family; the low byte is displayed only as a subtype.
