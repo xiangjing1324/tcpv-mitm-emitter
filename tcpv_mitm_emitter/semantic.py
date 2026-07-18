@@ -15,7 +15,7 @@ from .shape_summary import (
 
 
 SCHEMA = "tersafe.semantic.v1"
-SEMANTIC_REVISION = 2
+SEMANTIC_REVISION = 3
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
@@ -28,6 +28,8 @@ _KNOWN_TYPED_TIMESTAMPS = (
     (80, 0x1001, 0x200E0002, 0x34560001, 0x20, "dfm-session"),
     (68, 0x100A, 0x200D0002, 0x34560001, 0x40, "dfm-current-200d"),
     (80, 0x1001, 0x200D0002, 0x34560001, 0x20, "dfm-session-200d"),
+    (68, 0x100A, 0x200F0002, 0x34560001, 0x40, "dfm-current-200f"),
+    (80, 0x1001, 0x200F0002, 0x34560001, 0x20, "dfm-session-200f"),
     (68, 0x810B, 0x21650002, 0x34560001, 0x40, "uagame-current"),
     (160, 0x8023, 0x21650002, 0x34560001, 0x58, "uagame-current-8023"),
     (80, 0x8102, 0x21650002, 0x34560001, 0x20, "uagame-session"),
@@ -126,8 +128,9 @@ def _timestamps(record: bytes, layout: dict[str, int] | None) -> dict[str, list[
             int(layout.get("selector0") or 0),
             int(layout.get("selector1") or 0),
         )
-        for record_len, inner_type, selector0, selector1, offset, label in _KNOWN_TYPED_TIMESTAMPS:
-            if shape != (record_len, inner_type, selector0, selector1) or offset + 4 > len(record):
+        for record_len, inner_type, selector0, selector1, schema_offset, label in _KNOWN_TYPED_TIMESTAMPS:
+            offset = int(layout.get("shift") or 0) + schema_offset
+            if shape != (record_len, inner_type, selector0, selector1) or offset < 0 or offset + 4 > len(record):
                 continue
             value = int.from_bytes(record[offset : offset + 4], "big")
             if 946684800 <= value <= 4102444800:

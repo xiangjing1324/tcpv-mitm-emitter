@@ -179,6 +179,8 @@ const KNOWN_0102000A_TIMESTAMP_LAYOUTS = [
   { len: 80, innerType: 0x1001, selector0: 0x200e0002, selector1: 0x34560001, offsets: [0x20], label: "dfm-session" },
   { len: 68, innerType: 0x100a, selector0: 0x200d0002, selector1: 0x34560001, offsets: [0x40], label: "dfm-current-200d" },
   { len: 80, innerType: 0x1001, selector0: 0x200d0002, selector1: 0x34560001, offsets: [0x20], label: "dfm-session-200d" },
+  { len: 68, innerType: 0x100a, selector0: 0x200f0002, selector1: 0x34560001, offsets: [0x40], label: "dfm-current-200f" },
+  { len: 80, innerType: 0x1001, selector0: 0x200f0002, selector1: 0x34560001, offsets: [0x20], label: "dfm-session-200f" },
   { len: 68, innerType: 0x810b, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x40], label: "uagame-current" },
   { len: 160, innerType: 0x8023, selector0: 0x21650002, selector1: 0x34560001, offsets: [0x58], label: "uagame-current-8023" },
   { innerType: 0x8418, selector0: 0x21650002, selector1: 0x34560001, offsetFromEnd: 0x14, label: "uagame-tail-8418" },
@@ -2527,12 +2529,13 @@ function layoutMatchesKnownTimestampShape(layout, shape) {
 
 function timestampOffsetsForKnownShape(layout, shape) {
   const offsets = [];
+  const shift = Number(layout && layout.shift) || 0;
   for (const offset of shape && Array.isArray(shape.offsets) ? shape.offsets : []) {
-    offsets.push(Number(offset));
+    offsets.push(shift + Number(offset));
   }
   const offsetFromEnd = Number(shape && shape.offsetFromEnd);
   if (Number.isFinite(offsetFromEnd) && Number.isFinite(Number(layout && layout.len))) {
-    offsets.push(Number(layout.len) - offsetFromEnd);
+    offsets.push(shift + Number(layout.len) - offsetFromEnd);
   }
   return offsets.filter((offset, index, all) => (
     Number.isFinite(offset) && offset >= 0 && all.indexOf(offset) === index
@@ -2546,6 +2549,8 @@ function timestampShapeDisplay(label) {
     "dfm-session": "DFM会话基准秒",
     "dfm-current-200d": "DFM当前秒/200D分支",
     "dfm-session-200d": "DFM会话基准秒/200D分支",
+    "dfm-current-200f": "DFM当前秒/200F分支",
+    "dfm-session-200f": "DFM会话基准秒/200F分支",
     "uagame-current": "UAGame当前秒",
     "uagame-current-8023": "UAGame当前秒/8023",
     "uagame-tail-8418": "UAGame尾部当前秒/8418",

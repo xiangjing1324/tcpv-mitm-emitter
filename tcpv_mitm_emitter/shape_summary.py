@@ -22,8 +22,10 @@ STRONG_TEXT_TOKEN_RE = re.compile(
 DFM_TYPED_TIMESTAMP_SHAPES = {
     (68, 0x100A, 0x200E0002, 0x34560001): ("typed_timestamp_current", "telemetry.time.current", "当前采样时间", "confirmed"),
     (68, 0x100A, 0x200D0002, 0x34560001): ("typed_timestamp_current", "telemetry.time.current", "当前采样时间", "confirmed"),
+    (68, 0x100A, 0x200F0002, 0x34560001): ("typed_timestamp_current", "telemetry.time.current", "当前采样时间", "confirmed"),
     (80, 0x1001, 0x200E0002, 0x34560001): ("typed_timestamp_session_baseline", "telemetry.time.session_baseline", "会话/缓存基准时间", "observed"),
     (80, 0x1001, 0x200D0002, 0x34560001): ("typed_timestamp_session_baseline", "telemetry.time.session_baseline", "会话/缓存基准时间", "observed"),
+    (80, 0x1001, 0x200F0002, 0x34560001): ("typed_timestamp_session_baseline", "telemetry.time.session_baseline", "会话/缓存基准时间", "observed"),
 }
 
 _SEMANTIC_PROCESS_TOKENS = (

@@ -279,6 +279,44 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("candidate falls inside ASCII/hash/string slot", summary["deep"]["timestamps"]["rejected_reasons"])
         self.assertIn("Timestamp Evidence Boundary", render_markdown(summary))
 
+    def test_latest_200f_timestamp_shapes_use_compact_child_shift_and_chinese_semantics(self):
+        event_seconds = 1_784_361_841
+
+        current_full = bytearray(
+            _typed_record(
+                0x100A,
+                length=68,
+                selector0=0x200F0002,
+                inner_field=1,
+            )
+        )
+        current_full[0x40:0x44] = (event_seconds - 28).to_bytes(4, "big")
+        current_compact = bytes(current_full[3:] + b"\x00\x00\x00")
+        current = analyze_payload(current_compact, direction=0)
+        self.assertEqual(current["packet"]["semantic_label_zh"], "当前采样时间")
+        current_timestamp = next(
+            item for item in current["packet"]["timestamps"]["accepted"] if item["field"] == "dfm-current-200f"
+        )
+        self.assertEqual(current_timestamp["offset"], 0x40 - 3)
+        self.assertEqual(current_timestamp["value"], event_seconds - 28)
+
+        session_full = bytearray(
+            _typed_record(
+                0x1001,
+                length=80,
+                selector0=0x200F0002,
+                inner_field=event_seconds - 28,
+            )
+        )
+        session_compact = bytes(session_full[3:] + b"\x00\x00\x00")
+        session = analyze_payload(session_compact, direction=0)
+        self.assertEqual(session["packet"]["semantic_label_zh"], "会话/缓存基准时间")
+        session_timestamp = next(
+            item for item in session["packet"]["timestamps"]["accepted"] if item["field"] == "dfm-session-200f"
+        )
+        self.assertEqual(session_timestamp["offset"], 0x20 - 3)
+        self.assertEqual(session_timestamp["value"], event_seconds - 28)
+
     def test_be32_candidate_crossing_schema_field_boundary_is_rejected(self):
         record = _metadata_record(0x01122342, b"x" * 40 + b"state:1234\x00")
         analysis = analyze_payload(record, direction=0)

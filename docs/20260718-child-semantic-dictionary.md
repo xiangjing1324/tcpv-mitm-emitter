@@ -38,8 +38,8 @@
 
 | shape / payload 证据 | 类别 | 中文显示 | 等级 |
 |---|---|---|---|
-| `len=68 inner_type=0x100A selector0=0x200D/200E0002 selector1=0x34560001` | `telemetry.time.current` | 当前采样时间 | 确定。 |
-| `len=80 inner_type=0x1001 selector0=0x200D/200E0002 selector1=0x34560001` | `telemetry.time.session_baseline` | 会话/缓存基准时间 | 观察；不能当每包当前时间。 |
+| `len=68 inner_type=0x100A selector0=0x200D/200E/200F0002 selector1=0x34560001` | `telemetry.time.current` | 当前采样时间 | 确定；200F 分支由最新 8091 连续样本确认。 |
+| `len=80 inner_type=0x1001 selector0=0x200D/200E/200F0002 selector1=0x34560001` | `telemetry.time.session_baseline` | 会话/缓存基准时间 | 观察；同一窗口固定，不能当每包当前时间。 |
 | `inner_type=0x100B` 或解出 UI token | `environment.ui_hierarchy` | UI 层级/前台窗口探测 | 有 token 为观察；只有 inner_type 为近似。 |
 | `inner_type=0x1105/0x2000/0xFFF2` 或解出 dylib/framework | `environment.module_integrity` | 模块/动态库路径探测 | 有文本为观察；只有 shape 为近似。 |
 | `inner_type=0x8027/0x8029` 或解出 daemon/调用栈 | `environment.process_stack` | 进程/调用栈探测 | 有文本为观察；只有 shape 为近似。 |
