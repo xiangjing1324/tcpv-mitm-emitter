@@ -4097,7 +4097,11 @@ function compactStructuredSemanticInsights(ev) {
   const firstAction = semanticActions.find((item) => (
     item && item.source_seq !== undefined && item.source_seq !== null
   )) || semanticActions[0] || {};
-  const rolePhase = [packet.role || "未知角色", semantic.state_phase || "unknown"].filter(Boolean).join(" / ");
+  const payloadRole = packet.semantic_role
+    || (packet.shape && packet.shape.semantic_role)
+    || packet.role
+    || "未知角色";
+  const rolePhase = [payloadRole, semantic.state_phase || "unknown"].filter(Boolean).join(" / ");
   const sourceBits = [];
   if (firstAction.source_seq !== undefined && firstAction.source_seq !== null) {
     sourceBits.push(`8091#${firstAction.source_seq}`);
@@ -8358,10 +8362,15 @@ function buildEventAnalysisGrid(ev) {
   if (semantic && typeof semantic === "object") {
     const semanticCard = createAnalysisCard("语义状态 / 8091 → 8092", "analysis-card-semantic");
     const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
+    const packetPayloadRole = packet.semantic_role
+      || (packet.shape && packet.shape.semantic_role)
+      || packet.role
+      || "目前不能证明含义";
     const semanticRows = [
       { label: "Schema", value: semantic.schema || "tersafe.semantic.v1" },
       { label: "Report", value: packet.report_code || "-" },
-      { label: "Role", value: packet.role || "目前不能证明含义" },
+      { label: "Payload Role", value: packetPayloadRole },
+      { label: "Family Role", value: packet.role || "目前不能证明含义" },
       { label: "Phase", value: semantic.state_phase || "unknown" },
       { label: "执行", value: `${semantic.mode || "active"} / ${semantic.action || "passthrough"}` },
       { label: "Reason", value: semantic.reason || "-" },
@@ -8432,6 +8441,23 @@ function buildEventAnalysisGrid(ev) {
     }
 
     const packetNodes = [packet, ...(Array.isArray(packet.children) ? packet.children : [])];
+    const roleRows = packetNodes
+      .filter((node) => node && (node.semantic_role || (node.shape && node.shape.semantic_role)))
+      .slice(0, 24)
+      .map((node) => ({
+        label: node.index === null || node.index === undefined
+          ? `root · ${node.report_code || "-"}`
+          : `child#${node.index} · ${node.report_code || "-"}`,
+        value: [
+          node.semantic_role || (node.shape && node.shape.semantic_role),
+          node.semantic_role_confidence || "",
+          ...(Array.isArray(node.semantic_role_evidence) ? node.semantic_role_evidence.slice(0, 5) : []),
+        ].filter(Boolean).join(" / "),
+      }));
+    if (roleRows.length > 0) {
+      appendAnalysisSectionTitle(semanticCard.body, "父子节点实际 payload 角色");
+      appendAnalysisRows(semanticCard.body, roleRows);
+    }
     const rejected = packetNodes.flatMap((node) => (
       node && node.timestamps && Array.isArray(node.timestamps.rejected) ? node.timestamps.rejected : []
     ));
@@ -8513,8 +8539,12 @@ function buildEventReadableSummary(ev, summaryText) {
       item && item.source_seq !== undefined && item.source_seq !== null
     )) || semanticActions[0] || null;
     const sourceSeq = sourceAction ? sourceAction.source_seq : null;
+    const payloadRole = packet.semantic_role
+      || (packet.shape && packet.shape.semantic_role)
+      || packet.role
+      || "";
     const semanticValues = [
-      packet.role ? `角色 ${packet.role}` : "",
+      payloadRole ? `角色 ${payloadRole}` : "",
       semantic.state_phase ? `阶段 ${semantic.state_phase}` : "",
       sourceSeq !== null && sourceSeq !== undefined ? `8091 seq ${sourceSeq}` : "",
       Number.isFinite(Number(semantic.source_age_ms)) ? `同步 ${Number(semantic.source_age_ms)}ms` : "",

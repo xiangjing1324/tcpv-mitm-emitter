@@ -207,6 +207,12 @@ python -m tcpv_mitm_emitter.shape_summary capture.tcpvflow.jsonl.gz \
 
 The same command accepts the historical `reportcode_matrix.json`. Matrix rows keep their observation counts and old evidence as provenance, but directions, request/response timing, and unknown meanings are not invented.
 
+Current 8091/8092 field evidence and complete per-reportCode output are in:
+
+- `docs/20260718-live-csob-8091-8092-comparison.md`
+- `docs/20260718-live-replay-18091-deep.md`
+- `docs/20260718-live-replay-18092-deep.md`
+
 ## Optional viewer login
 
 Set `TCPV_AUTH_PASSWORD` (or compatibility alias `TCPV_PASSWORD`) to protect the web UI and API with a signed login cookie. `TCPV_AUTH_SECRET`, `TCPV_AUTH_MAX_AGE`, and `TCPV_AUTH_COOKIE_SECURE` customize signing, lifetime, and HTTPS-only cookies. If no environment password is set, the runtime may use mitmweb's configured `web_password` when available.

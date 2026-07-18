@@ -152,6 +152,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(analysis["schema"], "tersafe.semantic.v1")
         self.assertEqual(analysis["packet"]["report_family"], "0x011223xx")
         self.assertEqual(analysis["packet"]["dynamic_subtype"], 0x88)
+        self.assertEqual(analysis["packet"]["semantic_role"], "csob_state_snapshot")
         accepted = analysis["packet"]["timestamps"]["accepted"]
         self.assertEqual([item["field"] for item in accepted], ["ob:T1", "ob:T2", "ob:T3"])
 
@@ -184,6 +185,14 @@ class ArchiveAndStoreTests(unittest.TestCase):
         hit = next(item for item in rejected if item["offset"] == 0x44)
         self.assertEqual(hit["confidence"], "rejected")
         self.assertIn("ASCII", hit["reason"])
+        summary = summarize_events(
+            {"account": "timestamp-reject"},
+            [{"ts": 1000, "dir": 0, "seq": 1, "display": bytes(record).hex(), "analysis": analysis}],
+            input_name="timestamp-reject",
+        )
+        self.assertGreaterEqual(summary["deep"]["timestamps"]["rejected"], 1)
+        self.assertIn("candidate falls inside ASCII/hash/string slot", summary["deep"]["timestamps"]["rejected_reasons"])
+        self.assertIn("Timestamp Evidence Boundary", render_markdown(summary))
 
     def test_be32_candidate_crossing_schema_field_boundary_is_rejected(self):
         record = _metadata_record(0x01122342, b"x" * 40 + b"state:1234\x00")
@@ -194,7 +203,11 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("crosses", hit["reason"])
 
     def test_deep_report_keeps_dynamic_subtypes_and_flags_response_burst(self):
-        request = _metadata_record(0x01122388, b"state:00b00017,r:0/0/0,p:1/1,0\x00")
+        request = _metadata_record(
+            0x01122388,
+            b"cs:11111111/22222222,ob:58/d4/ffffffff/0/79/1781534846/1781534856/1781534848/1/0/1;"
+            b"\x00state:00b00017,r:0/0/0,p:1/1,0\x00",
+        )
         response = _metadata_record(0x010A0024, b"\x00" * 8)
         events = [
             {
@@ -203,6 +216,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
                 "seq": 1,
                 "display": request.hex(),
                 "analysis": {
+                    **analyze_payload(request, direction=0),
                     "actions": [
                         {"action": "candidate", "reason": "ok", "shape_match": "semantic_compatible"},
                         {"action": "passthrough", "reason": "opaque_or_non_csob_target_owned"},
@@ -224,9 +238,28 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(deep["mirror"]["shape_match_rate"], 1.0)
         self.assertEqual(deep["mirror"]["shape_match_kinds"], {"semantic_compatible": 1})
         self.assertEqual(deep["mirror"]["opaque_passthrough_rate"], 1.0)
+        dynamic_report = next(item for item in deep["reports"] if item["report_code"] == "0x01122388")
+        self.assertEqual(dynamic_report["payload_roles"], {"csob_state_snapshot (high)": 1})
+        self.assertEqual(deep["timestamps"]["accepted"], 3)
         markdown = render_markdown(summary)
         self.assertIn("低字节只表示动态 subtype", markdown)
         self.assertIn("目前不能证明含义", markdown)
+
+    def test_dynamic_subtype_payload_role_is_not_fixed_by_suffix(self):
+        csob = _metadata_record(
+            0x01122388,
+            b"cs:11111111/22222222,ob:58/d4/ffffffff/0/79/1781534846/1781534856/1781534848/1/0/1;"
+            b"\x00state:00b00017,r:0/0/0,p:1/1,0\x00",
+        )
+        config = _metadata_record(0x01122388, b"config2.dat;model:iPad14,5;ver:16.40\x00")
+        events = [
+            {"ts": 1000, "dir": 0, "seq": 1, "display": csob.hex(), "analysis": analyze_payload(csob, direction=0)},
+            {"ts": 1100, "dir": 0, "seq": 2, "display": config.hex(), "analysis": analyze_payload(config, direction=0)},
+        ]
+        summary = summarize_events({"account": "mixed-subtype"}, events, input_name="mixed-subtype")
+        dynamic_report = next(item for item in summary["deep"]["reports"] if item["report_code"] == "0x01122388")
+        self.assertEqual(dynamic_report["payload_roles"]["csob_state_snapshot (high)"], 1)
+        self.assertEqual(dynamic_report["payload_roles"]["configuration_file_observation (observed)"], 1)
 
     def test_historical_reportcode_matrix_keeps_provenance_without_inventing_direction(self):
         matrix = [

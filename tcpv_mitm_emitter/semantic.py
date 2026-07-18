@@ -8,6 +8,7 @@ from typing import Any
 from .shape_summary import (
     _detect_tss_report,
     _fmt_hex,
+    _observed_payload_role,
     _parse_parent_children,
     _read_0102000a_layout,
 )
@@ -198,6 +199,10 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
     report_code = int(report["value"]) if report else 0
     family, subtype = report_family(report_code)
     role, role_confidence = report_role(report_code, direction=direction)
+    semantic_role, semantic_role_confidence, semantic_role_evidence = _observed_payload_role(
+        report_code,
+        record,
+    )
     layout = _read_0102000a_layout(record, report) if report and report_code == 0x0102000A else None
     fields = []
     for name, regex in (("cs", _CS_RE), ("ob", _OB_RE), ("state", _STATE_RE), ("r", _R_RE), ("p", _P_RE)):
@@ -224,6 +229,14 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
         "inner_field": _fmt_hex(layout.get("inner_field"), 8) if layout else None,
         "record_len": len(record),
     }
+    # Parent containers embed complete child records. Counting/scanning the
+    # parent as one flat value duplicates every child timestamp and produces
+    # misleading generic BE32 rejects. Child nodes remain authoritative.
+    timestamp_analysis = (
+        {"accepted": [], "rejected": []}
+        if report_code == 0x010A001B
+        else _timestamps(record, layout)
+    )
     return {
         "index": index,
         "report_code": _fmt_hex(report_code, 8),
@@ -231,10 +244,13 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
         "dynamic_subtype": subtype,
         "role": role,
         "role_confidence": role_confidence,
+        "semantic_role": semantic_role,
+        "semantic_role_confidence": semantic_role_confidence,
+        "semantic_role_evidence": list(semantic_role_evidence),
         "leaf_id": _fmt_hex(int.from_bytes(record[10:14], "big"), 8) if len(record) >= 14 else None,
         "shape": shape,
         "fields": fields,
-        "timestamps": _timestamps(record, layout),
+        "timestamps": timestamp_analysis,
     }
 
 

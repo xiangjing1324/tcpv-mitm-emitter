@@ -371,6 +371,61 @@ def _report_role(report_code: int, direction: int) -> tuple[str, str]:
     return "目前不能证明含义", "unknown"
 
 
+def _observed_payload_role(report_code: int, record: bytes) -> tuple[str, str, tuple[str, ...]]:
+    """Classify only payload evidence that is visible in this exact record.
+
+    Dynamic 0x011223xx suffixes are deliberately excluded from the decision:
+    the same subtype can carry different observations in different packets.
+    """
+    data = bytes(record or b"")
+    lower = data.lower()
+    evidence: list[str] = []
+
+    if report_code == 0x010A001B:
+        return "parent_container", "confirmed", ("report_code",)
+    if report_code == 0x010A0011:
+        return "pairing_or_protection_context_observed", "observed", ("report_code",)
+    if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
+        return "response_feedback_fields", "observed", ("fixed_response_offsets",)
+    if report_code == 0x0102000A:
+        report = _detect_tss_report(data)
+        layout = _read_0102000a_layout(data, report) if report else None
+        if STRONG_TEXT_TOKEN_RE.search(data.decode("ascii", "ignore")):
+            return "typed_leaf_string_or_integrity_observation", "observed", ("printable_token", "full_shape_required")
+        if layout:
+            return "typed_leaf_fixed_shape_value", "observed", ("full_shape",)
+        return "typed_leaf_unresolved_shape", "unknown", ("shape_parse_failed",)
+    if report_code & 0xFFFFFF00 != 0x01122300:
+        return "unresolved_payload", "unknown", ()
+
+    has_csob = all(token in lower for token in (b"cs:", b",ob:", b"state:", b",r:", b",p:"))
+    if has_csob:
+        return "csob_state_snapshot", "high", ("cs", "ob", "state", "r", "p")
+
+    if b"config2.dat" in lower or b"config3.dat" in lower or b"mrpcs_i_l.data" in lower:
+        evidence.append("configuration_filename")
+        return "configuration_file_observation", "observed", tuple(evidence)
+    if b"apple root ca" in lower or b"certification authority" in lower:
+        return "certificate_or_trust_observation", "observed", ("certificate_text",)
+    if b"iteamid:" in lower or b"teamid:" in lower:
+        return "signing_team_metadata", "observed", ("team_id_key",)
+    if b"addlistener" in lower or b"hdmioutput" in lower:
+        return "runtime_api_or_output_route_observation", "observed", ("runtime_api_text",)
+    if b"rgvsdgfgb3jjzwnsawvuda==" in lower:
+        return "application_component_marker", "observed", ("base64_component_text",)
+    if b"iappversion:" in lower or b"iappinfo:" in lower:
+        return "application_version_metadata", "observed", ("app_version_key",)
+    if b"framework" in lower or b".dylib" in lower:
+        return "module_or_framework_observation", "observed", ("module_text",)
+    if b"idevidfv:" in lower or b"itsssdkuuid:" in lower or b"iappmachuuid:" in lower:
+        return "device_identity_metadata", "observed", ("device_identifier_key",)
+    if b"model:" in lower or b"ver:" in lower:
+        return "device_profile_metadata", "observed", ("device_profile_key",)
+    if b"error" in lower:
+        return "error_observation", "observed", ("error_text",)
+    return "dynamic_metadata_opaque", "unknown", ("dynamic_family_only",)
+
+
 def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]:
     reports: dict[str, dict[str, Any]] = {}
     subtype_counts: Counter[str] = Counter()
@@ -387,6 +442,9 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
     request_count = 0
     response_count = 0
     timeline: list[tuple[int, int, str]] = []
+    accepted_timestamps: Counter[str] = Counter()
+    rejected_timestamp_reasons: Counter[str] = Counter()
+    rejected_timestamp_samples: list[dict[str, Any]] = []
 
     def add_report(report_code: int, record: bytes, event: dict[str, Any], *, child_index: int | None) -> None:
         direction = int(event.get("dir") or 0)
@@ -401,6 +459,8 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
                 "dynamic_subtype": subtype,
                 "counts": {"request": 0, "response": 0},
                 "roles": Counter(),
+                "payload_roles": Counter(),
+                "payload_evidence": Counter(),
                 "confidence": confidence,
                 "shapes": Counter(),
                 "fields": defaultdict(Counter),
@@ -411,6 +471,10 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
         )
         item["counts"]["request" if direction == 0 else "response"] += 1
         item["roles"][role] += 1
+        payload_role, payload_confidence, payload_evidence = _observed_payload_role(report_code, record)
+        item["payload_roles"][f"{payload_role} ({payload_confidence})"] += 1
+        for evidence_name in payload_evidence:
+            item["payload_evidence"][evidence_name] += 1
         if subtype is not None:
             subtype_counts[f"0x{subtype:02x}"] += 1
         report = _detect_tss_report(record)
@@ -476,6 +540,42 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
         timeline.append((int(event.get("ts") or 0), direction, report_key))
 
         analysis = event.get("analysis") if isinstance(event.get("analysis"), dict) else {}
+        packet_analysis = analysis.get("packet") if isinstance(analysis.get("packet"), dict) else {}
+        timestamp_nodes = [packet_analysis]
+        timestamp_nodes.extend(
+            item for item in packet_analysis.get("children", [])
+            if isinstance(item, dict)
+        )
+        for node in timestamp_nodes:
+            timestamps = node.get("timestamps") if isinstance(node.get("timestamps"), dict) else {}
+            accepted_items = timestamps.get("accepted")
+            if not isinstance(accepted_items, list):
+                accepted_items = []
+            for accepted in accepted_items:
+                if not isinstance(accepted, dict):
+                    continue
+                accepted_timestamps[
+                    f"{accepted.get('source') or 'unknown'}:{accepted.get('field') or 'unknown'}"
+                ] += 1
+            rejected_items = timestamps.get("rejected")
+            if not isinstance(rejected_items, list):
+                rejected_items = []
+            for rejected in rejected_items:
+                if not isinstance(rejected, dict):
+                    continue
+                reason_text = str(rejected.get("reason") or "unspecified")
+                rejected_timestamp_reasons[reason_text] += 1
+                if len(rejected_timestamp_samples) < 12:
+                    rejected_timestamp_samples.append(
+                        {
+                            "seq": event.get("seq"),
+                            "report_code": node.get("report_code"),
+                            "child_index": node.get("index"),
+                            "offset": rejected.get("offset"),
+                            "value": rejected.get("value"),
+                            "reason": reason_text,
+                        }
+                    )
         phase_counts[str(analysis.get("state_phase") or "unknown")] += 1
         mirror_actions[str(analysis.get("action") or "none")] += 1
         mirror_reasons[str(analysis.get("reason") or "none")] += 1
@@ -525,9 +625,15 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
     ):
         report_rows.append(
             {
-                **{name: value for name, value in item.items() if name not in {"roles", "shapes", "fields", "correlations"}},
+                **{
+                    name: value
+                    for name, value in item.items()
+                    if name not in {"roles", "payload_roles", "payload_evidence", "shapes", "fields", "correlations"}
+                },
                 "observations": int(item["counts"]["request"]) + int(item["counts"]["response"]),
                 "roles": dict(item["roles"].most_common()),
+                "payload_roles": dict(item["payload_roles"].most_common()),
+                "payload_evidence": dict(item["payload_evidence"].most_common()),
                 "shapes": dict(item["shapes"].most_common()),
                 "fields": {name: dict(values.most_common(8)) for name, values in item["fields"].items()},
                 "correlations": dict(item["correlations"].most_common(8)),
@@ -547,6 +653,13 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
         "response_bursts": {
             "max_per_request_2s": dict(burst_max.most_common()),
             "requests_over_3": dict(bursts.most_common()),
+        },
+        "timestamps": {
+            "accepted": sum(accepted_timestamps.values()),
+            "accepted_by_schema": dict(accepted_timestamps.most_common()),
+            "rejected": sum(rejected_timestamp_reasons.values()),
+            "rejected_reasons": dict(rejected_timestamp_reasons.most_common()),
+            "rejected_samples": rejected_timestamp_samples,
         },
         "mirror": {
             "state_phases": dict(phase_counts.most_common()),
@@ -1076,6 +1189,7 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
     traffic = deep.get("traffic") or {}
     mirror = deep.get("mirror") or {}
     bursts = deep.get("response_bursts") or {}
+    timestamps = deep.get("timestamps") or {}
     connection_65010 = deep.get("connection_65010") or {}
     lines.extend(
         [
@@ -1095,12 +1209,14 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
             f"- opaque pass-through rate: `{mirror.get('opaque_passthrough_rate')}` ({mirror.get('opaque_passthrough', 0)}/{mirror.get('opaque_nodes', 0)})",
             f"- response burst max/request/2s: `{_counter_text(bursts.get('max_per_request_2s') or {}, 12)}`",
             f"- burst requests over 3: `{_counter_text(bursts.get('requests_over_3') or {}, 12)}`",
+            f"- accepted timestamps: `{timestamps.get('accepted', 0)}` (`{_counter_text(timestamps.get('accepted_by_schema') or {}, 8)}`)",
+            f"- rejected timestamp candidates: `{timestamps.get('rejected', 0)}` (`{_counter_text(timestamps.get('rejected_reasons') or {}, 6)}`)",
             f"- 65010 connection: `observed={connection_65010.get('observed', False)} status={connection_65010.get('status', 'unknown')} first={connection_65010.get('first_ts')} last={connection_65010.get('last_ts')}`",
             "",
             "### Every ReportCode",
             "",
-            "| reportCode | family/subtype | observed | request | response | observed role | confidence | shapes | fields | preceding request |",
-            "|---|---|---:|---:|---:|---|---|---|---|---|",
+            "| reportCode | family/subtype | observed | request | response | family role | observed payload roles | confidence | shapes | fields | preceding request |",
+            "|---|---|---:|---:|---:|---|---|---|---|---|---|",
         ]
     )
     for report in deep.get("reports") or []:
@@ -1116,7 +1232,9 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
         lines.append(
             f"| `{report.get('report_code')}` | `{family}` | {report.get('observations', int(counts.get('request', 0)) + int(counts.get('response', 0)))} | "
             f"{counts.get('request', 0)} | {counts.get('response', 0)} | "
-            f"{report.get('meaning', '目前不能证明含义')} | `{report.get('confidence', 'unknown')}` | "
+            f"{report.get('meaning', '目前不能证明含义')} | "
+            f"`{_counter_text(report.get('payload_roles') or {}, 4)}` | "
+            f"`{report.get('confidence', 'unknown')}` | "
             f"`{_counter_text(report.get('shapes') or {}, 2)}` | `{field_text}` | "
             f"`{_counter_text(report.get('correlations') or {}, 3)}` |"
         )
@@ -1127,6 +1245,24 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
             "",
             f"- subtype counts: `{_counter_text(deep.get('dynamic_011223_subtypes') or {}, 32)}`",
             "- 低字节只表示动态 subtype；具体含义必须由 payload 字段和上下文判定。",
+            "",
+            "### Timestamp Evidence Boundary",
+            "",
+            "- 只接受 `ob:T1/T2/T3` 和已知 typed-leaf 完整 shape 中的时间字段。",
+            "- 普通 BE32、ASCII/hash/string 槽以及跨字段边界候选均拒绝，不再默认高亮。",
+            "",
+            "| seq | reportCode | child | offset | value | rejected reason |",
+            "|---:|---|---:|---:|---:|---|",
+        ]
+    )
+    for item in timestamps.get("rejected_samples") or []:
+        lines.append(
+            f"| {item.get('seq')} | `{item.get('report_code') or '-'}` | "
+            f"{item.get('child_index') if item.get('child_index') is not None else '-'} | "
+            f"{item.get('offset')} | {item.get('value')} | {item.get('reason') or '-'} |"
+        )
+    lines.extend(
+        [
             "",
             "### Unresolved",
             "",
