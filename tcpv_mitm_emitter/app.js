@@ -2499,7 +2499,8 @@ function read0102000aLayout(record, report) {
   const innerTypeOffset = shift + 0x16;
   const selector0Offset = shift + 0x18;
   const selector1Offset = shift + 0x1c;
-  if (lenOffset < 0 || selector1Offset + 3 >= record.length) return null;
+  const innerFieldOffset = shift + 0x20;
+  if (lenOffset < 0 || innerFieldOffset + 3 >= record.length) return null;
   const declaredLen = readBe16(record, lenOffset);
   const normalizedLen = Number.isFinite(declaredLen) && declaredLen > 0 ? declaredLen : record.length - shift;
   return {
@@ -2508,6 +2509,8 @@ function read0102000aLayout(record, report) {
     innerType: readBe16(record, innerTypeOffset),
     selector0: readBe32(record, selector0Offset),
     selector1: readBe32(record, selector1Offset),
+    innerField: readBe32(record, innerFieldOffset),
+    bodyStart: Math.max(0, shift + 0x24),
   };
 }
 
@@ -4089,6 +4092,43 @@ function compactPacketSemanticInsight(ev) {
   };
 }
 
+function semanticTierLabel(value) {
+  const labels = {
+    confirmed: "确定",
+    observed: "观察",
+    approximate: "近似",
+    unknown: "未知",
+    high: "高置信",
+  };
+  const key = String(value || "unknown").toLowerCase();
+  return labels[key] || String(value || "未知");
+}
+
+function summarizeStructuredChildSemantics(children) {
+  const counts = new Map();
+  let approximate = 0;
+  let unknown = 0;
+  for (const child of Array.isArray(children) ? children : []) {
+    if (!child || typeof child !== "object") continue;
+    const label = String(child.semantic_label_zh || child.semantic_role || "未解析记录");
+    counts.set(label, (counts.get(label) || 0) + 1);
+    const tier = String(child.semantic_tier || child.semantic_role_confidence || "unknown").toLowerCase();
+    if (tier === "approximate") approximate += 1;
+    if (tier === "unknown") unknown += 1;
+  }
+  if (counts.size <= 0) return null;
+  const text = Array.from(counts.entries())
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+    .slice(0, 4)
+    .map(([label, count]) => `${label}×${count}`)
+    .join(" / ");
+  return {
+    kind: "child",
+    text,
+    title: `child 语义分布；近似=${approximate}，真正未知=${unknown}`,
+  };
+}
+
 function compactStructuredSemanticInsights(ev) {
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
   if (!semantic || semantic.schema !== "tersafe.semantic.v1") return [];
@@ -4097,11 +4137,14 @@ function compactStructuredSemanticInsights(ev) {
   const firstAction = semanticActions.find((item) => (
     item && item.source_seq !== undefined && item.source_seq !== null
   )) || semanticActions[0] || {};
-  const payloadRole = packet.semantic_role
+  const payloadRole = packet.semantic_label_zh
+    || packet.semantic_role
     || (packet.shape && packet.shape.semantic_role)
     || packet.role
     || "未知角色";
-  const rolePhase = [payloadRole, semantic.state_phase || "unknown"].filter(Boolean).join(" / ");
+  const tierText = semanticTierLabel(packet.semantic_tier || packet.semantic_role_confidence || "unknown");
+  const phase = String(semantic.state_phase || "unknown");
+  const rolePhase = [payloadRole, tierText, phase !== "unknown" ? phase : ""].filter(Boolean).join(" / ");
   const sourceBits = [];
   if (firstAction.source_seq !== undefined && firstAction.source_seq !== null) {
     sourceBits.push(`8091#${firstAction.source_seq}`);
@@ -4110,11 +4153,13 @@ function compactStructuredSemanticInsights(ev) {
     sourceBits.push(`${Number(semantic.source_age_ms)}ms`);
   }
   if (firstAction.shape_match) sourceBits.push(String(firstAction.shape_match));
-  sourceBits.push(String(semantic.action || "passthrough"));
+  sourceBits.push(String(semantic.action || (semanticActions.length ? "观察动作" : "只读解析")));
   const out = [
     { kind: "state", text: rolePhase, title: `report=${packet.report_code || "-"} family=${packet.report_family || "-"}` },
     { kind: "semantic", text: sourceBits.join(" → "), title: String(semantic.reason || "") },
   ];
+  const childSummary = summarizeStructuredChildSemantics(packet.children);
+  if (childSummary) out.splice(1, 0, childSummary);
   const correlation = semantic.response_correlation && typeof semantic.response_correlation === "object"
     ? semantic.response_correlation
     : null;
@@ -4709,6 +4754,102 @@ function formatRecordValuePreview(byteValues, reportCode) {
   return "";
 }
 
+function semanticProfileValue(role, category, label, tier, evidence = []) {
+  return {
+    role: String(role || "unresolved_payload"),
+    category: String(category || "unknown"),
+    label: String(label || "未解析记录"),
+    tier: String(tier || "unknown"),
+    evidence: Array.isArray(evidence) ? evidence.map(String) : [],
+  };
+}
+
+function semanticAsciiView(byteValues) {
+  if (!Array.isArray(byteValues)) return "";
+  return byteValues
+    .map((byte) => (Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : " "))
+    .join("");
+}
+
+function localChildSemanticProfile(record, reportCode) {
+  const report = Number(reportCode);
+  const rawLower = semanticAsciiView(record).toLowerCase();
+  if (report === 0x010a001b) return semanticProfileValue("parent_container", "report.container", "批量上报父容器", "confirmed", ["report_code"]);
+  if (report === 0x010a0011) return semanticProfileValue("child_request_tag_or_protection_context", "control.child_context", "子请求标签/配对保护上下文", "observed", ["report_code", "historical_shape"]);
+  if (report === 0x010a0036) return semanticProfileValue("sync_file_marker", "control.resource_sync", "配置/规则文件同步标记", "observed", ["report_code", "resource_name"]);
+  if (report === 0x010a0056) return semanticProfileValue("sync_file_save_request", "control.resource_sync", "同步文件保存请求", "observed", ["report_code"]);
+  if ([0x010a0010, 0x010a0024, 0x010a0027, 0x010a0044, 0x010a0057].includes(report)) {
+    return semanticProfileValue("response_feedback_fields", "response.feedback", "响应反馈/状态字段", "observed", ["fixed_response_offsets", "timeline_required"]);
+  }
+
+  if (report === 0x0102000a) {
+    const reportInfo = detectTssReport(record);
+    const layout = read0102000aLayout(record, reportInfo);
+    if (!layout) return semanticProfileValue("typed_leaf_unresolved_shape", "telemetry.typed_leaf", "探测遥测叶子（shape 未完整）", "approximate", ["report_family"]);
+    const body = record.slice(Math.min(record.length, Number(layout.bodyStart || 0)));
+    const xorLower = semanticAsciiView(xorByteValues(body, 0xb6)).toLowerCase();
+    const combined = `${rawLower} ${xorLower}`;
+    const knownTime = KNOWN_0102000A_TIMESTAMP_LAYOUTS.find((shape) => layoutMatchesKnownTimestampShape(layout, shape));
+    if (knownTime && String(knownTime.label || "").includes("current")) {
+      return semanticProfileValue("typed_timestamp_current", "telemetry.time.current", "当前采样时间", "confirmed", ["full_shape", knownTime.label]);
+    }
+    if (knownTime && String(knownTime.label || "").includes("session")) {
+      return semanticProfileValue("typed_timestamp_session_baseline", "telemetry.time.session_baseline", "会话/缓存基准时间", "observed", ["full_shape", knownTime.label]);
+    }
+    if (/uiwindow|uitransitionview|uidropshadowview|\buiview\b/.test(combined)) {
+      return semanticProfileValue("ui_hierarchy_probe", "environment.ui_hierarchy", "UI 层级/前台窗口探测", "observed", ["xor_text", "ui_tokens", "full_shape"]);
+    }
+    const hasModule = /\.dylib|\.framework|\/usr\/lib|frameworks\/|\.so\b/.test(combined);
+    const hasProcess = /backboardd|backboardservices|springboard|mediaserverd|chronod|duetexpertd|thermalmonitord|locationd|\blogd\b|com\.apple|coremotion|corebrightness|corefoundation/.test(combined);
+    if (hasModule && hasProcess) return semanticProfileValue("module_process_integrity_probe", "environment.module_process", "动态库/进程组合探测", "observed", ["xor_text", "module_token", "process_token"]);
+    if (hasModule) return semanticProfileValue("module_or_dylib_path_probe", "environment.module_integrity", "动态库/Framework 路径探测", "observed", ["xor_text", "module_token"]);
+    if (hasProcess) return semanticProfileValue("process_or_callstack_probe", "environment.process_stack", "系统进程/调用栈探测", "observed", ["xor_text", "process_token"]);
+    if (Number(layout.innerType) === 0x100b) return semanticProfileValue("ui_hierarchy_probe_candidate", "environment.ui_hierarchy", "UI 层级探测（近似）", "approximate", ["inner_type_0x100b", "historical_shape_family"]);
+    if ([0x1105, 0x2000, 0xfff2].includes(Number(layout.innerType))) return semanticProfileValue("module_path_probe_candidate", "environment.module_integrity", "模块/动态库路径探测（近似）", "approximate", [`inner_type_${formatHexValue(layout.innerType, 4)}`, "historical_shape_family"]);
+    if ([0x8027, 0x8029].includes(Number(layout.innerType))) return semanticProfileValue("process_stack_probe_candidate", "environment.process_stack", "进程/调用栈探测（近似）", "approximate", [`inner_type_${formatHexValue(layout.innerType, 4)}`, "historical_shape_family"]);
+    return semanticProfileValue("typed_leaf_binary_probe", "telemetry.binary_probe", "稳定二进制探测/遥测（字段待证）", "approximate", ["full_shape", `inner_type_${formatHexValue(layout.innerType, 4)}`]);
+  }
+
+  if (((report >>> 16) & 0xffff) === 0x0112) {
+    const hasCsob = ["cs:", ",ob:", "state:", ",r:", ",p:"].every((token) => rawLower.includes(token));
+    const hasDevice = /model:|ver:/.test(rawLower);
+    const hasFile = /config2\.dat|config3\.dat|comm\.zip|mrpcs_i|\.data/.test(rawLower);
+    if (hasCsob) return semanticProfileValue("csob_state_snapshot", "metadata.state.csob", "CSOB 状态快照", "confirmed", ["cs", "ob", "state", "r", "p"]);
+    if (hasDevice && hasFile) return semanticProfileValue("device_profile_with_file_reference", "metadata.device_profile", "设备画像 + 配置文件引用", "observed", ["model_ver", "file_name"]);
+    if (hasDevice) return semanticProfileValue("device_profile_metadata", "metadata.device_profile", "设备型号/系统版本画像", "observed", ["model_ver"]);
+    if (hasFile || /\bdl:/.test(rawLower)) return semanticProfileValue("configuration_file_observation", "metadata.file_reference", "配置/规则文件引用", "observed", ["file_name"]);
+    if (/state:|cnt:|counter/.test(rawLower)) return semanticProfileValue("state_or_counter_metadata", "metadata.state", "状态/计数元数据", "observed", ["state_counter_key"]);
+    if (/idevidfv:|itsssdkuuid:|iappmachuuid:/.test(rawLower)) return semanticProfileValue("device_identity_metadata", "metadata.device_identity", "设备身份标识元数据", "observed", ["device_identifier_key"]);
+    if (/vpn:|language:|iscreencaptured:|ios_tp_api/.test(rawLower)) return semanticProfileValue("device_environment_metadata", "metadata.device_environment", "设备环境/开关标签", "observed", ["environment_label"]);
+    if (/historyopenid:|openid|account/.test(rawLower)) return semanticProfileValue("account_history_metadata", "metadata.account", "账号/OpenID 历史元数据", "observed", ["account_key"]);
+    if (/apple root ca|certification authority/.test(rawLower)) return semanticProfileValue("certificate_or_trust_observation", "metadata.trust", "证书/信任材料观察", "observed", ["certificate_text"]);
+    if (/iteamid:|teamid:/.test(rawLower)) return semanticProfileValue("signing_team_metadata", "metadata.signing", "签名 TeamID 元数据", "observed", ["team_id_key"]);
+    if (/iappversion:|iappinfo:/.test(rawLower)) return semanticProfileValue("application_version_metadata", "metadata.application", "应用版本/组件元数据", "observed", ["app_version_key"]);
+    if (/framework|\.dylib/.test(rawLower)) return semanticProfileValue("module_or_framework_observation", "metadata.module", "模块/Framework 元数据", "observed", ["module_text"]);
+    if (/addlistener|hdmioutput/.test(rawLower)) return semanticProfileValue("runtime_api_or_output_route_observation", "metadata.runtime", "运行时 API/输出路由元数据", "observed", ["runtime_api_text"]);
+    if (/error/.test(rawLower)) return semanticProfileValue("error_observation", "metadata.error", "错误/异常元数据", "observed", ["error_text"]);
+    return semanticProfileValue("dynamic_metadata_context", "metadata.context", "结构化元数据（具体子项待证）", "approximate", ["metadata_family"]);
+  }
+
+  const family = (report >>> 16) & 0xffff;
+  if (family === 0x010a) return semanticProfileValue("control_or_feedback_record", "control.protocol", "控制/反馈记录（具体字段待证）", "approximate", ["report_family_0x010a"]);
+  if (family === 0x0102) return semanticProfileValue("telemetry_leaf", "telemetry.leaf", "探测遥测叶子（具体字段待证）", "approximate", ["report_family_0x0102"]);
+  return semanticProfileValue("unresolved_payload", "unknown", "未解析记录", "unknown", []);
+}
+
+function attachLocalChildSemantic(child, record) {
+  if (!child || child.truncated) return child;
+  const profile = localChildSemanticProfile(record, child.reportCode);
+  child.semanticRole = profile.role;
+  child.semanticCategory = profile.category;
+  child.semanticLabel = profile.label;
+  child.semanticTier = profile.tier;
+  child.semanticEvidence = profile.evidence;
+  const reportInfo = Number(child.reportCode) === 0x0102000a ? detectTssReport(record) : null;
+  child.typedLayout = reportInfo ? read0102000aLayout(record, reportInfo) : null;
+  return child;
+}
+
 function isBinaryLikeLeafRecord(record, reportCode) {
   return Number(reportCode) === 0x0102000a && classifyRecordBytes(record, reportCode) === "binary-like-leaf";
 }
@@ -4812,6 +4953,7 @@ function parseTssChildrenAt(byteValues, startOffset, maxChildren = 256) {
       hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
       xorCommonPreview: className === "binary-like-leaf" ? summarizeCommonFixedXor(record, reportCode) : "",
     });
+    attachLocalChildSemantic(children[children.length - 1], record);
     offset += 4 + childLen;
   }
   return {
@@ -4942,6 +5084,7 @@ function parseTssChildRecords(byteValues) {
       hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
       xorCommonPreview: className === "binary-like-leaf" ? summarizeCommonFixedXor(record, reportCode) : "",
     });
+    attachLocalChildSemantic(children[children.length - 1], record);
     offset += 4 + childLen;
   }
   if (children.length === 0 && legacy.children.length > 0) {
@@ -4969,7 +5112,7 @@ function makeRootComparableNode(byteValues) {
   const className = classifyRecordBytes(byteValues, reportCode);
   const valuePreview = formatRecordValuePreview(byteValues, reportCode);
   const timestampCandidates = extractTimestampCandidatesFromRecord(byteValues);
-  return {
+  return attachLocalChildSemantic({
     index: 0,
     nodeLabel: "node[0]",
     offset: 0,
@@ -4987,7 +5130,7 @@ function makeRootComparableNode(byteValues) {
     xorCommonPreview: className === "binary-like-leaf" || Number(reportCode) === 0x0102000a
       ? summarizeCommonFixedXor(byteValues, reportCode)
       : "",
-  };
+  }, byteValues);
 }
 
 function parseLibrarySameLengthExamples(summaryText) {
@@ -5023,7 +5166,7 @@ function buildTssTreeText(base64Text, options = {}) {
     const preview = formatRecordValuePreview(byteValues, root.value);
     const timestampCandidates = extractTimestampCandidatesFromRecord(byteValues);
     lines.push(
-      `  node[0] report=${formatHexValue(root.value, 8)} type=${classifyRecordBytes(byteValues, root.value)} len=${byteValues.length}` +
+      `  node[0] report=${formatHexValue(root.value, 8)} type=${localChildSemanticProfile(byteValues, root.value).label.replace(/\s+/g, "_")} len=${byteValues.length}` +
         (Number.isFinite(idValue) ? ` id=${formatHexValue(idValue, 4)}` : "") +
         (timestampCandidates.length > 0 ? ` timestamps=${timestampCandidates.join(",")}` : "")
     );
@@ -5059,7 +5202,7 @@ function buildTssTreeText(base64Text, options = {}) {
     const sameLenCount = sameLenExamples.get(`child:${child.index}`);
     const sameLenText = Number.isFinite(sameLenCount) ? ` lib_same_len=${sameLenCount}` : "";
     lines.push(
-      `  child[${child.index}] off=${formatHexValue(child.offset)} report=${reportText} type=${child.className} len=${child.len}${idText}${keepText}${tsText}${sameLenText}`
+      `  child[${child.index}] off=${formatHexValue(child.offset)} report=${reportText} type=${String(child.semanticLabel || child.className).replace(/\s+/g, "_")} tier=${child.semanticTier || "unknown"} len=${child.len}${idText}${keepText}${tsText}${sameLenText}`
     );
     if (child.valuePreview) {
       lines.push(`    value=${child.valuePreview}`);
@@ -5276,6 +5419,15 @@ function compactReportToDisplay(value) {
 function childSemanticLines(child) {
   if (!child || child.truncated) return [];
   const lines = [];
+  if (child.semanticLabel) {
+    lines.push(`semantic=${child.semanticLabel} [${semanticTierLabel(child.semanticTier)}] category=${child.semanticCategory || "unknown"}`);
+  }
+  if (child.typedLayout) {
+    const layout = child.typedLayout;
+    lines.push(
+      `shape=inner_type=${formatHexValue(layout.innerType, 4)} selector0=${formatHexValue(layout.selector0, 8)} selector1=${formatHexValue(layout.selector1, 8)} inner_field=${formatHexValue(layout.innerField, 8)} len=${Number(child.len || layout.len || 0)}`
+    );
+  }
   if (child.valuePreview) lines.push(`value=${child.valuePreview}`);
   if (Array.isArray(child.timestampCandidates) && child.timestampCandidates.length > 0) {
     lines.push(`timestamps=${child.timestampCandidates.join(",")}`);
@@ -5315,6 +5467,14 @@ function splitChildSemanticRows(child) {
   const debugLines = [];
   const xorSignal = compactSemanticSignal(child && child.xorCommonPreview ? child.xorCommonPreview : "");
   for (const line of childSemanticLines(child)) {
+    if (line.startsWith("semantic=")) {
+      primaryRows.push(["近似语义", semanticValueText(line, "semantic="), "child-card-line-long child-card-semantic"]);
+      continue;
+    }
+    if (line.startsWith("shape=")) {
+      primaryRows.push(["完整 shape", semanticValueText(line, "shape="), "child-card-line-long child-card-shape"]);
+      continue;
+    }
     if (line.startsWith("value=")) {
       const value = semanticValueText(line, "value=");
       if (value.startsWith("xor:")) {
@@ -5686,6 +5846,27 @@ function ensureChildCommonStyles() {
 	      justify-content: flex-end;
 	      gap: 4px;
 	      flex: 0 0 auto;
+	    }
+	    .child-semantic-tier {
+	      display: inline-flex;
+	      align-items: center;
+	      border: 1px solid color-mix(in srgb, #38bdf8 42%, var(--line));
+	      border-radius: 999px;
+	      padding: 1px 6px;
+	      color: color-mix(in srgb, #7dd3fc 82%, var(--text));
+	      background: color-mix(in srgb, #0ea5e9 9%, transparent);
+	      font-size: 10px;
+	      font-weight: 850;
+	    }
+	    .child-semantic-tier-approximate {
+	      border-color: color-mix(in srgb, #f59e0b 48%, var(--line));
+	      color: color-mix(in srgb, #fbbf24 86%, var(--text));
+	      background: color-mix(in srgb, #f59e0b 9%, transparent);
+	    }
+	    .child-semantic-tier-confirmed {
+	      border-color: color-mix(in srgb, #22c55e 48%, var(--line));
+	      color: color-mix(in srgb, #4ade80 86%, var(--text));
+	      background: color-mix(in srgb, #22c55e 9%, transparent);
 	    }
     .child-rail-action {
       border: 1px solid var(--chip-line);
@@ -7197,6 +7378,9 @@ function childIndexText(child) {
 
 function childSemanticRoleText(child) {
   if (!child || child.truncated) return "";
+  if (child.semanticLabel) {
+    return `${child.semanticLabel} [${semanticTierLabel(child.semanticTier)}]`;
+  }
   const report = parseReportCodeNumber(child.reportCode);
   const text = [
     child.valuePreview,
@@ -7235,6 +7419,7 @@ function childRichTypeText(child) {
   const report = parseReportCodeNumber(child.reportCode);
   const rawType = String(child.className || "").trim();
   const role = childSemanticRoleText(child);
+  if (child.semanticLabel) return role;
   if (Number(report) === 0x0102000a) {
     return role || "0102000a / typed leaf shell（shape-specific）";
   }
@@ -7709,6 +7894,19 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   status.className = `child-status child-status-${result.kind}`;
   status.textContent = sameNoAction ? "未修改" : result.label;
   badges.appendChild(status);
+  const semanticChild = afterChild || beforeChild;
+  if (semanticChild && semanticChild.semanticLabel) {
+    const semanticBadge = document.createElement("span");
+    const semanticTier = String(semanticChild.semanticTier || "unknown").toLowerCase();
+    semanticBadge.className = `child-semantic-tier child-semantic-tier-${semanticTier}`;
+    semanticBadge.textContent = semanticTierLabel(semanticTier);
+    semanticBadge.title = [
+      semanticChild.semanticLabel,
+      semanticChild.semanticCategory,
+      ...(Array.isArray(semanticChild.semanticEvidence) ? semanticChild.semanticEvidence : []),
+    ].filter(Boolean).join(" | ");
+    badges.appendChild(semanticBadge);
+  }
   if (!sameNoAction) {
     const actionBadge = document.createElement("span");
     actionBadge.className = `child-rail-action child-decision-${kind}`;

@@ -8,13 +8,14 @@ from typing import Any
 from .shape_summary import (
     _detect_tss_report,
     _fmt_hex,
-    _observed_payload_role,
+    _payload_semantic_profile,
     _parse_parent_children,
     _read_0102000a_layout,
 )
 
 
 SCHEMA = "tersafe.semantic.v1"
+SEMANTIC_REVISION = 2
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
@@ -199,10 +200,10 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
     report_code = int(report["value"]) if report else 0
     family, subtype = report_family(report_code)
     role, role_confidence = report_role(report_code, direction=direction)
-    semantic_role, semantic_role_confidence, semantic_role_evidence = _observed_payload_role(
-        report_code,
-        record,
-    )
+    semantic_profile = _payload_semantic_profile(report_code, record)
+    semantic_role = str(semantic_profile.get("role") or "unresolved_payload")
+    semantic_role_confidence = str(semantic_profile.get("confidence") or "unknown")
+    semantic_role_evidence = tuple(semantic_profile.get("evidence") or ())
     layout = _read_0102000a_layout(record, report) if report and report_code == 0x0102000A else None
     fields = []
     for name, regex in (("cs", _CS_RE), ("ob", _OB_RE), ("state", _STATE_RE), ("r", _R_RE), ("p", _P_RE)):
@@ -247,6 +248,10 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
         "semantic_role": semantic_role,
         "semantic_role_confidence": semantic_role_confidence,
         "semantic_role_evidence": list(semantic_role_evidence),
+        "semantic_category": str(semantic_profile.get("category") or "unknown"),
+        "semantic_label_zh": str(semantic_profile.get("label_zh") or "未解析记录"),
+        "semantic_tier": str(semantic_profile.get("tier") or "unknown"),
+        "semantic_exact_meaning": bool(semantic_profile.get("exact_meaning")),
         "leaf_id": _fmt_hex(int.from_bytes(record[10:14], "big"), 8) if len(record) >= 14 else None,
         "shape": shape,
         "fields": fields,
@@ -264,6 +269,7 @@ def analyze_payload(
     raw = bytes(payload or b"")
     base = copy.deepcopy(provided) if isinstance(provided, dict) else {}
     base["schema"] = SCHEMA
+    base["semantic_revision"] = SEMANTIC_REVISION
     packet = _record_analysis(raw, direction=direction)
     children, parent = _parse_parent_children(raw)
     packet["children"] = [
@@ -277,7 +283,8 @@ def analyze_payload(
             "parsed_count": parent.get("parsed_count"),
             "tail_len": parent.get("tail_len"),
         }
-    base.setdefault("packet", packet)
+    provided_packet = base.get("packet") if isinstance(base.get("packet"), dict) else {}
+    base["packet"] = _merge_packet_analysis(provided_packet, packet)
     base.setdefault("direction", "request" if int(direction) == 0 else "response")
     base.setdefault("state_phase", "unknown")
     base.setdefault("response_correlation", {"status": "unresolved", "reason": "requires flow timeline"})
@@ -289,6 +296,66 @@ def analyze_payload(
             _record_analysis(bytes(before_payload), direction=direction),
         )
     return base
+
+
+def _packet_quality(packet: dict[str, Any]) -> int:
+    report_code = str(packet.get("report_code") or "").lower()
+    score = 0
+    if report_code and report_code not in {"0x00000000", "0x0", "-"}:
+        score += 4
+    role = str(packet.get("semantic_role") or "")
+    if role and role not in {"unknown", "unresolved_payload"}:
+        score += 3
+    category = str(packet.get("semantic_category") or "")
+    if category and category != "unknown":
+        score += 2
+    children = packet.get("children")
+    if isinstance(children, list) and children:
+        score += 4
+    if isinstance(packet.get("fields"), list) and packet.get("fields"):
+        score += 1
+    return score
+
+
+def _merge_packet_analysis(provided: dict[str, Any], computed: dict[str, Any]) -> dict[str, Any]:
+    """Merge emitter-supplied semantics with the local decoded-record parser.
+
+    Packet Engine may know the decrypted report while TCPView only receives an
+    outer transport frame; the inverse also happens for old events.  Select
+    the better packet as authoritative and fill missing children/shape fields
+    from the other one instead of letting an unresolved stub mask useful data.
+    """
+    supplied = copy.deepcopy(provided) if isinstance(provided, dict) else {}
+    local = copy.deepcopy(computed) if isinstance(computed, dict) else {}
+    supplied_wins = _packet_quality(supplied) > _packet_quality(local)
+    primary, secondary = (supplied, local) if supplied_wins else (local, supplied)
+    merged = copy.deepcopy(secondary)
+    merged.update(copy.deepcopy(primary))
+
+    primary_shape = primary.get("shape") if isinstance(primary.get("shape"), dict) else {}
+    secondary_shape = secondary.get("shape") if isinstance(secondary.get("shape"), dict) else {}
+    merged_shape = copy.deepcopy(secondary_shape)
+    merged_shape.update({key: value for key, value in primary_shape.items() if value not in {None, "", "-"}})
+    if merged_shape:
+        merged["shape"] = merged_shape
+
+    primary_children = primary.get("children") if isinstance(primary.get("children"), list) else []
+    secondary_children = secondary.get("children") if isinstance(secondary.get("children"), list) else []
+    merged["children"] = copy.deepcopy(primary_children or secondary_children)
+    return merged
+
+
+def analysis_needs_upgrade(analysis: dict[str, Any] | None) -> bool:
+    if not isinstance(analysis, dict):
+        return True
+    if analysis.get("schema") != SCHEMA:
+        return True
+    try:
+        revision = int(analysis.get("semantic_revision") or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    packet = analysis.get("packet") if isinstance(analysis.get("packet"), dict) else {}
+    return revision < SEMANTIC_REVISION or "semantic_category" not in packet
 
 
 def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -304,7 +371,21 @@ def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
     payload = decode("pay")
     before = decode("before_pay")
     provided = event.get("analysis") if isinstance(event.get("analysis"), dict) else None
-    return analyze_payload(payload, direction=int(event.get("dir") or 0), before_payload=before, provided=provided)
+    analysis = provided
+    seen: set[bytes] = set()
+    for candidate in (payload, before, decode("full_pay"), decode("raw_pay")):
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        analysis = analyze_payload(
+            candidate,
+            direction=int(event.get("dir") or 0),
+            before_payload=before if candidate == payload else b"",
+            provided=analysis,
+        )
+    if isinstance(analysis, dict):
+        return analysis
+    return analyze_payload(b"", direction=int(event.get("dir") or 0), provided=provided)
 
 
 def correlate_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

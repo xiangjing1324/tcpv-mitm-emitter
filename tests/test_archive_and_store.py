@@ -10,7 +10,7 @@ from tcpv_mitm_emitter.analyzer import TersafeAnalyzer
 from tcpv_mitm_emitter.archive import parse_txt_capture, read_flow_archive_bytes, write_flow_archive
 from tcpv_mitm_emitter.runtime import TcpvRuntime
 from tcpv_mitm_emitter.store import TcpvEventStore
-from tcpv_mitm_emitter.semantic import analyze_payload, correlate_events
+from tcpv_mitm_emitter.semantic import analysis_from_event, analyze_payload, correlate_events
 from tcpv_mitm_emitter.shape_summary import render_markdown, summarize_events, summarize_input
 
 
@@ -20,6 +20,28 @@ def _metadata_record(report_code: int, payload: bytes = b"") -> bytes:
     record.extend(b"\x00" * 10)
     record.extend(payload)
     record[4:6] = len(record).to_bytes(2, "big")
+    return bytes(record)
+
+
+def _typed_record(
+    inner_type: int,
+    *,
+    length: int = 68,
+    selector0: int = 0x200E0002,
+    selector1: int = 0x34560001,
+    inner_field: int = 0,
+    body: bytes = b"",
+) -> bytes:
+    record = bytearray(max(36, int(length)))
+    record[0:4] = b"\x00\x00\x00\x01"
+    record[4:6] = len(record).to_bytes(2, "big")
+    record[6:10] = (0x0102000A).to_bytes(4, "big")
+    record[20:22] = max(0, len(record) - 20).to_bytes(2, "big")
+    record[22:24] = int(inner_type).to_bytes(2, "big")
+    record[24:28] = int(selector0).to_bytes(4, "big")
+    record[28:32] = int(selector1).to_bytes(4, "big")
+    record[32:36] = int(inner_field).to_bytes(4, "big")
+    record[36 : min(len(record), 36 + len(body))] = body[: max(0, len(record) - 36)]
     return bytes(record)
 
 
@@ -142,6 +164,69 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
+    def test_child_semantics_have_broad_categories_instead_of_family_unknown(self):
+        opaque_metadata = _metadata_record(0x01122342, b"\x01\x02\x03\x04")
+        metadata_analysis = analyze_payload(opaque_metadata, direction=0)["packet"]
+        self.assertEqual(metadata_analysis["semantic_category"], "metadata.context")
+        self.assertEqual(metadata_analysis["semantic_tier"], "approximate")
+        self.assertNotEqual(metadata_analysis["semantic_label_zh"], "未解析记录")
+
+        opaque_typed = _typed_record(0x1004, length=68)
+        typed_analysis = analyze_payload(opaque_typed, direction=0)["packet"]
+        self.assertEqual(typed_analysis["semantic_category"], "telemetry.binary_probe")
+        self.assertEqual(typed_analysis["semantic_tier"], "approximate")
+
+    def test_typed_leaf_time_and_xor_ui_shapes_are_classified(self):
+        current = bytearray(_typed_record(0x100A, length=68))
+        current[0x40:0x44] = (1781534846).to_bytes(4, "big")
+        current_analysis = analyze_payload(bytes(current), direction=0)["packet"]
+        self.assertEqual(current_analysis["semantic_category"], "telemetry.time.current")
+        self.assertEqual(current_analysis["semantic_tier"], "confirmed")
+
+        ui_text = b"UIWindow / UITransitionView / UIDropShadowView / UIView"
+        ui_body = bytes(byte ^ 0xB6 for byte in ui_text)
+        ui = _typed_record(0x100B, length=117, inner_field=0x53E3FFE1, body=ui_body)
+        ui_analysis = analyze_payload(ui, direction=0)["packet"]
+        self.assertEqual(ui_analysis["semantic_category"], "environment.ui_hierarchy")
+        self.assertEqual(ui_analysis["semantic_tier"], "observed")
+
+    def test_unresolved_provided_packet_does_not_mask_local_child_analysis(self):
+        record = _metadata_record(0x0112237A, b"model:iPhone12,5;ver:26.50\x00")
+        provided = {
+            "schema": "tersafe.semantic.v1",
+            "action": "observe_only",
+            "packet": {"report_code": "0x00000000", "semantic_role": "unresolved_payload"},
+        }
+        analysis = analyze_payload(record, direction=0, provided=provided)
+        self.assertEqual(analysis["action"], "observe_only")
+        self.assertEqual(analysis["packet"]["report_code"], "0x0112237a")
+        self.assertEqual(analysis["packet"]["semantic_category"], "metadata.device_profile")
+
+        outer = b"encrypted-outer-frame"
+        event = {
+            "dir": 0,
+            "pay": base64.b64encode(outer).decode("ascii"),
+            "before_pay": base64.b64encode(record).decode("ascii"),
+            "analysis": provided,
+        }
+        upgraded = analysis_from_event(event)
+        self.assertEqual(upgraded["packet"]["report_code"], "0x0112237a")
+        self.assertEqual(upgraded["packet"]["semantic_label_zh"], "设备型号/系统版本画像")
+
+    def test_deep_report_uses_structured_analysis_when_display_is_outer_frame(self):
+        decoded = _metadata_record(0x0112237A, b"model:iPhone12,5;ver:26.50\x00")
+        analysis = analyze_payload(decoded, direction=0)
+        summary = summarize_events(
+            {"account": "outer-frame"},
+            [{"ts": 1000, "dir": 0, "seq": 1, "display": "3366000b000c1001", "analysis": analysis}],
+            input_name="outer-frame",
+        )
+        self.assertEqual(summary["deep"]["semantic_categories"], {"metadata.device_profile": 1})
+        self.assertEqual(summary["deep"]["unknown_reports"], [])
+        report = summary["deep"]["reports"][0]
+        self.assertEqual(report["report_code"], "0x0112237a")
+        self.assertEqual(report["semantic_labels_zh"], {"设备型号/系统版本画像": 1})
+
     def test_semantic_analysis_persists_in_redis_and_archive(self):
         record = _metadata_record(
             0x01122388,

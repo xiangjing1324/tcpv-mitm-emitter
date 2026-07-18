@@ -17,7 +17,7 @@ from .analyzer import TersafeAnalyzer
 from .archive import export_event_from_api, make_archive_path, parse_import_bytes, write_flow_archive
 from .config import archive_dir, env_int, overflow_dir, runtime_config
 from .store import TcpvEventStore
-from .semantic import analysis_from_event, analyze_payload, correlate_events
+from .semantic import analysis_from_event, analysis_needs_upgrade, analyze_payload, correlate_events
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +411,7 @@ class TcpvRuntime:
             include_payload=True,
         )
         for event in events:
-            if not event.get("analysis"):
+            if analysis_needs_upgrade(event.get("analysis")):
                 event["analysis"] = analysis_from_event(event)
         correlate_events(events)
         if not include_payload:
@@ -434,7 +434,7 @@ class TcpvRuntime:
             raise KeyError("flow not found")
         api_events = store.iter_events(account, include_payload=True)
         for event in api_events:
-            if not event.get("analysis"):
+            if analysis_needs_upgrade(event.get("analysis")):
                 event["analysis"] = analysis_from_event(event)
         correlate_events(api_events)
         events = [export_event_from_api(event) for event in api_events]
@@ -458,7 +458,7 @@ class TcpvRuntime:
             raise KeyError("flow not found")
         api_events = store.iter_events(account, include_payload=True)
         for event in api_events:
-            if not event.get("analysis"):
+            if analysis_needs_upgrade(event.get("analysis")):
                 event["analysis"] = analysis_from_event(event)
         correlate_events(api_events)
         events = [export_event_from_api(event) for event in api_events]
@@ -511,7 +511,7 @@ class TcpvRuntime:
         if store is None:
             return None
         event = store.get_event(account=account, event_id=event_id)
-        if event is not None and not event.get("analysis"):
+        if event is not None and analysis_needs_upgrade(event.get("analysis")):
             event["analysis"] = analysis_from_event(event)
         return event
 
@@ -586,12 +586,29 @@ class TcpvRuntime:
                 break
 
     def _append_store_event(self, store: TcpvEventStore, item: dict[str, Any]) -> None:
-        analysis = analyze_payload(
-            bytes(item.get("payload") or b""),
-            direction=int(item.get("dir") or 0),
-            before_payload=bytes(item.get("before_payload") or b""),
-            provided=item.get("analysis") if isinstance(item.get("analysis"), dict) else None,
+        direction = int(item.get("dir") or 0)
+        before_payload = bytes(item.get("before_payload") or b"")
+        analysis: dict[str, Any] | None = (
+            item.get("analysis") if isinstance(item.get("analysis"), dict) else None
         )
+        seen: set[bytes] = set()
+        for candidate in (
+            bytes(item.get("payload") or b""),
+            before_payload,
+            bytes(item.get("full_payload") or b""),
+            bytes(item.get("raw_payload") or b""),
+        ):
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            analysis = analyze_payload(
+                candidate,
+                direction=direction,
+                before_payload=before_payload if candidate == bytes(item.get("payload") or b"") else b"",
+                provided=analysis,
+            )
+        if analysis is None:
+            analysis = analyze_payload(b"", direction=direction)
         store.append_event(
             account=item["account"],
             cid=item["cid"],

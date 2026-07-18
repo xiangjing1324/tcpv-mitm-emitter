@@ -19,6 +19,233 @@ STRONG_TEXT_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+DFM_TYPED_TIMESTAMP_SHAPES = {
+    (68, 0x100A, 0x200E0002, 0x34560001): ("typed_timestamp_current", "telemetry.time.current", "当前采样时间", "confirmed"),
+    (68, 0x100A, 0x200D0002, 0x34560001): ("typed_timestamp_current", "telemetry.time.current", "当前采样时间", "confirmed"),
+    (80, 0x1001, 0x200E0002, 0x34560001): ("typed_timestamp_session_baseline", "telemetry.time.session_baseline", "会话/缓存基准时间", "observed"),
+    (80, 0x1001, 0x200D0002, 0x34560001): ("typed_timestamp_session_baseline", "telemetry.time.session_baseline", "会话/缓存基准时间", "observed"),
+}
+
+_SEMANTIC_PROCESS_TOKENS = (
+    "backboardd",
+    "backboardservices",
+    "springboard",
+    "mediaserverd",
+    "chronod",
+    "duetexpertd",
+    "thermalmonitord",
+    "locationd",
+    "logd",
+    "com.apple",
+    "coremotion",
+    "corebrightness",
+    "corefoundation",
+)
+
+
+def _semantic_profile(
+    role: str,
+    category: str,
+    label_zh: str,
+    tier: str,
+    confidence: str,
+    evidence: Iterable[str],
+    *,
+    exact_meaning: bool = False,
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "category": category,
+        "label_zh": label_zh,
+        "tier": tier,
+        "confidence": confidence,
+        "evidence": tuple(str(item) for item in evidence if item),
+        "exact_meaning": bool(exact_meaning),
+    }
+
+
+def _typed_leaf_text_views(record: bytes, layout: dict[str, int]) -> tuple[str, str]:
+    """Return raw and historically observed XOR-0xb6 text views.
+
+    The XOR view is evidence for classification only. It is never used to
+    rewrite the record and does not turn a family-level guess into an exact
+    protocol meaning.
+    """
+    raw_text = bytes(record or b"").decode("ascii", errors="ignore")
+    body_start = max(0, int(layout.get("body_start") or 0))
+    record_end = min(len(record), int(layout.get("record_end") or len(record)))
+    decoded = bytes((byte ^ 0xB6) for byte in record[body_start:record_end])
+    xor_text = decoded.decode("ascii", errors="ignore")
+    return raw_text, xor_text
+
+
+def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]:
+    """Classify exact, observed and approximate semantics for one record.
+
+    Approximate classifications deliberately stay broad.  They answer the
+    operator's immediate question (metadata/device/state/probe/control) while
+    retaining an explicit boundary around the still-unproven leaf meaning.
+    """
+    data = bytes(record or b"")
+    lower = data.lower()
+
+    if report_code == 0x010A001B:
+        return _semantic_profile(
+            "parent_container", "report.container", "批量上报父容器", "confirmed", "confirmed", ("report_code",), exact_meaning=True
+        )
+    if report_code == 0x010A0011:
+        return _semantic_profile(
+            "child_request_tag_or_protection_context", "control.child_context", "子请求标签/配对保护上下文", "observed", "observed", ("report_code", "historical_fixed_shape")
+        )
+    if report_code == 0x010A0036:
+        label = "mrpcs 配置/资源同步标记" if b"mrpcs" in lower or b".data" in lower else "配置/资源同步标记"
+        return _semantic_profile(
+            "sync_file_marker", "control.resource_sync", label, "observed", "observed", ("report_code", "resource_name" if b".data" in lower else "historical_role")
+        )
+    if report_code == 0x010A0056:
+        return _semantic_profile(
+            "sync_file_save_request", "control.resource_sync", "同步文件保存请求", "observed", "observed", ("report_code", "historical_short_control")
+        )
+    if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
+        return _semantic_profile(
+            "response_feedback_fields", "response.feedback", "响应反馈/状态字段", "observed", "observed", ("fixed_response_offsets", "direction_and_timeline_required")
+        )
+
+    if report_code == 0x0102000A:
+        report = _detect_tss_report(data)
+        layout = _read_0102000a_layout(data, report) if report else None
+        if not layout:
+            return _semantic_profile(
+                "typed_leaf_unresolved_shape", "telemetry.typed_leaf", "探测遥测叶子（shape 未完整）", "approximate", "approximate", ("report_family", "shape_parse_failed")
+            )
+
+        shape = (
+            len(data),
+            int(layout.get("inner_type") or 0),
+            int(layout.get("selector0") or 0),
+            int(layout.get("selector1") or 0),
+        )
+        timestamp = DFM_TYPED_TIMESTAMP_SHAPES.get(shape)
+        if timestamp:
+            role, category, label, tier = timestamp
+            return _semantic_profile(
+                role, category, label, tier, "confirmed" if tier == "confirmed" else "observed", ("full_shape", "historical_continuity"), exact_meaning=tier == "confirmed"
+            )
+
+        raw_text, xor_text = _typed_leaf_text_views(data, layout)
+        combined = f"{raw_text}\n{xor_text}".lower()
+        inner_type = int(layout.get("inner_type") or 0)
+        if any(token in combined for token in ("uiwindow", "uitransitionview", "uidropshadowview", "uiview")):
+            return _semantic_profile(
+                "ui_hierarchy_probe", "environment.ui_hierarchy", "UI 层级/前台窗口探测", "observed", "observed", ("xor_text", "ui_tokens", "full_shape")
+            )
+        has_module = any(token in combined for token in (".dylib", ".framework", "/usr/lib", "frameworks/", ".so"))
+        has_process = any(token in combined for token in _SEMANTIC_PROCESS_TOKENS)
+        if has_module and has_process:
+            return _semantic_profile(
+                "module_process_integrity_probe", "environment.module_process", "动态库/进程组合探测", "observed", "observed", ("xor_text", "module_token", "process_token", "full_shape")
+            )
+        if has_module:
+            return _semantic_profile(
+                "module_or_dylib_path_probe", "environment.module_integrity", "动态库/Framework 路径探测", "observed", "observed", ("xor_text", "module_token", "full_shape")
+            )
+        if has_process:
+            return _semantic_profile(
+                "process_or_callstack_probe", "environment.process_stack", "系统进程/调用栈探测", "observed", "observed", ("xor_text", "process_token", "full_shape")
+            )
+        if inner_type == 0x100B:
+            return _semantic_profile(
+                "ui_hierarchy_probe_candidate", "environment.ui_hierarchy", "UI 层级探测（近似）", "approximate", "approximate", ("inner_type_0x100b", "historical_shape_family")
+            )
+        if inner_type in {0x1105, 0x2000, 0xFFF2}:
+            return _semantic_profile(
+                "module_path_probe_candidate", "environment.module_integrity", "模块/动态库路径探测（近似）", "approximate", "approximate", (f"inner_type_0x{inner_type:04x}", "historical_shape_family")
+            )
+        if inner_type in {0x8027, 0x8029}:
+            return _semantic_profile(
+                "process_stack_probe_candidate", "environment.process_stack", "进程/调用栈探测（近似）", "approximate", "approximate", (f"inner_type_0x{inner_type:04x}", "historical_shape_family")
+            )
+        return _semantic_profile(
+            "typed_leaf_binary_probe", "telemetry.binary_probe", "稳定二进制探测/遥测（字段待证）", "approximate", "approximate", ("full_shape", f"inner_type_0x{inner_type:04x}")
+        )
+
+    if report_code & 0xFFFF0000 == 0x01120000:
+        has_csob = all(token in lower for token in (b"cs:", b",ob:", b"state:", b",r:", b",p:"))
+        has_device = b"model:" in lower or b"ver:" in lower
+        has_file = any(token in lower for token in (b"config2.dat", b"config3.dat", b"comm.zip", b"mrpcs_i", b".data"))
+        if has_csob:
+            return _semantic_profile(
+                "csob_state_snapshot", "metadata.state.csob", "CSOB 状态快照", "confirmed", "high", ("cs", "ob", "state", "r", "p"), exact_meaning=True
+            )
+        if has_device and has_file:
+            return _semantic_profile(
+                "configuration_file_observation", "metadata.device_profile", "设备画像 + 配置文件引用", "observed", "observed", ("device_profile_key", "configuration_filename")
+            )
+        if has_device:
+            return _semantic_profile(
+                "device_profile_metadata", "metadata.device_profile", "设备型号/系统版本画像", "observed", "observed", ("device_profile_key",)
+            )
+        if has_file or b"dl:" in lower:
+            return _semantic_profile(
+                "configuration_file_observation", "metadata.file_reference", "配置/规则文件引用", "observed", "observed", ("configuration_filename",)
+            )
+        if b"state:" in lower or b"cnt:" in lower or b"counter" in lower:
+            return _semantic_profile(
+                "state_or_counter_metadata", "metadata.state", "状态/计数元数据", "observed", "observed", ("state_or_counter_key",)
+            )
+        if any(token in lower for token in (b"idevidfv:", b"itsssdkuuid:", b"iappmachuuid:")):
+            return _semantic_profile(
+                "device_identity_metadata", "metadata.device_identity", "设备身份标识元数据", "observed", "observed", ("device_identifier_key",)
+            )
+        if any(token in lower for token in (b"vpn:", b"language:", b"iscreencaptured:", b"ios_tp_api")):
+            return _semantic_profile(
+                "device_environment_metadata", "metadata.device_environment", "设备环境/开关标签", "observed", "observed", ("environment_label_key",)
+            )
+        if b"historyopenid:" in lower or b"openid" in lower or b"account" in lower:
+            return _semantic_profile(
+                "account_history_metadata", "metadata.account", "账号/OpenID 历史元数据", "observed", "observed", ("account_label_key",)
+            )
+        if b"apple root ca" in lower or b"certification authority" in lower:
+            return _semantic_profile(
+                "certificate_or_trust_observation", "metadata.trust", "证书/信任材料观察", "observed", "observed", ("certificate_text",)
+            )
+        if b"iteamid:" in lower or b"teamid:" in lower:
+            return _semantic_profile(
+                "signing_team_metadata", "metadata.signing", "签名 TeamID 元数据", "observed", "observed", ("team_id_key",)
+            )
+        if b"iappversion:" in lower or b"iappinfo:" in lower:
+            return _semantic_profile(
+                "application_version_metadata", "metadata.application", "应用版本/组件元数据", "observed", "observed", ("app_version_key",)
+            )
+        if b"framework" in lower or b".dylib" in lower:
+            return _semantic_profile(
+                "module_or_framework_observation", "metadata.module", "模块/Framework 元数据", "observed", "observed", ("module_text",)
+            )
+        if b"addlistener" in lower or b"hdmioutput" in lower:
+            return _semantic_profile(
+                "runtime_api_or_output_route_observation", "metadata.runtime", "运行时 API/输出路由元数据", "observed", "observed", ("runtime_api_text",)
+            )
+        if b"error" in lower:
+            return _semantic_profile(
+                "error_observation", "metadata.error", "错误/异常元数据", "observed", "observed", ("error_text",)
+            )
+        return _semantic_profile(
+            "dynamic_metadata_context", "metadata.context", "结构化元数据（具体子项待证）", "approximate", "approximate", ("metadata_family", "payload_opaque")
+        )
+
+    family = (int(report_code) >> 16) & 0xFFFF
+    if family == 0x010A:
+        return _semantic_profile(
+            "control_or_feedback_record", "control.protocol", "控制/反馈记录（具体字段待证）", "approximate", "approximate", ("report_family_0x010a",)
+        )
+    if family == 0x0102:
+        return _semantic_profile(
+            "telemetry_leaf", "telemetry.leaf", "探测遥测叶子（具体字段待证）", "approximate", "approximate", ("report_family_0x0102",)
+        )
+    return _semantic_profile(
+        "unresolved_payload", "unknown", "未解析记录", "unknown", "unknown", (), exact_meaning=False
+    )
+
 
 def _read_flow_archive_bytes(data: bytes, filename: str = "") -> tuple[dict[str, Any], list[dict[str, Any]]]:
     raw = bytes(data or b"")
@@ -372,58 +599,13 @@ def _report_role(report_code: int, direction: int) -> tuple[str, str]:
 
 
 def _observed_payload_role(report_code: int, record: bytes) -> tuple[str, str, tuple[str, ...]]:
-    """Classify only payload evidence that is visible in this exact record.
-
-    Dynamic 0x011223xx suffixes are deliberately excluded from the decision:
-    the same subtype can carry different observations in different packets.
-    """
-    data = bytes(record or b"")
-    lower = data.lower()
-    evidence: list[str] = []
-
-    if report_code == 0x010A001B:
-        return "parent_container", "confirmed", ("report_code",)
-    if report_code == 0x010A0011:
-        return "pairing_or_protection_context_observed", "observed", ("report_code",)
-    if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
-        return "response_feedback_fields", "observed", ("fixed_response_offsets",)
-    if report_code == 0x0102000A:
-        report = _detect_tss_report(data)
-        layout = _read_0102000a_layout(data, report) if report else None
-        if STRONG_TEXT_TOKEN_RE.search(data.decode("ascii", "ignore")):
-            return "typed_leaf_string_or_integrity_observation", "observed", ("printable_token", "full_shape_required")
-        if layout:
-            return "typed_leaf_fixed_shape_value", "observed", ("full_shape",)
-        return "typed_leaf_unresolved_shape", "unknown", ("shape_parse_failed",)
-    if report_code & 0xFFFFFF00 != 0x01122300:
-        return "unresolved_payload", "unknown", ()
-
-    has_csob = all(token in lower for token in (b"cs:", b",ob:", b"state:", b",r:", b",p:"))
-    if has_csob:
-        return "csob_state_snapshot", "high", ("cs", "ob", "state", "r", "p")
-
-    if b"config2.dat" in lower or b"config3.dat" in lower or b"mrpcs_i_l.data" in lower:
-        evidence.append("configuration_filename")
-        return "configuration_file_observation", "observed", tuple(evidence)
-    if b"apple root ca" in lower or b"certification authority" in lower:
-        return "certificate_or_trust_observation", "observed", ("certificate_text",)
-    if b"iteamid:" in lower or b"teamid:" in lower:
-        return "signing_team_metadata", "observed", ("team_id_key",)
-    if b"addlistener" in lower or b"hdmioutput" in lower:
-        return "runtime_api_or_output_route_observation", "observed", ("runtime_api_text",)
-    if b"rgvsdgfgb3jjzwnsawvuda==" in lower:
-        return "application_component_marker", "observed", ("base64_component_text",)
-    if b"iappversion:" in lower or b"iappinfo:" in lower:
-        return "application_version_metadata", "observed", ("app_version_key",)
-    if b"framework" in lower or b".dylib" in lower:
-        return "module_or_framework_observation", "observed", ("module_text",)
-    if b"idevidfv:" in lower or b"itsssdkuuid:" in lower or b"iappmachuuid:" in lower:
-        return "device_identity_metadata", "observed", ("device_identifier_key",)
-    if b"model:" in lower or b"ver:" in lower:
-        return "device_profile_metadata", "observed", ("device_profile_key",)
-    if b"error" in lower:
-        return "error_observation", "observed", ("error_text",)
-    return "dynamic_metadata_opaque", "unknown", ("dynamic_family_only",)
+    """Backward-compatible tuple view over the richer semantic profile."""
+    profile = _payload_semantic_profile(report_code, record)
+    return (
+        str(profile.get("role") or "unresolved_payload"),
+        str(profile.get("confidence") or "unknown"),
+        tuple(profile.get("evidence") or ()),
+    )
 
 
 def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]:
@@ -445,8 +627,18 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
     accepted_timestamps: Counter[str] = Counter()
     rejected_timestamp_reasons: Counter[str] = Counter()
     rejected_timestamp_samples: list[dict[str, Any]] = []
+    semantic_categories: Counter[str] = Counter()
+    semantic_labels: Counter[str] = Counter()
+    semantic_tiers: Counter[str] = Counter()
 
-    def add_report(report_code: int, record: bytes, event: dict[str, Any], *, child_index: int | None) -> None:
+    def add_report(
+        report_code: int,
+        record: bytes,
+        event: dict[str, Any],
+        *,
+        child_index: int | None,
+        analysis_node: dict[str, Any] | None = None,
+    ) -> None:
         direction = int(event.get("dir") or 0)
         family, subtype = _report_family(report_code)
         role, confidence = _report_role(report_code, direction)
@@ -461,6 +653,9 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
                 "roles": Counter(),
                 "payload_roles": Counter(),
                 "payload_evidence": Counter(),
+                "semantic_categories": Counter(),
+                "semantic_labels_zh": Counter(),
+                "semantic_tiers": Counter(),
                 "confidence": confidence,
                 "shapes": Counter(),
                 "fields": defaultdict(Counter),
@@ -471,8 +666,34 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
         )
         item["counts"]["request" if direction == 0 else "response"] += 1
         item["roles"][role] += 1
-        payload_role, payload_confidence, payload_evidence = _observed_payload_role(report_code, record)
+        node = analysis_node if isinstance(analysis_node, dict) else {}
+        profile = _payload_semantic_profile(report_code, record)
+        if node.get("semantic_category"):
+            profile = {
+                **profile,
+                "role": str(node.get("semantic_role") or profile.get("role") or "unresolved_payload"),
+                "category": str(node.get("semantic_category") or profile.get("category") or "unknown"),
+                "label_zh": str(node.get("semantic_label_zh") or profile.get("label_zh") or "未解析记录"),
+                "tier": str(node.get("semantic_tier") or profile.get("tier") or "unknown"),
+                "confidence": str(node.get("semantic_role_confidence") or profile.get("confidence") or "unknown"),
+                "evidence": tuple(node.get("semantic_role_evidence") or profile.get("evidence") or ()),
+            }
+        payload_role = str(profile.get("role") or "unresolved_payload")
+        payload_confidence = str(profile.get("confidence") or "unknown")
+        payload_evidence = tuple(profile.get("evidence") or ())
         item["payload_roles"][f"{payload_role} ({payload_confidence})"] += 1
+        category = str(profile.get("category") or "unknown")
+        label_zh = str(profile.get("label_zh") or "未解析记录")
+        tier = str(profile.get("tier") or "unknown")
+        item["semantic_categories"][category] += 1
+        item["semantic_labels_zh"][label_zh] += 1
+        item["semantic_tiers"][tier] += 1
+        semantic_categories[category] += 1
+        semantic_labels[label_zh] += 1
+        semantic_tiers[tier] += 1
+        if str(item.get("confidence") or "unknown") == "unknown" and tier != "unknown":
+            item["confidence"] = tier
+            item["meaning"] = label_zh
         for evidence_name in payload_evidence:
             item["payload_evidence"][evidence_name] += 1
         if subtype is not None:
@@ -482,6 +703,13 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             layout = _read_0102000a_layout(record, report)
             if layout:
                 item["shapes"][_shape_key(layout, len(record))] += 1
+        elif report_code == 0x0102000A and isinstance(node.get("shape"), dict):
+            node_shape = node["shape"]
+            shape_text = ":".join(
+                str(node_shape.get(key) or "-")
+                for key in ("report_family", "inner_type", "selector0", "selector1", "inner_field", "record_len")
+            )
+            item["shapes"][shape_text] += 1
         for field_name, regex in (
             ("cs", re.compile(rb"cs:([^,;\x00\r\n]+)")),
             ("ob", re.compile(rb"ob:([^;\x00\r\n]+)")),
@@ -492,6 +720,12 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             match = regex.search(record)
             if match:
                 item["fields"][field_name][match.group(1).decode("ascii", "replace")[:160]] += 1
+        for field_item in node.get("fields") if isinstance(node.get("fields"), list) else []:
+            if not isinstance(field_item, dict):
+                continue
+            field_name = str(field_item.get("name") or "field")
+            field_value = str(field_item.get("value") or "-")[:160]
+            item["fields"][field_name][field_value] += 1
         if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057} and len(record) >= 0x16:
             for field_name, offset in (("field_a", 0x0A), ("field_b", 0x0E), ("field_c", 0x12)):
                 item["fields"][field_name][_fmt_hex(_read_be32(record, offset), 8)] += 1
@@ -526,6 +760,8 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             request_count += 1
         else:
             response_count += 1
+        analysis = event.get("analysis") if isinstance(event.get("analysis"), dict) else {}
+        packet_analysis = analysis.get("packet") if isinstance(analysis.get("packet"), dict) else {}
         payload = _hex_to_bytes(_event_hex(event, "display" if source == "display+before" else source))
         report = _detect_tss_report(payload)
         report_key = ""
@@ -537,10 +773,30 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
                 children, _parent = _parse_parent_children(payload)
                 for child in children:
                     add_report(int(child["report_code"]), child["record"], event, child_index=int(child["index"]))
+        else:
+            try:
+                report_code = int(str(packet_analysis.get("report_code") or "0"), 0)
+            except (TypeError, ValueError):
+                report_code = 0
+            if report_code:
+                report_key = _fmt_hex(report_code, 8)
+                add_report(report_code, b"", event, child_index=None, analysis_node=packet_analysis)
+                for child_node in packet_analysis.get("children") if isinstance(packet_analysis.get("children"), list) else []:
+                    if not isinstance(child_node, dict):
+                        continue
+                    try:
+                        child_report = int(str(child_node.get("report_code") or "0"), 0)
+                    except (TypeError, ValueError):
+                        child_report = 0
+                    if child_report:
+                        add_report(
+                            child_report,
+                            b"",
+                            event,
+                            child_index=child_node.get("index"),
+                            analysis_node=child_node,
+                        )
         timeline.append((int(event.get("ts") or 0), direction, report_key))
-
-        analysis = event.get("analysis") if isinstance(event.get("analysis"), dict) else {}
-        packet_analysis = analysis.get("packet") if isinstance(analysis.get("packet"), dict) else {}
         timestamp_nodes = [packet_analysis]
         timestamp_nodes.extend(
             item for item in packet_analysis.get("children", [])
@@ -628,23 +884,33 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
                 **{
                     name: value
                     for name, value in item.items()
-                    if name not in {"roles", "payload_roles", "payload_evidence", "shapes", "fields", "correlations"}
+                    if name not in {"roles", "payload_roles", "payload_evidence", "semantic_categories", "semantic_labels_zh", "semantic_tiers", "shapes", "fields", "correlations"}
                 },
                 "observations": int(item["counts"]["request"]) + int(item["counts"]["response"]),
                 "roles": dict(item["roles"].most_common()),
                 "payload_roles": dict(item["payload_roles"].most_common()),
                 "payload_evidence": dict(item["payload_evidence"].most_common()),
+                "semantic_categories": dict(item["semantic_categories"].most_common()),
+                "semantic_labels_zh": dict(item["semantic_labels_zh"].most_common()),
+                "semantic_tiers": dict(item["semantic_tiers"].most_common()),
                 "shapes": dict(item["shapes"].most_common()),
                 "fields": {name: dict(values.most_common(8)) for name, values in item["fields"].items()},
                 "correlations": dict(item["correlations"].most_common(8)),
             }
         )
-    unknown = [item["report_code"] for item in report_rows if item.get("confidence") == "unknown"]
+    unknown = [
+        item["report_code"]
+        for item in report_rows
+        if set((item.get("semantic_categories") or {}).keys()) <= {"unknown"}
+    ]
     ratio = response_count / request_count if request_count else None
     return {
         "schema": "tersafe.semantic.v1",
         "reports": report_rows,
         "dynamic_011223_subtypes": dict(subtype_counts.most_common()),
+        "semantic_categories": dict(semantic_categories.most_common()),
+        "semantic_labels_zh": dict(semantic_labels.most_common()),
+        "semantic_tiers": dict(semantic_tiers.most_common()),
         "traffic": {
             "requests": request_count,
             "responses": response_count,
@@ -686,7 +952,7 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             "opaque_passthrough_rate": (opaque_passthrough / opaque_nodes if opaque_nodes else None),
         },
         "unknown_reports": unknown,
-        "unknown_note": "未知项目前不能证明含义；保留原包与样例，不给出伪确定标签。",
+        "unknown_note": "近似分类只回答所属大类；精确字段目前不能证明含义时会明确标注“近似”。真正 unknown 仅保留给连 report family 都无法识别的记录。",
     }
 
 
@@ -1200,6 +1466,8 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
             f"- requests: `{traffic.get('requests', 0)}`",
             f"- responses: `{traffic.get('responses', 0)}`",
             f"- response/request ratio: `{traffic.get('response_request_ratio')}`",
+            f"- semantic categories: `{_counter_text(deep.get('semantic_categories') or {}, 16)}`",
+            f"- semantic evidence tiers: `{_counter_text(deep.get('semantic_tiers') or {}, 8)}`",
             f"- state phases: `{_counter_text(mirror.get('state_phases') or {}, 8)}`",
             f"- mirror actions: `{_counter_text(mirror.get('actions') or {}, 8)}`",
             f"- average consistency: `{mirror.get('average_consistency')}`",
@@ -1215,7 +1483,7 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
             "",
             "### Every ReportCode",
             "",
-            "| reportCode | family/subtype | observed | request | response | family role | observed payload roles | confidence | shapes | fields | preceding request |",
+            "| reportCode | family/subtype | observed | request | response | semantic category / 中文近似义 | evidence tier | observed payload roles | shapes | fields | preceding request |",
             "|---|---|---:|---:|---:|---|---|---|---|---|---|",
         ]
     )
@@ -1232,9 +1500,9 @@ def render_markdown(summary: dict[str, Any], *, top: int = 20) -> str:
         lines.append(
             f"| `{report.get('report_code')}` | `{family}` | {report.get('observations', int(counts.get('request', 0)) + int(counts.get('response', 0)))} | "
             f"{counts.get('request', 0)} | {counts.get('response', 0)} | "
-            f"{report.get('meaning', '目前不能证明含义')} | "
+            f"`{_counter_text(report.get('semantic_categories') or {}, 3)}` / {_counter_text(report.get('semantic_labels_zh') or {}, 3)} | "
+            f"`{_counter_text(report.get('semantic_tiers') or {}, 3)}` | "
             f"`{_counter_text(report.get('payload_roles') or {}, 4)}` | "
-            f"`{report.get('confidence', 'unknown')}` | "
             f"`{_counter_text(report.get('shapes') or {}, 2)}` | `{field_text}` | "
             f"`{_counter_text(report.get('correlations') or {}, 3)}` |"
         )
