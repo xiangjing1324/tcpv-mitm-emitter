@@ -313,6 +313,50 @@ function installPreviewSummaryStyles() {
       white-space: nowrap;
       vertical-align: bottom;
     }
+    .semantic-timeline {
+      margin: 8px 8px 12px;
+      padding: 10px 12px;
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel) 92%, var(--accent) 8%);
+      display: grid;
+      gap: 7px;
+    }
+    .semantic-timeline-title {
+      color: var(--text);
+      font-weight: 800;
+      letter-spacing: .02em;
+    }
+    .semantic-timeline-row {
+      display: grid;
+      grid-template-columns: minmax(92px, 120px) minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      font-size: 12px;
+    }
+    .semantic-timeline-label {
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .semantic-timeline-track {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      min-width: 0;
+    }
+    .semantic-timeline-chip {
+      padding: 2px 6px;
+      border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel) 90%, var(--accent) 10%);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .semantic-timeline-chip-risk {
+      border-color: rgba(248, 113, 113, .45);
+      background: rgba(248, 113, 113, .10);
+      color: #fca5a5;
+    }
   `;
 }
 
@@ -584,6 +628,7 @@ function writePayloadCache(account, eventId, detail) {
       seq: Number.isFinite(Number(normalized.seq)) ? Number(normalized.seq) : undefined,
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
+      analysis: normalized.analysis && typeof normalized.analysis === "object" ? normalized.analysis : {},
     },
     size:
       pay.length
@@ -3643,10 +3688,11 @@ function reportBusinessLabel(value) {
   const parsed = parseReportCodeNumber(value);
   if (!Number.isFinite(parsed)) return "";
   if (parsed === 0x010a001b) return "父容器";
-  if (parsed === 0x010a0011) return "高级白名单/保护节点";
-  if (parsed === 0x0102000a) return "二进制叶子/运行态字段";
+  if (parsed === 0x010a0011) return "配对/保护上下文（观察）";
+  if (parsed === 0x0102000a) return "typed leaf shell（按完整 shape 分类）";
+  if (Math.floor(parsed / 0x100) === 0x011223) return `动态 metadata event family（subtype=0x${(parsed & 0xff).toString(16).padStart(2, "0")}）`;
   const family = Math.floor(parsed / 0x10000) & 0xffff;
-  if (family === 0x0112) return "普通白名单/结构化节点";
+  if (family === 0x0112) return "metadata family（payload 证据不足）";
   if (family === 0x010a) return "容器/元数据节点";
   if (family === 0x0102) return "叶子节点";
   return "未知业务节点";
@@ -3685,7 +3731,7 @@ function translatedReasonText(reason) {
   if (raw.includes("blocklist")) return `命中黑名单清理规则（${raw}）`;
   if (raw.includes("device_preserve")) return `设备字段保护（${raw}）`;
   if (raw.includes("010a0011")) return `010a0011 保护/兜底规则（${raw}）`;
-  if (raw.includes("011223")) return `011223 普通白名单规则（${raw}）`;
+  if (raw.includes("011223")) return `011223xx 动态 metadata subtype（${raw}）`;
   return raw;
 }
 
@@ -4043,6 +4089,41 @@ function compactPacketSemanticInsight(ev) {
   };
 }
 
+function compactStructuredSemanticInsights(ev) {
+  const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  if (!semantic || semantic.schema !== "tersafe.semantic.v1") return [];
+  const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
+  const firstAction = Array.isArray(semantic.actions) && semantic.actions.length > 0
+    ? semantic.actions[0]
+    : {};
+  const rolePhase = [packet.role || "未知角色", semantic.state_phase || "unknown"].filter(Boolean).join(" / ");
+  const sourceBits = [];
+  if (firstAction.source_seq !== undefined && firstAction.source_seq !== null) {
+    sourceBits.push(`8091#${firstAction.source_seq}`);
+  }
+  if (Number.isFinite(Number(semantic.source_age_ms))) {
+    sourceBits.push(`${Number(semantic.source_age_ms)}ms`);
+  }
+  sourceBits.push(String(semantic.action || "passthrough"));
+  const out = [
+    { kind: "state", text: rolePhase, title: `report=${packet.report_code || "-"} family=${packet.report_family || "-"}` },
+    { kind: "semantic", text: sourceBits.join(" → "), title: String(semantic.reason || "") },
+  ];
+  const correlation = semantic.response_correlation && typeof semantic.response_correlation === "object"
+    ? semantic.response_correlation
+    : null;
+  if (correlation && correlation.status && correlation.status !== "request_anchor") {
+    const responseText = [
+      correlation.response_report_code || packet.report_code || "response",
+      correlation.request_seq ? `← req#${correlation.request_seq}` : correlation.status,
+      Number.isFinite(Number(correlation.delta_ms)) ? `${Number(correlation.delta_ms)}ms` : "",
+      Number(correlation.burst_index || 0) > 1 ? `burst×${Number(correlation.burst_index)}` : "",
+    ].filter(Boolean).join(" ");
+    out.push({ kind: "type", text: responseText, title: correlation.status });
+  }
+  return out;
+}
+
 function collectPacketSignalMatches(sourceText, regex, maxItems = 2) {
   const out = [];
   const seen = new Set();
@@ -4149,8 +4230,12 @@ function compactTypeInsight(summaryText) {
 }
 
 function buildSummaryInsightStrip(ev, summaryText) {
-  if (!isDecodedFlowEvent(ev, summaryText)) return null;
+  const hasStructuredSemantic = !!(
+    ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
+  );
+  if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic) return null;
   const candidates = [
+    ...compactStructuredSemanticInsights(ev),
     compactPacketSemanticInsight(ev),
     ...compactPacketTextInsights(ev, summaryText),
     compactChildInsight(summaryText),
@@ -5296,14 +5381,14 @@ function childRuleAnnotations(beforeChild, afterChild, action) {
   for (const child of candidates) {
     const report = parseReportCodeNumber(child.reportCode);
     if (!Number.isFinite(report)) continue;
-    if (Math.floor(report / 0x100) === 0x011223) add("011223xx：普通白名单节点");
-    if (report === 0x010a0011) add("010a0011：高级白名单/保护节点");
-    if (report === 0x0102000a) add("0102000a：二进制叶子/运行态字段，不等于设备保护");
+    if (Math.floor(report / 0x100) === 0x011223) add(`011223xx：动态 metadata family；subtype=0x${(report & 0xff).toString(16).padStart(2, "0")}，含义由 payload 判定`);
+    if (report === 0x010a0011) add("010a0011：配对/保护上下文（观察），尚不能证明固定高级白名单含义");
+    if (report === 0x0102000a) add("0102000a：typed leaf shell；必须按 inner_type/selector0/selector1/inner_field/len 分类");
   }
   const actionReport = compactReportToDisplay(action && action.report);
   const sourceReport = compactReportToDisplay(action && action.source);
-  if (actionReport.startsWith("0x011223") || sourceReport.startsWith("0x011223")) add("011223xx：普通白名单节点");
-  if (actionReport === "0x010a0011" || sourceReport === "0x010a0011") add("010a0011：高级白名单/保护节点");
+  if (actionReport.startsWith("0x011223") || sourceReport.startsWith("0x011223")) add("011223xx：动态 metadata family，低字节只作 subtype");
+  if (actionReport === "0x010a0011" || sourceReport === "0x010a0011") add("010a0011：配对/保护上下文（观察）");
 
   const semanticText = [mergedChildSemanticText(beforeChild, afterChild), action && action.reason]
     .join(" ")
@@ -6644,32 +6729,11 @@ function collectChildTimestampItems(childBytes, valueStart, timestampHints = [])
     }
   }
 
-  const rawStart = Number(valueStart);
-  const scanStart = Number.isFinite(rawStart) && rawStart >= 0 ? Math.ceil(rawStart / 4) * 4 : 0;
-  const generic = [];
-  for (let offset = scanStart; offset + 3 < childBytes.length && out.length < 12; offset += 4) {
-    const value = readBe32(childBytes, offset);
-    if (isPlausibleTimestampSeconds(value)) {
-      generic.push({ offset, value });
-    }
-  }
-  if (generic.length >= 2) {
-    generic.sort((a, b) => Number(a.value) - Number(b.value));
-    let bestGroup = [];
-    for (let i = 0; i < generic.length; i += 1) {
-      const group = [];
-      for (let j = i; j < generic.length; j += 1) {
-        if (Number(generic[j].value) - Number(generic[i].value) > 12 * 60 * 60) break;
-        group.push(generic[j]);
-      }
-      if (group.length > bestGroup.length) bestGroup = group;
-    }
-    if (bestGroup.length >= 2) {
-      for (const item of bestGroup.slice(0, 12)) {
-        add(item.offset, item.value, "candidate");
-      }
-    }
-  }
+  // Generic aligned BE32 values are not timestamps by default. In particular,
+  // ASCII/hash bytes such as child +0x44 "dd3b" can numerically resemble an
+  // epoch. The server-side tersafe.semantic.v1 analysis records such values as
+  // rejected candidates with a reason; only ob:T1/T2/T3, known typed-leaf
+  // shapes, and explicit schema hints are highlighted here.
   return out.sort((a, b) => Number(a.start) - Number(b.start));
 }
 
@@ -7155,7 +7219,7 @@ function childSemanticRoleText(child) {
   if (/\bstate\b|<state:|cnt:|counter|status/.test(text)) {
     return "state_snapshot / 状态快照";
   }
-  if (Number(report) === 0x0102000a) return "xor-text / 运行态二进制叶子";
+  if (Number(report) === 0x0102000a) return "typed leaf shell / 按完整 shape 分类";
   if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) return "structured-metadata / 结构化元数据";
   return "";
 }
@@ -7166,12 +7230,14 @@ function childRichTypeText(child) {
   const rawType = String(child.className || "").trim();
   const role = childSemanticRoleText(child);
   if (Number(report) === 0x0102000a) {
-    return role || "0102000a / 运行态二进制叶子";
+    return role || "0102000a / typed leaf shell（shape-specific）";
   }
-  if (Number(report) === 0x010a0011) return "010a0011 / 高级白名单保护节点";
+  if (Number(report) === 0x010a0011) return "010a0011 / 配对或保护上下文（观察）";
   if (Number(report) === 0x010a001b) return "010a001b / 父容器";
   if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) {
-    return role || "0112xxxx / 结构化元数据叶子";
+    return role || (Math.floor(Number(report || 0) / 0x100) === 0x011223
+      ? `011223xx / 动态 metadata subtype=0x${(Number(report) & 0xff).toString(16).padStart(2, "0")}`
+      : "0112xxxx / 结构化元数据叶子");
   }
   if (rawType === "text/binary-leaf") return "文本混合叶子 / ASCII+二进制";
   if (rawType === "binary-like-leaf") return "二进制叶子 / 不透明运行态字段";
@@ -8072,7 +8138,8 @@ function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
 
 function getEventAnalysis(ev) {
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
-  if (!summaryText) {
+  const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  if (!summaryText && !semantic) {
     return null;
   }
   const cacheKey = [
@@ -8082,6 +8149,7 @@ function getEventAnalysis(ev) {
     String(ev?.before_pay || "").length,
     String(ev?.full_pay || "").length,
     String(ev?.raw_pay || "").length,
+    semantic ? JSON.stringify(semantic).length : 0,
   ].join("|");
   if (ev && ev.__tcpvAnalysisKey === cacheKey && ev.__tcpvAnalysis) {
     return ev.__tcpvAnalysis;
@@ -8115,6 +8183,7 @@ function getEventAnalysis(ev) {
     if (!xor.preview && summary.xor.preview) xor.preview = summary.xor.preview;
   }
   const analysis = {
+    semantic,
     summary,
     decodedStrings,
     decodedUtf8Strings,
@@ -8283,6 +8352,86 @@ function buildEventAnalysisGrid(ev) {
   }
   grid.appendChild(metaCard.card);
 
+  const semantic = analysis.semantic;
+  if (semantic && typeof semantic === "object") {
+    const semanticCard = createAnalysisCard("语义状态 / 8091 → 8092", "analysis-card-semantic");
+    const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
+    const semanticRows = [
+      { label: "Schema", value: semantic.schema || "tersafe.semantic.v1" },
+      { label: "Report", value: packet.report_code || "-" },
+      { label: "Role", value: packet.role || "目前不能证明含义" },
+      { label: "Phase", value: semantic.state_phase || "unknown" },
+      { label: "Mirror", value: `${semantic.mode || "-"} / ${semantic.action || "passthrough"}` },
+      { label: "Reason", value: semantic.reason || "-" },
+      { label: "Source", value: semantic.source_key || "-" },
+      { label: "Delay", value: Number.isFinite(Number(semantic.source_age_ms)) ? `${Number(semantic.source_age_ms)} ms` : "-" },
+      { label: "Consistency", value: Number.isFinite(Number(semantic.consistency)) ? `${(Number(semantic.consistency) * 100).toFixed(1)}%` : "-" },
+      {
+        label: "65010",
+        value: semantic.connection_65010 && semantic.connection_65010.status
+          ? `${semantic.connection_65010.status} / ${semantic.connection_65010.source || "observed"}`
+          : "unknown",
+      },
+      {
+        label: "Response",
+        value: semantic.response_correlation && semantic.response_correlation.status
+          ? [
+              semantic.response_correlation.status,
+              semantic.response_correlation.request_seq ? `req#${semantic.response_correlation.request_seq}` : "",
+              Number.isFinite(Number(semantic.response_correlation.delta_ms)) ? `${Number(semantic.response_correlation.delta_ms)}ms` : "",
+              Number(semantic.response_correlation.burst_index || 0) > 0 ? `burst×${Number(semantic.response_correlation.burst_index)}` : "",
+              semantic.response_correlation.reason || "",
+            ].filter(Boolean).join(" / ")
+          : "等待流时间线关联",
+      },
+      {
+        label: "Safety",
+        value: semantic.response_feedback && typeof semantic.response_feedback === "object"
+          ? [
+              semantic.response_feedback.report_code || "",
+              semantic.response_feedback.field_c || "",
+              Number(semantic.response_feedback.risk_0024_count_2s || 0) > 0
+                ? `risk×${Number(semantic.response_feedback.risk_0024_count_2s)}`
+                : "",
+              semantic.response_feedback.reason || "observed",
+            ].filter(Boolean).join(" / ")
+          : "-",
+      },
+    ];
+    appendAnalysisRows(semanticCard.body, semanticRows);
+
+    const actions = Array.isArray(semantic.actions) ? semantic.actions : [];
+    const fieldRows = [];
+    for (const action of actions) {
+      for (const field of Array.isArray(action && action.fields) ? action.fields : []) {
+        fieldRows.push({
+          label: `${field.field || "field"} · ${field.action || action.action || "observe"}`,
+          value: `8091=${field.source ?? "-"} | 8092 before=${field.before ?? "-"} | output=${field.after ?? "-"}`,
+        });
+      }
+    }
+    if (fieldRows.length > 0) {
+      appendAnalysisSectionTitle(semanticCard.body, "8091来源 / 8092修改前 / 8092输出");
+      appendAnalysisRows(semanticCard.body, fieldRows.slice(0, 24));
+    }
+
+    const packetNodes = [packet, ...(Array.isArray(packet.children) ? packet.children : [])];
+    const rejected = packetNodes.flatMap((node) => (
+      node && node.timestamps && Array.isArray(node.timestamps.rejected) ? node.timestamps.rejected : []
+    ));
+    if (rejected.length > 0) {
+      appendAnalysisSectionTitle(semanticCard.body, `已拒绝的时间候选 ×${rejected.length}`);
+      appendAnalysisRows(
+        semanticCard.body,
+        rejected.slice(0, 12).map((item) => ({
+          label: `+${formatHexValue(item.offset)} / ${item.value}`,
+          value: item.reason || "普通 BE32 没有 schema 时间语义",
+        }))
+      );
+    }
+    grid.appendChild(semanticCard.card);
+  }
+
   const xorCard = createAnalysisCard("XOR / 猜测", "analysis-card-xor");
   const xor = analysis.xor;
   if (xor) {
@@ -8340,6 +8489,26 @@ function buildEventReadableSummary(ev, summaryText) {
   const { kv, items } = summaryPrimaryItems(ev, summaryText);
   const primary = document.createElement("div");
   primary.className = "event-summary-primary";
+  const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  if (semantic) {
+    const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
+    const sourceSeq = Array.isArray(semantic.actions) && semantic.actions[0]
+      ? semantic.actions[0].source_seq
+      : null;
+    const semanticValues = [
+      packet.role ? `角色 ${packet.role}` : "",
+      semantic.state_phase ? `阶段 ${semantic.state_phase}` : "",
+      sourceSeq !== null && sourceSeq !== undefined ? `8091 seq ${sourceSeq}` : "",
+      Number.isFinite(Number(semantic.source_age_ms)) ? `同步 ${Number(semantic.source_age_ms)}ms` : "",
+      semantic.action ? `动作 ${semantic.action}` : "",
+    ].filter(Boolean);
+    for (const text of semanticValues) {
+      const chip = document.createElement("div");
+      chip.className = "event-summary-chip event-summary-chip-state";
+      chip.textContent = text;
+      primary.appendChild(chip);
+    }
+  }
   if (items.length > 0) {
     for (const item of items.slice(0, 6)) {
       const chip = document.createElement("div");
@@ -8347,7 +8516,7 @@ function buildEventReadableSummary(ev, summaryText) {
       chip.textContent = item.text;
       primary.appendChild(chip);
     }
-  } else {
+  } else if (primary.childElementCount === 0) {
     const chip = document.createElement("div");
     chip.className = "event-summary-chip event-summary-chip-info";
     chip.textContent = "当前包没有结构化仿真摘要，可直接看 raw / before / after 字节视图";
@@ -8701,6 +8870,7 @@ function applyEventPayloadDetail(ev, detail) {
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
   if (detail.summary !== undefined) ev.summary = String(detail.summary || "");
+  if (detail.analysis && typeof detail.analysis === "object") ev.analysis = detail.analysis;
 
   const seqNum = Number(detail.seq);
   if (Number.isFinite(seqNum)) ev.seq = seqNum;
@@ -8714,6 +8884,8 @@ function applyEventPayloadDetail(ev, detail) {
   ev.__tcpvPayloadLen = undefined;
   ev.__tcpvHiPreviewLabels = undefined;
   ev.__tcpvHasCsob = undefined;
+  ev.__tcpvAnalysisKey = "";
+  ev.__tcpvAnalysis = null;
   return true;
 }
 
@@ -8890,6 +9062,93 @@ function collectAutoExpandIds(visibleEvents, expandMode) {
   return new Set();
 }
 
+function buildSemanticTimelinePanel(events) {
+  const semanticEvents = (Array.isArray(events) ? events : []).filter(
+    (ev) => ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
+  );
+  if (semanticEvents.length === 0) return null;
+
+  const phaseTrack = [];
+  const connectionTrack = [];
+  const consistencyTrack = [];
+  const burstMax = new Map();
+  let lastPhase = "";
+  let lastConnection = "";
+  for (const ev of semanticEvents) {
+    const analysis = ev.analysis || {};
+    const phase = String(analysis.state_phase || "unknown");
+    if (phase !== lastPhase) {
+      phaseTrack.push(`${formatTsShort(ev.ts)} ${phase}`);
+      lastPhase = phase;
+    }
+    const connection = analysis.connection_65010 && typeof analysis.connection_65010 === "object"
+      ? String(analysis.connection_65010.status || "unknown")
+      : String(ev.cid || "").includes(":65010")
+        ? "open(observed)"
+        : "unknown";
+    if (connection !== lastConnection) {
+      connectionTrack.push(`${formatTsShort(ev.ts)} ${connection}`);
+      lastConnection = connection;
+    }
+    const consistency = Number(analysis.consistency);
+    if (Number.isFinite(consistency)) {
+      consistencyTrack.push(`${formatTsShort(ev.ts)} ${(consistency * 100).toFixed(0)}%`);
+    }
+    const correlation = analysis.response_correlation && typeof analysis.response_correlation === "object"
+      ? analysis.response_correlation
+      : {};
+    const burst = Number(correlation.burst_index || 0);
+    if (burst > 0) {
+      const report = String(correlation.response_report_code || analysis.packet?.report_code || "unknown");
+      burstMax.set(report, Math.max(Number(burstMax.get(report) || 0), burst));
+    }
+    const feedback = analysis.response_feedback && typeof analysis.response_feedback === "object"
+      ? analysis.response_feedback
+      : {};
+    const riskBurst = Number(feedback.risk_0024_count_2s || 0);
+    if (riskBurst > 0) {
+      burstMax.set("0x010a0024(field_c=0x10194)", Math.max(Number(burstMax.get("0x010a0024(field_c=0x10194)") || 0), riskBurst));
+    }
+  }
+
+  const panel = document.createElement("section");
+  panel.className = "semantic-timeline";
+  const title = document.createElement("div");
+  title.className = "semantic-timeline-title";
+  title.textContent = "语义状态总览（hex 下钻前）";
+  panel.appendChild(title);
+
+  const appendTrack = (labelText, values, risk = false) => {
+    const row = document.createElement("div");
+    row.className = "semantic-timeline-row";
+    const label = document.createElement("div");
+    label.className = "semantic-timeline-label";
+    label.textContent = labelText;
+    const track = document.createElement("div");
+    track.className = "semantic-timeline-track";
+    const safeValues = values.length > 0 ? values.slice(-12) : ["暂无证据"];
+    for (const value of safeValues) {
+      const chip = document.createElement("span");
+      chip.className = `semantic-timeline-chip${risk ? " semantic-timeline-chip-risk" : ""}`;
+      chip.textContent = value;
+      track.appendChild(chip);
+    }
+    row.appendChild(label);
+    row.appendChild(track);
+    panel.appendChild(row);
+  };
+
+  appendTrack("状态阶段", phaseTrack);
+  appendTrack("65010 连接", connectionTrack);
+  appendTrack(
+    "响应 burst/2s",
+    Array.from(burstMax.entries()).map(([report, count]) => `${report} ×${count}`),
+    Array.from(burstMax.values()).some((count) => Number(count) > 3)
+  );
+  appendTrack("一致度趋势", consistencyTrack);
+  return panel;
+}
+
 function renderEvents() {
   snapshotDumpScrollPositions(el.events);
   const openIds = new Set();
@@ -8961,6 +9220,11 @@ function renderEvents() {
     empty.textContent = "No packets match current filters.";
     el.events.appendChild(empty);
     return;
+  }
+
+  const semanticTimeline = buildSemanticTimelinePanel(visibleEvents);
+  if (semanticTimeline) {
+    el.events.appendChild(semanticTimeline);
   }
 
   const listFrag = document.createDocumentFragment();

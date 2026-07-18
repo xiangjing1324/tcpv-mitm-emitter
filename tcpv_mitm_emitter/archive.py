@@ -12,6 +12,7 @@ from typing import Any
 
 from .analyzer import TersafeAnalyzer
 from .config import archive_dir
+from .semantic import analyze_payload
 
 ARCHIVE_VERSION = 1
 ARCHIVE_SUFFIX = ".tcpvflow.jsonl.gz"
@@ -103,6 +104,7 @@ def export_event_from_api(event: dict[str, Any]) -> dict[str, Any]:
         "chunk_idx": _to_int(event.get("chunk_idx"), -1),
         "decode_status": str(event.get("decode_status") or ""),
         "source": str(event.get("source") or ""),
+        "analysis": event.get("analysis") if isinstance(event.get("analysis"), dict) else {},
     }
 
 
@@ -173,17 +175,22 @@ def parse_txt_capture(
         except ValueError:
             continue
         seq += 1
-        analysis = analyzer.analyze(raw_bytes) if analyzer is not None else None
-        if analysis is None:
+        decoded_analysis = analyzer.analyze(raw_bytes) if analyzer is not None else None
+        if decoded_analysis is None:
             display_bytes = raw_bytes
             summary = f"import_label={safe_slug(label)} import_decode=skipped"
             decode_status = "skipped"
             before_hex = ""
         else:
-            display_bytes = analysis.display_payload or raw_bytes
-            summary = " ".join(part for part in (f"import_label={safe_slug(label)}", analysis.summary) if part)
-            decode_status = analysis.decode_status
-            before_hex = analysis.before_payload.hex()
+            display_bytes = decoded_analysis.display_payload or raw_bytes
+            summary = " ".join(part for part in (f"import_label={safe_slug(label)}", decoded_analysis.summary) if part)
+            decode_status = decoded_analysis.decode_status
+            before_hex = decoded_analysis.before_payload.hex()
+        semantic_analysis = analyze_payload(
+            display_bytes,
+            direction=0 if label.startswith("请求") else 1,
+            before_payload=bytes.fromhex(before_hex) if before_hex else b"",
+        )
         events.append(
             {
                 "ts": ts_ms,
@@ -202,6 +209,7 @@ def parse_txt_capture(
                 "source": "txt",
                 "listen_tag": listen_tag,
                 "source_port": source_port,
+                "analysis": semantic_analysis,
             }
         )
 

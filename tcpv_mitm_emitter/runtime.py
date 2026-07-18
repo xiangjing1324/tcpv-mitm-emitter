@@ -17,6 +17,7 @@ from .analyzer import TersafeAnalyzer
 from .archive import export_event_from_api, make_archive_path, parse_import_bytes, write_flow_archive
 from .config import archive_dir, env_int, overflow_dir, runtime_config
 from .store import TcpvEventStore
+from .semantic import analysis_from_event, analyze_payload, correlate_events
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,7 @@ class TcpvRuntime:
         before_packet_len: int | None = None,
         raw_packet_data: Any | None = None,
         raw_packet_len: int | None = None,
+        analysis: dict[str, Any] | None = None,
     ) -> None:
         if not self.enabled or self.store is None:
             return
@@ -229,6 +231,7 @@ class TcpvRuntime:
             "ts_ms": int(ts_ms or (time.time() * 1000)),
             "msg_idx": msg_idx,
             "chunk_idx": chunk_idx,
+            "analysis": dict(analysis) if isinstance(analysis, dict) else {},
         }
 
         try:
@@ -267,6 +270,7 @@ class TcpvRuntime:
         before_packet_len: int | None = None,
         raw_packet_data: Any | None = None,
         raw_packet_len: int | None = None,
+        analysis: dict[str, Any] | None = None,
     ) -> None:
         account_value = account
         if account_value is None and flow is not None:
@@ -283,6 +287,11 @@ class TcpvRuntime:
         if not proxy_username_value and flow is not None:
             proxy_username_value = str(getattr(flow, "proxy_username", "") or "").strip()
         summary_value = str(summary or "").strip()
+        analysis_value = analysis
+        if analysis_value is None and flow is not None:
+            candidate = getattr(flow, "last_csob_semantic_analysis", None)
+            if isinstance(candidate, dict):
+                analysis_value = candidate
 
         self.emit_packet(
             account=account_value or "",
@@ -301,6 +310,7 @@ class TcpvRuntime:
             before_packet_len=before_packet_len,
             raw_packet_data=raw_packet_data,
             raw_packet_len=raw_packet_len,
+            analysis=analysis_value,
         )
 
     def tcp_start(
@@ -391,12 +401,26 @@ class TcpvRuntime:
         store = self.store
         if store is None:
             return [], after_id, False
-        return store.get_events(
+        events, last_id, has_more = store.get_events(
             account=account,
             after_id=after_id,
             limit=limit,
-            include_payload=include_payload,
+            # Redis Stream rows already contain the payload fields. Decode them
+            # here even for compact list responses so old rows without `ana`
+            # can be upgraded by the local semantic parser.
+            include_payload=True,
         )
+        for event in events:
+            if not event.get("analysis"):
+                event["analysis"] = analysis_from_event(event)
+        correlate_events(events)
+        if not include_payload:
+            for event in events:
+                event["pay"] = ""
+                event["full_pay"] = ""
+                event["before_pay"] = ""
+                event["raw_pay"] = ""
+        return events, last_id, has_more
 
     def export_flow(self, account: str) -> tuple[Path, dict[str, Any]]:
         account = str(account or "").strip()
@@ -408,12 +432,40 @@ class TcpvRuntime:
         flow = next((item for item in store.list_accounts() if str(item.get("account") or "") == account), None)
         if flow is None:
             raise KeyError("flow not found")
-        events = [export_event_from_api(event) for event in store.iter_events(account, include_payload=True)]
+        api_events = store.iter_events(account, include_payload=True)
+        for event in api_events:
+            if not event.get("analysis"):
+                event["analysis"] = analysis_from_event(event)
+        correlate_events(api_events)
+        events = [export_event_from_api(event) for event in api_events]
         if not events:
             raise KeyError("flow has no events")
         path = make_archive_path(flow)
         write_flow_archive(path, flow, events)
         return path, {"account": account, "events": len(events), "path": str(path)}
+
+    def get_deep_report(self, account: str) -> tuple[dict[str, Any], str]:
+        from .shape_summary import render_markdown, summarize_events
+
+        account = str(account or "").strip()
+        if not account:
+            raise ValueError("account is required")
+        store = self.store
+        if store is None:
+            raise RuntimeError("service not enabled")
+        flow = next((item for item in store.list_accounts() if str(item.get("account") or "") == account), None)
+        if flow is None:
+            raise KeyError("flow not found")
+        api_events = store.iter_events(account, include_payload=True)
+        for event in api_events:
+            if not event.get("analysis"):
+                event["analysis"] = analysis_from_event(event)
+        correlate_events(api_events)
+        events = [export_event_from_api(event) for event in api_events]
+        if not events:
+            raise KeyError("flow has no events")
+        summary = summarize_events(flow, events, source="display", input_name=f"live:{account}")
+        return summary, render_markdown(summary, top=40)
 
     def save_flow(self, account: str) -> dict[str, Any]:
         path, info = self.export_flow(account)
@@ -458,7 +510,10 @@ class TcpvRuntime:
         store = self.store
         if store is None:
             return None
-        return store.get_event(account=account, event_id=event_id)
+        event = store.get_event(account=account, event_id=event_id)
+        if event is not None and not event.get("analysis"):
+            event["analysis"] = analysis_from_event(event)
+        return event
 
     def get_connections(self, account: str, recent: int) -> list[dict[str, Any]]:
         store = self.store
@@ -531,6 +586,12 @@ class TcpvRuntime:
                 break
 
     def _append_store_event(self, store: TcpvEventStore, item: dict[str, Any]) -> None:
+        analysis = analyze_payload(
+            bytes(item.get("payload") or b""),
+            direction=int(item.get("dir") or 0),
+            before_payload=bytes(item.get("before_payload") or b""),
+            provided=item.get("analysis") if isinstance(item.get("analysis"), dict) else None,
+        )
         store.append_event(
             account=item["account"],
             cid=item["cid"],
@@ -545,6 +606,7 @@ class TcpvRuntime:
             raw_packet_len=item.get("raw_packet_len"),
             proxy_username=item.get("proxy_username", ""),
             summary=item.get("summary", ""),
+            analysis=analysis,
             ts_ms=item["ts_ms"],
             msg_idx=item.get("msg_idx"),
             chunk_idx=item.get("chunk_idx"),
@@ -586,6 +648,7 @@ class TcpvRuntime:
                 "ts_ms": item.get("ts_ms", 0),
                 "msg_idx": item.get("msg_idx"),
                 "chunk_idx": item.get("chunk_idx"),
+                "analysis": item.get("analysis") if isinstance(item.get("analysis"), dict) else {},
             }
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, separators=(",", ":")) + "\n")
@@ -691,6 +754,7 @@ def emit_lobby_packet(
     before_packet_len: int | None = None,
     raw_packet_data: Any | None = None,
     raw_packet_len: int | None = None,
+    analysis: dict[str, Any] | None = None,
 ) -> None:
     """Safe no-op when runtime is disabled.
 
@@ -716,6 +780,7 @@ def emit_lobby_packet(
         before_packet_len=before_packet_len,
         raw_packet_data=raw_packet_data,
         raw_packet_len=raw_packet_len,
+        analysis=analysis,
     )
 
 

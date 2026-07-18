@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 from typing import Any
 
@@ -64,6 +65,7 @@ class TcpvEventStore:
         raw_packet_len: int | None = None,
         decode_status: str = "",
         source: str = "",
+        analysis: dict[str, Any] | None = None,
         imported_seq: int | None = None,
     ) -> str:
         if not account:
@@ -129,6 +131,8 @@ class TcpvEventStore:
             fields["dstat"] = str(decode_status)
         if source:
             fields["src"] = str(source)
+        if isinstance(analysis, dict) and analysis:
+            fields["ana"] = json.dumps(analysis, ensure_ascii=False, separators=(",", ":"))
         if msg_idx is not None:
             fields["midx"] = str(int(msg_idx))
         if chunk_idx is not None:
@@ -466,6 +470,7 @@ class TcpvEventStore:
                 label=str(event.get("label") or ""),
                 decode_status=str(event.get("decode_status") or ""),
                 source=str(event.get("source") or flow_meta.get("source") or "import"),
+                analysis=event.get("analysis") if isinstance(event.get("analysis"), dict) else None,
                 ts_ms=self._to_int(event.get("ts"), first_ts or int(time.time() * 1000)),
                 msg_idx=self._to_int(event.get("msg_idx"), -1),
                 chunk_idx=self._to_int(event.get("chunk_idx"), -1),
@@ -509,6 +514,14 @@ class TcpvEventStore:
         include_payload: bool = True,
     ) -> dict[str, Any]:
         decoded = {self._to_str(k): self._to_str(v) for k, v in fields.items()}
+        analysis: dict[str, Any] = {}
+        if decoded.get("ana"):
+            try:
+                value = json.loads(decoded["ana"])
+                if isinstance(value, dict):
+                    analysis = value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                analysis = {}
         return {
             "id": self._to_str(entry_id),
             "ts": self._to_int(decoded.get("ts"), 0),
@@ -534,6 +547,7 @@ class TcpvEventStore:
             "seq": self._to_int(decoded.get("seq"), 0),
             "msg_idx": self._to_int(decoded.get("midx"), -1),
             "chunk_idx": self._to_int(decoded.get("cidx"), -1),
+            "analysis": analysis,
         }
 
     @staticmethod

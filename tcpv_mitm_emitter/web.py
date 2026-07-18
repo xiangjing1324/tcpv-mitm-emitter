@@ -241,7 +241,9 @@ INDEX_HTML = """
     }
 
     .flow-path {
-      display: block;
+      display: flex;
+      align-items: center;
+      gap: 5px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -270,7 +272,26 @@ INDEX_HTML = """
       font-weight: 700;
       padding: 0 4px;
       display: inline-block;
-      margin-right: 5px;
+      flex: 0 0 auto;
+    }
+
+    .badge-kp {
+      color: #ffe082;
+      background: rgba(245, 158, 11, 0.14);
+      border: 1px solid rgba(245, 158, 11, 0.64);
+      border-radius: 3px;
+      font-weight: 800;
+      padding: 0 4px;
+      display: inline-block;
+      flex: 0 0 auto;
+    }
+
+    .flow-cid {
+      color: var(--text);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .right {

@@ -72,6 +72,7 @@ emit_lobby_packet(
     cid="10.0.0.1:50000->1.2.3.4:65010",
     packet_data=packet_data,
     from_client=True,
+    analysis={"schema": "tersafe.semantic.v1", "action": "shadow_candidate"},  # optional
 )
 
 # Preview-only mode (store first N bytes but keep real packet length in UI)
@@ -150,7 +151,10 @@ When initialized, FastAPI viewer endpoints are exposed on `bind_host:bind_port`:
 - `GET /health`
 - `GET /accounts`
 - `GET /events?account=...`
+- `GET /event?account=...&id=...`（旧事件缺少 `analysis` 时本地补算）
 - `GET /connections?account=...`
+- `GET /reports/deep?account=...&format=json`
+- `GET /reports/deep?account=...&format=markdown`
 - `GET /stats`
 - `GET /config`
 - `POST /imports?filename=...` with raw request body (`.txt`, `.tcpvflow.jsonl`, `.tcpvflow.jsonl.gz`)
@@ -166,6 +170,7 @@ TCPV can import existing mitm txt captures and its own archive files.
 
 - Existing txt captures are parsed as label/time + hex packet pairs. Supported labels include `请求原包`, `请求`, `请求透传`, `请求原包未发送`, `响应原包`, and `响应`.
 - Standard archive files use `.tcpvflow.jsonl.gz`. They keep flow metadata plus packet events with raw/full/display/before payloads.
+- The optional `analysis` object is stored in Redis field `ana`, returned by `/events` and `/event`, and preserved by import/export. Its current schema is `tersafe.semantic.v1`.
 - `full_pay` keeps the original encrypted packet. `pay` is the display payload, which becomes decrypted beforedump when `TCPV_TERSAFE_ROOT` is configured and decoding succeeds.
 - Saved archives default to `~/.tcpv/flows`, or `TCPV_ARCHIVE_DIR` when set.
 
@@ -180,6 +185,31 @@ export TCPV_TTL_SECONDS=86400                     # 0 disables Redis TTL
 export TCPV_MAX_EVENTS_IN_MEMORY=50000
 export TCPV_EVENTS_FETCH_LIMIT=2000
 ```
+
+## Semantic deep report
+
+Event rows prioritize semantic role, state phase, 8091 source sequence/age, mirror action, consistency, and response correlation. Hex remains available as a drill-down view. Report-code naming follows evidence boundaries:
+
+- `0x010A001B`: parent container.
+- `0x011223xx`: dynamic metadata family; the low byte is displayed only as a subtype.
+- `0x0102000A`: typed leaf shell, bucketed by the full shape tuple.
+- `0x010A0011`: pairing/protection context (observed), not a fixed whitelist claim.
+- response codes such as `0x010A0010/24/27/44/57`: described from direction, fields, preceding request, frequency, and burst behavior; unresolved meaning stays explicit.
+
+Known `ob:` T1/T2/T3 fields are accepted as timestamps. Generic four-byte epoch scans are rejected by default; candidates inside ASCII/hash/string slots or across field boundaries are displayed as rejected with a reason. This includes the historical false positive at child `+0x44`, whose bytes are ASCII `dd3b`.
+
+Offline archives can be summarized as JSON and Markdown:
+
+```bash
+python -m tcpv_mitm_emitter.shape_summary capture.tcpvflow.jsonl.gz \
+  --json capture.deep.json --markdown capture.deep.md
+```
+
+The same command accepts the historical `reportcode_matrix.json`. Matrix rows keep their observation counts and old evidence as provenance, but directions, request/response timing, and unknown meanings are not invented.
+
+## Optional viewer login
+
+Set `TCPV_AUTH_PASSWORD` (or compatibility alias `TCPV_PASSWORD`) to protect the web UI and API with a signed login cookie. `TCPV_AUTH_SECRET`, `TCPV_AUTH_MAX_AGE`, and `TCPV_AUTH_COOKIE_SECURE` customize signing, lifetime, and HTTPS-only cookies. If no environment password is set, the runtime may use mitmweb's configured `web_password` when available.
 
 ## Notes
 
