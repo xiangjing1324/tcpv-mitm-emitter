@@ -1087,6 +1087,13 @@ INDEX_HTML = """
       align-items: start;
     }
 
+    .dump-grid > .child-compare-inline {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
+      overflow-x: hidden;
+    }
+
     .dump-grid-request.dump-grid-decrypted {
       grid-template-columns: repeat(2, minmax(520px, 1fr));
       grid-template-rows: auto;
@@ -1115,6 +1122,22 @@ INDEX_HTML = """
 
     .dump-grid-request.dump-grid-decrypted .dump-panel-decoded {
       grid-column: 2;
+    }
+
+    .dump-grid-request.child-structure-current-only {
+      grid-template-columns: minmax(0, 1fr);
+      overflow-x: hidden;
+    }
+
+    .dump-grid-request.child-structure-current-only > .dump-panel-full,
+    .dump-grid-request.child-structure-current-only > .dump-panel-raw-after,
+    .dump-grid-request.child-structure-current-only > .dump-panel-before,
+    .dump-grid-request.child-structure-current-only > .dump-panel-decoded,
+    .dump-grid-request.child-structure-current-only > .string-result-inline,
+    .dump-grid-request.child-structure-current-only > .child-compare-inline {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
     }
 
     .dump-panel {
