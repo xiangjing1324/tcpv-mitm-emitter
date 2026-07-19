@@ -6676,8 +6676,9 @@ function ensureChildCommonStyles() {
     .child-hex-note {
       min-width: 0;
       color: color-mix(in srgb, var(--text) 78%, var(--muted));
-      overflow-wrap: normal;
-      white-space: pre;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: normal;
     }
     .child-hex-row-time {
       background: color-mix(in srgb, #f59e0b 10%, transparent);
@@ -8049,7 +8050,11 @@ function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", befor
   const afterTimestampHints = normalizeChildTimestampHints(afterChild, afterBytes, timestampHintMap);
   if (result && result.kind === "same") {
     row.classList.add("child-preview-row-single");
-    const singleLabel = result.originalOnly ? `${labelBase} 原包 / 当前` : `${labelBase} 未修改`;
+    const singleLabel = result.originalOnly
+      ? `${labelBase} 原包 / 当前`
+      : result.currentOnly
+        ? `${labelBase} 当前结构`
+        : `${labelBase} 未修改`;
     row.appendChild(makeChildPreviewBox(afterChild || beforeChild, singleLabel, "same", afterBytes.length ? afterBytes : beforeBytes, {
       merged: true,
       showInsights: true,
@@ -8243,12 +8248,19 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   const beforeBytes = childBytesFromParsed(beforeBytesAll, beforeChild);
   const afterBytes = childBytesFromParsed(afterBytesAll, afterChild);
   const originalOnly = Boolean(options && options.originalOnly && !beforeChild && afterChild);
+  const currentOnly = Boolean(options && options.currentOnly && !beforeChild && afterChild);
   const comparedResult = childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes);
-  const result = originalOnly
-    ? { label: "原包观察", kind: "same", diff: null, originalOnly: true }
+  const result = originalOnly || currentOnly
+    ? {
+      label: originalOnly ? "原包观察" : "当前结构",
+      kind: "same",
+      diff: null,
+      originalOnly,
+      currentOnly,
+    }
     : comparedResult;
   const mappedAction = actionMap instanceof Map ? actionMap.get(index) : null;
-  let action = mappedAction || (originalOnly ? null : inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild));
+  let action = mappedAction || (originalOnly || currentOnly ? null : inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild));
   if (isRequestFlagPatchDiff(beforeChild, afterChild, beforeBytes, afterBytes, result, summaryKv)) {
     action = requestFlagPatchAction(beforeChild, afterChild);
   }
@@ -8278,7 +8290,7 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   badges.className = "child-title-badges";
   const status = document.createElement("span");
   status.className = `child-status child-status-${result.kind}`;
-  status.textContent = originalOnly ? "原包观察" : (sameNoAction ? "未修改" : result.label);
+  status.textContent = originalOnly ? "原包观察" : (currentOnly ? "当前结构" : (sameNoAction ? "未修改" : result.label));
   badges.appendChild(status);
   const semanticChild = afterChild || beforeChild;
   if (semanticChild && semanticChild.semanticLabel) {
@@ -8319,7 +8331,7 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
 
   const meta = document.createElement("div");
   meta.className = "child-rail-meta-grid";
-  if (originalOnly) {
+  if (originalOnly || currentOnly) {
     appendChildRailMeta(meta, childUiShortTerm("idx"), childIndexText(afterChild));
     appendChildRailMeta(meta, childUiShortTerm("report"), childReportText(afterChild));
     appendChildRailMeta(meta, childUiShortTerm("type"), childRichTypeText(afterChild));
@@ -8402,8 +8414,12 @@ function makeParentStructureStrip(beforeParent, afterParent, options = {}) {
 
   const grid = document.createElement("div");
   grid.className = "parent-structure-grid";
-  if (options && options.originalOnly) {
-    appendParentStructureSide(grid, "原包 / 当前 parent", afterParent || beforeParent);
+  if (options && (options.originalOnly || options.currentOnly)) {
+    appendParentStructureSide(
+      grid,
+      options.originalOnly ? "原包 / 当前 parent" : "当前 parent",
+      afterParent || beforeParent,
+    );
   } else {
     appendParentStructureSide(grid, "before parent", beforeParent);
     appendParentStructureSide(grid, "after parent", afterParent);
@@ -8482,6 +8498,10 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   const beforeChildren = parsedBeforeChildren.length > 0 ? parsedBeforeChildren : (beforeRootNode ? [beforeRootNode] : []);
   const afterChildren = parsedAfterChildren.length > 0 ? parsedAfterChildren : (afterRootNode ? [afterRootNode] : []);
   const actionMap = parseChildActionDetails(summaryText);
+  const currentOnly = !originalOnly
+    && beforeChildren.length === 0
+    && afterChildren.length > 0
+    && (!(actionMap instanceof Map) || actionMap.size === 0);
   const actionMaxIndex = actionMap instanceof Map
     ? Math.max(-1, ...Array.from(actionMap.keys()).filter((value) => Number.isFinite(Number(value))).map(Number))
     : -1;
@@ -8506,13 +8526,16 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   const visible = visibleIndices.length;
   const panel = document.createElement("section");
   panel.className = "child-compare";
+  if (originalOnly || currentOnly) panel.classList.add("child-compare-current-only");
 
   const head = document.createElement("div");
   head.className = "child-compare-head";
   const title = document.createElement("span");
   title.textContent = originalOnly
     ? (hasChildRecords ? "子节点结构观察（原包）" : "叶子节点结构观察（原包）")
-    : (hasChildRecords ? "子节点替换观察" : "叶子节点替换观察");
+    : currentOnly
+      ? (hasChildRecords ? "当前子节点结构（before 无可解析 child）" : "当前叶子结构（before 无可解析节点）")
+      : (hasChildRecords ? "子节点替换观察" : "叶子节点替换观察");
   const meta = document.createElement("small");
   const countBits = [];
   const addCount = (label, value, always = false) => {
@@ -8531,20 +8554,32 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   addCount("清理", counts.clean);
   meta.textContent = originalOnly
     ? `当前事件没有 before_pay，按原包/当前结构展示；显示 ${visible}/${total}`
-    : (countBits.length > 0
-      ? `${countBits.join("，")}；显示 ${visible}/${total}`
-      : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`);
+    : currentOnly
+      ? `before_pay 存在但未解析出可对应 child；不误标新增/删除，当前结构单栏展示；显示 ${visible}/${total}`
+      : (countBits.length > 0
+        ? `${countBits.join("，")}；显示 ${visible}/${total}`
+        : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`);
   head.appendChild(title);
   head.appendChild(meta);
   panel.appendChild(head);
 
-  const parentStrip = makeParentStructureStrip(beforeParsed.parent, afterParsed.parent, { originalOnly });
+  const parentStrip = makeParentStructureStrip(beforeParsed.parent, afterParsed.parent, { originalOnly, currentOnly });
   if (parentStrip) panel.appendChild(parentStrip);
 
   const grid = document.createElement("div");
   grid.className = "child-compare-grid";
   for (const childIndex of visibleIndices) {
-    grid.appendChild(makeChildCard(beforeChildren, afterChildren, beforeBytes, afterBytes, childIndex, actionMap, summaryKv, timestampHintMap, { originalOnly }));
+    grid.appendChild(makeChildCard(
+      beforeChildren,
+      afterChildren,
+      beforeBytes,
+      afterBytes,
+      childIndex,
+      actionMap,
+      summaryKv,
+      timestampHintMap,
+      { originalOnly, currentOnly },
+    ));
   }
   panel.appendChild(grid);
 
@@ -9456,6 +9491,9 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const childCompare = buildChildComparePanel(beforePay, decodedPay, summaryText);
     if (childCompare) {
       childCompare.classList.add("child-compare-inline");
+      if (childCompare.classList.contains("child-compare-current-only")) {
+        dumpGrid.classList.add("child-structure-current-only");
+      }
       dumpGrid.appendChild(childCompare);
       semanticCompareAdded = true;
     } else {
