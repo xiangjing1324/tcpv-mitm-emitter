@@ -23,6 +23,23 @@ def _metadata_record(report_code: int, payload: bytes = b"") -> bytes:
     return bytes(record)
 
 
+def _pubgm_0112235b_record(*, state: tuple[int, int, int] = (9, 9, 2)) -> bytes:
+    record = bytearray(b"\x00" * 0x010D)
+    record[:4] = b"\x00\x00\x00\x01"
+    record[4:6] = len(record).to_bytes(2, "big")
+    record[6:10] = (0x0112235B).to_bytes(4, "big")
+    record[10:14] = (0x0CC8).to_bytes(4, "big")
+    record[0x35:0x73] = b"model:iPad14,5;ver:16.10;role_id:sunday;inc_id:313;obf_id:313\x00"
+    record[0x73:0x7B] = bytes.fromhex("0000000200000021")
+    record[0x7B:0x9B] = b"EBACB0CDFE552BBA7666E7940D25180A"
+    record[0x9B:0xA0] = bytes.fromhex("000000000b")
+    record[0xA0:0xAA] = b"1106467070"
+    record[0xAA:0xAF] = bytes.fromhex("000000000b")
+    for offset, value in zip((0xFE, 0x106, 0x10C), state):
+        record[offset] = value
+    return bytes(record)
+
+
 def _typed_record(
     inner_type: int,
     *,
@@ -164,6 +181,23 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
+    def test_pubgm_0112235b_exposes_only_closed_tail_state_semantics(self):
+        alternate = analyze_payload(_pubgm_0112235b_record(), direction=0)
+        baseline = analyze_payload(_pubgm_0112235b_record(state=(1, 1, 1)), direction=0)
+
+        self.assertEqual(alternate["semantic_revision"], 6)
+        packet = alternate["packet"]
+        self.assertEqual(packet["semantic_category"], "metadata.device_profile_state")
+        self.assertEqual(packet["semantic_label_zh"], "设备/账号绑定画像 + 尾部状态三联")
+        fields = {item["name"]: item for item in packet["fields"]}
+        self.assertEqual(fields["identity_bundle_layout"]["value"], "kv62+opaque_hex32+account10")
+        self.assertEqual(fields["tail_state_triplet"]["value"], "09/09/02")
+        self.assertEqual(fields["tail_state_triplet"]["non_contiguous_offsets"], ["0xfe", "0x106", "0x10c"])
+        self.assertEqual(fields["tail_state_class"]["value"], "alternate_candidate")
+        baseline_fields = {item["name"]: item for item in baseline["packet"]["fields"]}
+        self.assertEqual(baseline_fields["tail_state_triplet"]["value"], "01/01/01")
+        self.assertEqual(baseline_fields["tail_state_class"]["value"], "baseline_candidate")
+
     def test_tcpview_frontend_renders_local_synthesis_badge(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"

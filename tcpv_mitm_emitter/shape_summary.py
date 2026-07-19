@@ -46,6 +46,63 @@ _SEMANTIC_PROCESS_TOKENS = (
     "corefoundation",
 )
 
+_PUBGM_0112235B_RECORD_LEN = 0x010D
+_PUBGM_0112235B_STATE_OFFSETS = (0xFE, 0x106, 0x10C)
+
+
+def _pubgm_0112235b_device_account_tail_fields(record: bytes) -> list[dict[str, Any]]:
+    """Expose only fields proven by repeated full-shape observations."""
+    data = bytes(record or b"")
+    if len(data) != _PUBGM_0112235B_RECORD_LEN or data[6:10] != bytes.fromhex("0112235b"):
+        return []
+    kv = data[0x35:0x73]
+    if re.fullmatch(
+        rb"model:[^;\x00]+;ver:[^;\x00]+;role_id:[^;\x00]+;"
+        rb"inc_id:\d+;obf_id:\d+\x00",
+        kv,
+    ) is None:
+        return []
+    if re.fullmatch(rb"[0-9A-Fa-f]{32}", data[0x7B:0x9B]) is None:
+        return []
+    if re.fullmatch(rb"\d{10}", data[0xA0:0xAA]) is None:
+        return []
+
+    state = tuple(data[offset] for offset in _PUBGM_0112235B_STATE_OFFSETS)
+    if state == (0x01, 0x01, 0x01):
+        state_class = "baseline_candidate"
+    elif state == (0x09, 0x09, 0x02):
+        state_class = "alternate_candidate"
+    else:
+        state_class = "unmapped"
+    source = "observed:46-full-shape-samples"
+    return [
+        {
+            "name": "identity_bundle_layout",
+            "value": "kv62+opaque_hex32+account10",
+            "offset": 0x35,
+            "length": 0x75,
+            "source": source,
+            "confidence": "high",
+        },
+        {
+            "name": "tail_state_triplet",
+            "value": "/".join(f"{value:02x}" for value in state),
+            "offset": 0xFE,
+            "length": 3,
+            "source": source,
+            "confidence": "high",
+            "non_contiguous_offsets": [f"0x{offset:x}" for offset in _PUBGM_0112235B_STATE_OFFSETS],
+        },
+        {
+            "name": "tail_state_class",
+            "value": state_class,
+            "offset": 0xFE,
+            "length": 3,
+            "source": "observed:paired-010a0024+010a0027-response-closure",
+            "confidence": "observed",
+        },
+    ]
+
 
 def _semantic_profile(
     role: str,
@@ -210,6 +267,15 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
         has_csob = all(token in lower for token in (b"cs:", b",ob:", b"state:", b",r:", b",p:"))
         has_device = b"model:" in lower or b"ver:" in lower
         has_file = any(token in lower for token in (b"config2.dat", b"config3.dat", b"comm.zip", b"mrpcs_i", b".data"))
+        if report_code == 0x0112235B and _pubgm_0112235b_device_account_tail_fields(data):
+            return _semantic_profile(
+                "device_account_profile_with_tail_state",
+                "metadata.device_profile_state",
+                "设备/账号绑定画像 + 尾部状态三联",
+                "observed",
+                "high",
+                ("full_shape_len269", "identity_bundle_layout", "tail_state_triplet", "paired_response_closure"),
+            )
         if has_csob:
             return _semantic_profile(
                 "csob_state_snapshot", "metadata.state.csob", "CSOB 状态快照", "confirmed", "high", ("cs", "ob", "state", "r", "p"), exact_meaning=True
@@ -937,6 +1003,9 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             field_name = str(field_item.get("name") or "field")
             field_value = str(field_item.get("value") or "-")[:160]
             item["fields"][field_name][field_value] += 1
+        if report_code == 0x0112235B:
+            for field_item in _pubgm_0112235b_device_account_tail_fields(record):
+                item["fields"][str(field_item["name"])][str(field_item["value"])] += 1
         if report_code == 0x010A0011 and len(record) >= 25 and 25 + int(record[24]) == len(record):
             item["fields"]["leaf_id_correlation"][_fmt_hex(_read_be32(record, 0x0A), 8)] += 1
             item["fields"]["request_token_opaque"][record[20:24].hex()] += 1
