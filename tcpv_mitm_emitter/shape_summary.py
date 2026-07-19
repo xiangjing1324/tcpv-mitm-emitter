@@ -99,7 +99,7 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
         )
     if report_code == 0x010A0011:
         return _semantic_profile(
-            "child_request_tag_or_protection_context", "control.child_context", "子请求标签/配对保护上下文", "observed", "observed", ("report_code", "historical_fixed_shape")
+            "server_acknowledged_child_request", "control.acknowledged_child_request", "服务器确认型子请求（保活/握手候选）", "confirmed", "observed", ("paired_leaf_id", "010a0010_ack", "u8_ascii_label")
         )
     if report_code == 0x010A0036:
         label = "mrpcs 配置/资源同步标记" if b"mrpcs" in lower or b".data" in lower else "配置/资源同步标记"
@@ -110,7 +110,11 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
         return _semantic_profile(
             "sync_file_save_request", "control.resource_sync", "同步文件保存请求", "observed", "observed", ("report_code", "historical_short_control")
         )
-    if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
+    if report_code == 0x010A0010:
+        return _semantic_profile(
+            "010a0011_ack_response", "response.ack", "010a0011 子请求回执（leaf_id 回显）", "confirmed", "observed", ("paired_leaf_id", "status_trailer_0324")
+        )
+    if report_code in {0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
         return _semantic_profile(
             "response_feedback_fields", "response.feedback", "响应反馈/状态字段", "observed", "observed", ("fixed_response_offsets", "direction_and_timeline_required")
         )
@@ -797,8 +801,10 @@ def _report_role(report_code: int, direction: int) -> tuple[str, str]:
     if report_code == 0x0102000A:
         return "typed leaf shell；含义由完整 shape 判定", "confirmed"
     if report_code == 0x010A0011:
-        return "配对/保护上下文（观察）", "observed"
-    if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
+        return "服务器确认型子请求（保活/握手候选）", "confirmed"
+    if report_code == 0x010A0010:
+        return "010a0011 回执；leaf_id 原样回显", "confirmed"
+    if report_code in {0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
         return ("响应反馈（按字段与前序请求解释）" if direction else "请求上下文"), "observed"
     return "目前不能证明含义", "unknown"
 
@@ -931,7 +937,14 @@ def _deep_report(events: list[dict[str, Any]], *, source: str) -> dict[str, Any]
             field_name = str(field_item.get("name") or "field")
             field_value = str(field_item.get("value") or "-")[:160]
             item["fields"][field_name][field_value] += 1
-        if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057} and len(record) >= 0x16:
+        if report_code == 0x010A0011 and len(record) >= 25 and 25 + int(record[24]) == len(record):
+            item["fields"]["leaf_id_correlation"][_fmt_hex(_read_be32(record, 0x0A), 8)] += 1
+            item["fields"]["request_token_opaque"][record[20:24].hex()] += 1
+            item["fields"]["client_label"][record[25:].decode("ascii", "replace")[:160]] += 1
+        if report_code == 0x010A0010 and len(record) == 0x16:
+            item["fields"]["leaf_id_correlation"][_fmt_hex(_read_be32(record, 0x0A), 8)] += 1
+            item["fields"]["ack_status"][record[20:22].hex()] += 1
+        if report_code in {0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057} and len(record) >= 0x16:
             for field_name, offset in (("field_a", 0x0A), ("field_b", 0x0E), ("field_c", 0x12)):
                 item["fields"][field_name][_fmt_hex(_read_be32(record, offset), 8)] += 1
         if direction != 0:
