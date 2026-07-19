@@ -1124,11 +1124,18 @@ INDEX_HTML = """
       grid-column: 2;
     }
 
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only,
     .dump-grid-request.child-structure-current-only {
       grid-template-columns: minmax(0, 1fr);
       overflow-x: hidden;
     }
 
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-full,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-raw-after,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-before,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-decoded,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .string-result-inline,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .child-compare-inline,
     .dump-grid-request.child-structure-current-only > .dump-panel-full,
     .dump-grid-request.child-structure-current-only > .dump-panel-raw-after,
     .dump-grid-request.child-structure-current-only > .dump-panel-before,
