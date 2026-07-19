@@ -11,12 +11,13 @@ from .shape_summary import (
     _payload_semantic_profile,
     _parse_parent_children,
     _parse_typed_body_structure,
+    _pubgm_0112235b_device_account_tail_fields,
     _read_0102000a_layout,
 )
 
 
 SCHEMA = "tersafe.semantic.v1"
-SEMANTIC_REVISION = 5
+SEMANTIC_REVISION = 6
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
@@ -217,6 +218,8 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
         item = _field(record, regex, name)
         if item:
             fields.append(item)
+    if report_code == 0x0112235B:
+        fields.extend(_pubgm_0112235b_device_account_tail_fields(record))
     if report_code == 0x010A0011 and len(record) >= 25 and 25 + int(record[24]) == len(record):
         label = record[25:].decode("ascii", errors="replace")
         fields.extend(
