@@ -164,6 +164,110 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
+    def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
+        tick = 0x0426
+        entries = [
+            (0x18C0, 0x03000000),
+            (0x0651, 0xC1000000),
+            (0x079A, 0x40000000),
+            (0x08BC, 0x81C00021),
+            (0x2000, 0x22),
+            (0x2001, 0x03),
+            (0x2002, 0x03),
+            (0x2003, 0x11),
+            (0x2004, 0x22),
+            (0x2005, 0x22),
+            (0x2006, 0x22),
+            (0x2007, 0x22),
+            (0x2008, 0x11),
+            (0x200A, 0x22),
+            (0x200B, 0x22),
+            (0x200C, 0x22),
+            (0x200F, 0x01),
+            (0x2010, 0x22),
+            (0x2011, 0x03),
+            (0x2012, 0x11),
+            (0x2013, 0x22),
+            (0x2015, 0x11),
+            (0x2018, 0x01),
+            (0x201A, 0x22),
+            (0x201B, 0x22),
+            (0x201C, 0x22),
+            (0x201E, 0x22),
+            (0x2025, 0x01),
+            (0x2027, 0x01),
+            (0x2029, 0x01),
+            (0x202F, 0x22),
+            (0x2030, 0x01),
+            (0x2031, 0x22),
+            (0x8100, 0x22),
+            (0x8102, 0x01),
+            (0x8103, 0x01),
+            (0x8000, 0x23),
+        ]
+        body = tick.to_bytes(4, "big") + b"".join(
+            probe_id.to_bytes(2, "big") + value.to_bytes(4, "big")
+            for probe_id, value in entries
+        )
+        record = _typed_record(
+            0xFFF3,
+            length=36 + len(body),
+            selector0=0,
+            selector1=(tick << 16) | 1,
+            inner_field=0x00030003,
+            body=body,
+        )
+        packet = analyze_payload(record, direction=0)["packet"]
+        self.assertEqual(len(record), 262)
+        self.assertEqual(packet["semantic_category"], "telemetry.probe_scheduler")
+        self.assertEqual(packet["semantic_tier"], "observed")
+        layout = packet["body_layout"]
+        self.assertEqual(layout["kind"], "periodic_probe_table")
+        self.assertEqual(layout["layout_algebra"], "4 + 37×6 = 226")
+        self.assertEqual(layout["tick"], 0x0426)
+        self.assertTrue(layout["selector_tick_match"])
+        self.assertEqual(layout["inner_pair"], {"left": 3, "right": 3})
+        by_id = {item["probe_id"]: item for item in layout["entries"]}
+        self.assertEqual(by_id["0x2007"]["value"]["be32"], 34)
+        self.assertEqual(by_id["0x2007"]["value_kind"], "frequent")
+        self.assertEqual(by_id["0x2008"]["value"]["be32"], 17)
+        self.assertEqual(by_id["0x2008"]["value_kind"], "minute")
+        self.assertEqual(by_id["0x8000"]["value_kind"], "global_round")
+        self.assertEqual(by_id["0x0651"]["value"]["float_be"], -8.0)
+
+    def test_2001_and_2011_bodies_render_as_word_layouts_not_xor_text(self):
+        words_2001 = [0x00000001, 0x00000005, 0x00004000, 0x00000000]
+        body_2001 = b"".join(value.to_bytes(4, "big") for value in words_2001)
+        record_2001 = _typed_record(
+            0x2001,
+            length=52,
+            selector0=0x23800002,
+            selector1=0x34560001,
+            inner_field=2,
+            body=body_2001,
+        )
+        packet_2001 = analyze_payload(record_2001, direction=0)["packet"]
+        self.assertEqual(packet_2001["semantic_category"], "telemetry.binary_probe.words")
+        self.assertEqual(packet_2001["body_layout"]["kind"], "fixed_word_block")
+        self.assertEqual(packet_2001["body_layout"]["layout_algebra"], "4×u32 = 16")
+        self.assertEqual([word["value"]["be32"] for word in packet_2001["body_layout"]["words"]], words_2001)
+
+        words_2011 = [0x223D8000, 0, 0, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF]
+        body_2011 = b"".join(value.to_bytes(4, "big") for value in words_2011)
+        record_2011 = _typed_record(
+            0x2011,
+            length=68,
+            selector0=0x23800002,
+            selector1=0x34560001,
+            inner_field=1,
+            body=body_2011,
+        )
+        packet_2011 = analyze_payload(record_2011, direction=0)["packet"]
+        self.assertEqual(packet_2011["semantic_category"], "telemetry.binary_probe.bitmap")
+        self.assertEqual(packet_2011["body_layout"]["kind"], "bitmap_word_block")
+        self.assertEqual(packet_2011["body_layout"]["layout_algebra"], "8×u32 = 32")
+        self.assertEqual(sum(bool(word["all_one"]) for word in packet_2011["body_layout"]["words"]), 5)
+
     def test_child_semantics_have_broad_categories_instead_of_family_unknown(self):
         opaque_metadata = _metadata_record(0x01122342, b"\x01\x02\x03\x04")
         metadata_analysis = analyze_payload(opaque_metadata, direction=0)["packet"]

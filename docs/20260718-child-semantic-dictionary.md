@@ -44,12 +44,16 @@
 | `inner_type=0x1105/0x2000/0xFFF2` 或解出 dylib/framework | `environment.module_integrity` | 模块/动态库路径探测 | 有文本为观察；只有 shape 为近似。 |
 | `inner_type=0x8027/0x8029` 或解出 daemon/调用栈 | `environment.process_stack` | 进程/调用栈探测 | 有文本为观察；只有 shape 为近似。 |
 | 同时解出模块与进程 token | `environment.module_process` | 动态库/进程组合探测 | 观察。 |
+| `inner_type=0xFFF3` 且 `body_len=4+N×6` | `telemetry.probe_scheduler` | 周期探测调度与结果表 | 结构已闭合：`u32 tick + N×(u16 probe_id + raw32 value)`；历史 tick 约 `0.98/s`、重复计数约30秒递增一次；probe_id 精确含义待证。 |
+| `inner_type=0x2001` 且 body 为4字节对齐 | `telemetry.binary_probe.words` | 固定字状态探测块 | 槽位结构已确认；逐槽显示 raw/BE/LE/bit，不宣称具体字段名。 |
+| `inner_type=0x2011` 且 body 为4字节对齐 | `telemetry.binary_probe.bitmap` | 位图/能力掩码探测块 | 槽位结构已确认；全0、全1和置位 bit 可观察，bit 精确含义待证。 |
 | 其它完整稳定 shape | `telemetry.binary_probe` | 稳定二进制探测/遥测（字段待证） | 近似；禁止伪造精确字段名。 |
 
 ## UI 与报告要求
 
 - 事件行优先显示父包/child 的中文语义分布，例如“设备画像×2 / 配置文件引用×1 / 稳定二进制探测×4”。
 - 每个 child 标出“确定/观察/近似/未知”，并在 title/展开区保留证据和完整 shape。
+- 命中上述结构布局时默认展示字段边界和中文解释；hex 作为下钻。`0xFFF3/0x2001/0x2011` 禁止再显示“可打印 XOR”猜测。
 - Hex 只作为下钻证据，不再承担主要解释。
 - 深度报告聚合 `semantic_categories`、`semantic_labels_zh` 和 `semantic_tiers`。
 - “近似”只说明所属大类；精确字段含义目前不能证明时必须原样写出这一边界。

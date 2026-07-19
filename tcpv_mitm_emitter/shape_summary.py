@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import math
 import re
+import struct
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,6 +134,35 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
             role, category, label, tier = timestamp
             return _semantic_profile(
                 role, category, label, tier, "confirmed" if tier == "confirmed" else "observed", ("full_shape", "historical_continuity"), exact_meaning=tier == "confirmed"
+            )
+
+        body_layout = _parse_typed_body_structure(data, layout)
+        if body_layout and body_layout.get("kind") == "periodic_probe_table":
+            return _semantic_profile(
+                "periodic_probe_schedule_table",
+                "telemetry.probe_scheduler",
+                "周期探测调度与结果表（probe_id 含义待证）",
+                "observed",
+                "high",
+                ("body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "historical_30s_counter"),
+            )
+        if body_layout and body_layout.get("kind") == "fixed_word_block":
+            return _semantic_profile(
+                "fixed_probe_word_block",
+                "telemetry.binary_probe.words",
+                "固定字状态探测块（字段含义待证）",
+                "observed",
+                "observed",
+                ("body_u32_slots", "inner_type_0x2001", "full_shape"),
+            )
+        if body_layout and body_layout.get("kind") == "bitmap_word_block":
+            return _semantic_profile(
+                "probe_bitmap_or_capability_mask",
+                "telemetry.binary_probe.bitmap",
+                "位图/能力掩码探测块（bit 含义待证）",
+                "observed",
+                "observed",
+                ("body_u32_slots", "zero_and_ffffffff_masks", "inner_type_0x2011", "full_shape"),
             )
 
         raw_text, xor_text = _typed_leaf_text_views(data, layout)
@@ -361,6 +392,145 @@ def _read_0102000a_layout(record: bytes, report: dict[str, int]) -> dict[str, in
         "body_len": max(0, record_end - body_start),
         "record_end": record_end,
     }
+
+
+def _typed_u32_views(raw: bytes) -> dict[str, Any]:
+    value = bytes(raw or b"")[:4]
+    if len(value) != 4:
+        return {"raw_hex": value.hex()}
+    be32 = int.from_bytes(value, "big")
+    le32 = int.from_bytes(value, "little")
+    out: dict[str, Any] = {
+        "raw_hex": value.hex(),
+        "be32": be32,
+        "be32_hex": _fmt_hex(be32, 8),
+        "le32": le32,
+        "le32_hex": _fmt_hex(le32, 8),
+    }
+    float_be = struct.unpack(">f", value)[0]
+    if math.isfinite(float_be) and (float_be == 0.0 or 1e-6 <= abs(float_be) <= 1e6):
+        out["float_be"] = float_be
+    return out
+
+
+def _probe_counter_cadence(tick: int, value: int, probe_id: int) -> tuple[str, str, float | None]:
+    if value <= 0 or tick <= 0 or value > tick + 1:
+        return "typed_value", "按 probe_id 解释的4字节值", None
+    period_ticks = tick / value
+    if probe_id == 0x8000:
+        return "global_round", "全局调度轮数候选", period_ticks
+    if value == 1 or period_ticks >= 180:
+        return "startup_or_conditional", "启动一次/条件探测候选", period_ticks
+    if period_ticks <= 45:
+        return "frequent", "高频探测，历史约30秒一轮", period_ticks
+    if period_ticks <= 90:
+        return "minute", "隔轮探测，历史约60秒一轮", period_ticks
+    return "slow_or_conditional", "慢周期/条件探测候选", period_ticks
+
+
+def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) -> dict[str, Any] | None:
+    """Parse only body layouts closed by cross-sample length and cadence evidence.
+
+    Exact probe-id meanings remain unknown.  The parser exposes offsets, raw
+    values and evidence-backed scheduling relationships without inventing
+    field names or using printable-XOR scoring for these binary layouts.
+    """
+    if not layout:
+        return None
+    data = bytes(record or b"")
+    start = max(0, int(layout.get("body_start") or 0))
+    end = min(len(data), int(layout.get("record_end") or len(data)))
+    if start > end:
+        return None
+    body = data[start:end]
+    inner_type = int(layout.get("inner_type") or 0)
+
+    if inner_type == 0xFFF3 and len(body) >= 4 and (len(body) - 4) % 6 == 0:
+        tick = int.from_bytes(body[:4], "big")
+        selector1 = int(layout.get("selector1") or 0)
+        entries: list[dict[str, Any]] = []
+        cadence_counts: Counter[str] = Counter()
+        for rel in range(4, len(body), 6):
+            probe_id = int.from_bytes(body[rel : rel + 2], "big")
+            raw_value = body[rel + 2 : rel + 6]
+            value_be = int.from_bytes(raw_value, "big")
+            cadence, cadence_zh, period_ticks = _probe_counter_cadence(tick, value_be, probe_id)
+            cadence_counts[cadence] += 1
+            item = {
+                "index": len(entries),
+                "offset": start + rel,
+                "probe_id": _fmt_hex(probe_id, 4),
+                "probe_id_value": probe_id,
+                "value": _typed_u32_views(raw_value),
+                "value_kind": cadence,
+                "value_kind_zh": cadence_zh,
+                "counter_candidate": cadence != "typed_value",
+            }
+            if period_ticks is not None:
+                item["period_ticks_candidate"] = round(period_ticks, 3)
+            entries.append(item)
+        return {
+            "kind": "periodic_probe_table",
+            "label_zh": "周期探测调度与结果表",
+            "confidence": "confirmed_structure",
+            "body_offset": start,
+            "body_len": len(body),
+            "layout_algebra": f"4 + {len(entries)}×6 = {len(body)}",
+            "tick": tick,
+            "tick_hex": _fmt_hex(tick, 8),
+            "tick_offset": start,
+            "tick_rate_observed_per_second": 0.98,
+            "elapsed_seconds_candidate": round(tick / 0.98) if tick else 0,
+            "selector_tick_match": ((selector1 >> 16) & 0xFFFF) == (tick & 0xFFFF),
+            "selector_revision_or_flags": selector1 & 0xFFFF,
+            "inner_pair": {
+                "left": (int(layout.get("inner_field") or 0) >> 16) & 0xFFFF,
+                "right": int(layout.get("inner_field") or 0) & 0xFFFF,
+            },
+            "entry_count": len(entries),
+            "cadence_counts": dict(cadence_counts),
+            "entries": entries,
+            "evidence": [
+                "body_len=4+n*6",
+                "entry=u16_probe_id+raw32_value",
+                "selector1_high16_matches_body_tick" if ((selector1 >> 16) & 0xFFFF) == (tick & 0xFFFF) else "selector1_tick_mismatch",
+                "historical_tick_rate_about_0.98_per_second",
+                "historical_repeated_counter_period_about_30_seconds",
+            ],
+        }
+
+    if inner_type in {0x2001, 0x2011} and len(body) > 0 and len(body) % 4 == 0:
+        words = []
+        for rel in range(0, len(body), 4):
+            views = _typed_u32_views(body[rel : rel + 4])
+            be32 = int(views.get("be32") or 0)
+            words.append(
+                {
+                    "index": len(words),
+                    "offset": start + rel,
+                    "value": views,
+                    "set_bits_be": [bit for bit in range(32) if be32 & (1 << bit)],
+                    "all_zero": be32 == 0,
+                    "all_one": be32 == 0xFFFFFFFF,
+                }
+            )
+        is_bitmap = inner_type == 0x2011
+        return {
+            "kind": "bitmap_word_block" if is_bitmap else "fixed_word_block",
+            "label_zh": "位图/能力掩码探测块" if is_bitmap else "固定字状态探测块",
+            "confidence": "confirmed_structure",
+            "body_offset": start,
+            "body_len": len(body),
+            "layout_algebra": f"{len(words)}×u32 = {len(body)}",
+            "word_count": len(words),
+            "words": words,
+            "evidence": [
+                "body_len_multiple_of_4",
+                "fixed_shape_word_slots",
+                "all_zero_and_all_one_masks" if is_bitmap else "mixed_scalar_or_mask_words",
+            ],
+        }
+    return None
 
 
 def _tail_info(record: bytes, layout: dict[str, int]) -> dict[str, Any]:

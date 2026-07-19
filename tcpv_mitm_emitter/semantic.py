@@ -10,12 +10,13 @@ from .shape_summary import (
     _fmt_hex,
     _payload_semantic_profile,
     _parse_parent_children,
+    _parse_typed_body_structure,
     _read_0102000a_layout,
 )
 
 
 SCHEMA = "tersafe.semantic.v1"
-SEMANTIC_REVISION = 3
+SEMANTIC_REVISION = 4
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
@@ -208,6 +209,7 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
     semantic_role_confidence = str(semantic_profile.get("confidence") or "unknown")
     semantic_role_evidence = tuple(semantic_profile.get("evidence") or ())
     layout = _read_0102000a_layout(record, report) if report and report_code == 0x0102000A else None
+    body_layout = _parse_typed_body_structure(record, layout)
     fields = []
     for name, regex in (("cs", _CS_RE), ("ob", _OB_RE), ("state", _STATE_RE), ("r", _R_RE), ("p", _P_RE)):
         item = _field(record, regex, name)
@@ -257,6 +259,7 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
         "semantic_exact_meaning": bool(semantic_profile.get("exact_meaning")),
         "leaf_id": _fmt_hex(int.from_bytes(record[10:14], "big"), 8) if len(record) >= 14 else None,
         "shape": shape,
+        "body_layout": body_layout,
         "fields": fields,
         "timestamps": timestamp_analysis,
     }
