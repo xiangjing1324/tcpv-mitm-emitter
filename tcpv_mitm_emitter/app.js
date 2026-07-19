@@ -2554,18 +2554,31 @@ function typedRaw32Views(byteValues, offset) {
   };
 }
 
-function classifyProbeCounterCadence(tick, value, probeId) {
+function classifyProbeCounterCadence(tick, value, probeId, globalRound) {
   const safeTick = Number(tick);
   const safeValue = Number(value);
   if (!Number.isFinite(safeValue) || safeValue <= 0 || safeTick <= 0 || safeValue > safeTick + 1) {
-    return { kind: "typedValue", label: "按 probe_id 解释的4字节值", periodTicks: null };
+    return { kind: "typedValue", label: "按 probe_id 解释的4字节值", roundRatio: null };
   }
-  const periodTicks = safeTick / safeValue;
-  if (Number(probeId) === 0x8000) return { kind: "globalRound", label: "全局调度轮数候选", periodTicks };
-  if (safeValue === 1 || periodTicks >= 180) return { kind: "startup", label: "启动一次/条件探测候选", periodTicks };
-  if (periodTicks <= 45) return { kind: "frequent", label: "高频探测，历史约30秒一轮", periodTicks };
-  if (periodTicks <= 90) return { kind: "minute", label: "隔轮探测，历史约60秒一轮", periodTicks };
-  return { kind: "slow", label: "慢周期/条件探测候选", periodTicks };
+  if (Number(probeId) === 0x8000) return { kind: "globalRound", label: "全局调度轮数候选", roundRatio: 1 };
+  const safeRound = Number(globalRound);
+  if (!Number.isFinite(safeRound) || safeRound <= 0) {
+    return { kind: "counterCandidate", label: "累计计数候选；缺少0x8000轮次基准", roundRatio: null };
+  }
+  const roundRatio = safeValue / safeRound;
+  if (Math.abs(safeValue - safeRound) <= 1) {
+    return { kind: "perRound", label: "每调度轮一次候选（与全局轮次相差不超过1）", roundRatio };
+  }
+  if (Math.abs((safeValue * 2) - safeRound) <= 1) {
+    return { kind: "halfRound", label: "隔调度轮一次候选（约为全局轮次一半）", roundRatio };
+  }
+  if (safeValue <= Math.max(3, Math.floor(safeRound * 0.1))) {
+    return { kind: "sparse", label: "低频/启动/条件累计候选", roundRatio };
+  }
+  if (safeValue > safeRound) {
+    return { kind: "multiPerRound", label: "每轮多次累计候选；须连续包确认", roundRatio };
+  }
+  return { kind: "subRound", label: "低于每轮频率的累计候选；须连续包确认", roundRatio };
 }
 
 function parseTypedBodyStructure(record, layout) {
@@ -2578,12 +2591,19 @@ function parseTypedBodyStructure(record, layout) {
 
   if (innerType === 0xfff3 && bodyLen >= 4 && (bodyLen - 4) % 6 === 0) {
     const tick = readBe32(record, bodyStart);
-    const entries = [];
-    const cadenceCounts = { frequent: 0, minute: 0, slow: 0, startup: 0, globalRound: 0, typedValue: 0 };
+    const rawEntries = [];
     for (let offset = bodyStart + 4; offset + 5 < bodyEnd; offset += 6) {
       const probeId = readBe16(record, offset);
       const value = typedRaw32Views(record, offset + 2);
-      const cadence = classifyProbeCounterCadence(tick, value.be32, probeId);
+      rawEntries.push({ offset, probeId, value });
+    }
+    const globalEntry = rawEntries.find((entry) => Number(entry.probeId) === 0x8000);
+    const globalRound = globalEntry ? Number(globalEntry.value.be32) : null;
+    const entries = [];
+    const cadenceCounts = { perRound: 0, halfRound: 0, sparse: 0, multiPerRound: 0, subRound: 0, counterCandidate: 0, globalRound: 0, typedValue: 0 };
+    for (const rawEntry of rawEntries) {
+      const { offset, probeId, value } = rawEntry;
+      const cadence = classifyProbeCounterCadence(tick, value.be32, probeId, globalRound);
       cadenceCounts[cadence.kind] = Number(cadenceCounts[cadence.kind] || 0) + 1;
       entries.push({
         index: entries.length,
@@ -2592,7 +2612,7 @@ function parseTypedBodyStructure(record, layout) {
         value,
         valueKind: cadence.kind,
         valueKindLabel: cadence.label,
-        periodTicks: cadence.periodTicks,
+        roundRatio: cadence.roundRatio,
       });
     }
     const selector1 = Number(layout.selector1 || 0) >>> 0;
@@ -2604,13 +2624,21 @@ function parseTypedBodyStructure(record, layout) {
       bodyLen,
       algebra: `4 + ${entries.length}×6 = ${bodyLen}`,
       tick,
-      elapsedSeconds: tick ? Math.round(tick / 0.98) : 0,
+      historicalReference: {
+        sampleCount: 415,
+        durationSeconds: 37290.096,
+        tickRateMedian: 0.987682,
+        globalRoundPeriodMedianSeconds: 30.031,
+        scope: "旧fff3连续样本；当前probe集合须独立复核",
+      },
+      elapsedSecondsHistoricalEstimate: tick ? Math.round(tick / 0.987682) : 0,
       selectorTickMatch: (((selector1 >>> 16) & 0xffff) === (Number(tick || 0) & 0xffff)),
       selectorRevisionOrFlags: selector1 & 0xffff,
       innerPair: {
         left: (Number(layout.innerField || 0) >>> 16) & 0xffff,
         right: Number(layout.innerField || 0) & 0xffff,
       },
+      probeIdRegistry: "sparseEnumNotSequence",
       cadenceCounts,
       entries,
     };
@@ -4941,7 +4969,7 @@ function localChildSemanticProfile(record, reportCode) {
         "telemetry.probe_scheduler",
         "周期探测调度与结果表（probe_id 含义待证）",
         "observed",
-        ["body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "historical_30s_counter"],
+        ["body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "relative_to_probe_0x8000"],
       );
     }
     if (bodyLayout && bodyLayout.kind === "fixedWordBlock") {
@@ -5606,8 +5634,10 @@ function bodyLayoutSemanticLines(bodyLayout) {
       .join("，");
     const lines = [
       `body=布局 ${bodyLayout.algebra}；u32单调tick + N×(u16 probe_id + raw32 value)`,
-      `clock=tick=${Number(bodyLayout.tick || 0)} ${formatHexValue(bodyLayout.tick, 8)}；历史约0.98 tick/秒，运行约${compactDurationSeconds(bodyLayout.elapsedSeconds)}；selector高16匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}`,
-      `probes=调度分组 高频约30秒 ${Number(counts.frequent || 0)}项；约60秒 ${Number(counts.minute || 0)}项；慢周期 ${Number(counts.slow || 0)}项；启动/条件 ${Number(counts.startup || 0)}项；全局轮数 ${Number(counts.globalRound || 0)}项`,
+      `clock=tick=${Number(bodyLayout.tick || 0)} ${formatHexValue(bodyLayout.tick, 8)}；selector高16匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}；旧样本换算运行约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}（仅参考）`,
+      `probes=相对0x8000轮次 每轮候选 ${Number(counts.perRound || 0)}项；隔轮候选 ${Number(counts.halfRound || 0)}项；低频/条件 ${Number(counts.sparse || 0)}项；多次/次轮待证 ${Number(counts.multiPerRound || 0) + Number(counts.subRound || 0)}项；typed ${Number(counts.typedValue || 0)}项`,
+      "probe_ids=probe_id是稀疏枚举键，不是连续数组下标；缺号不等于丢包",
+      `history=旧连续样本415包/约10时21分：0x8000轮次增量中位约30.031秒；这是历史基线，不是当前单包的协议常量`,
     ];
     if (typed) lines.push(`typed_values=typed raw32 ${typed}`);
     return lines;
@@ -7281,14 +7311,14 @@ function childHexStructure(child, childBytes, options = {}) {
             fields,
             Number(bodyLayout.bodyStart),
             4,
-            `单调运行tick ${formatHexValue(bodyLayout.tick, 8)} = ${Number(bodyLayout.tick)}；历史约0.98 tick/秒，约${compactDurationSeconds(bodyLayout.elapsedSeconds)}；selector匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}`,
+            `单调运行tick ${formatHexValue(bodyLayout.tick, 8)} = ${Number(bodyLayout.tick)}；旧415包中位约0.987682 tick/秒，换算约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}（仅历史参考）；selector匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}`,
             "bodyHeader",
           );
           for (const item of bodyLayout.entries) {
             const value = item.value || {};
             const counterText = item.valueKind === "typedValue"
               ? `BE=${Number(value.be32)} LE=${Number(value.le32)}${Number.isFinite(value.floatBe) ? ` floatBE=${Number(value.floatBe).toPrecision(7)}` : ""}`
-              : `计数候选=${Number(value.be32)}${Number.isFinite(item.periodTicks) ? `，tick/计数≈${Number(item.periodTicks).toFixed(1)}` : ""}`;
+              : `计数候选=${Number(value.be32)}${Number.isFinite(item.roundRatio) ? `，相对全局轮次≈${Number(item.roundRatio).toFixed(3)}×` : ""}`;
             addChildHexField(
               fields,
               Number(item.offset),
@@ -7460,10 +7490,12 @@ function appendChildBodyLayoutPanel(wrap, bodyLayout) {
   if (bodyLayout.kind === "periodicProbeTable") {
     const counts = bodyLayout.cadenceCounts || {};
     const global = (bodyLayout.entries || []).find((entry) => Number(entry.probeId) === 0x8000);
-    add("运行tick", `${Number(bodyLayout.tick)} / 约${compactDurationSeconds(bodyLayout.elapsedSeconds)}`);
+    add("运行tick", `${Number(bodyLayout.tick)}；旧样本换算约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}（仅参考）`);
     add("探测项", `${bodyLayout.entries.length} 项`);
-    add("周期分组", `≈30秒 ${Number(counts.frequent || 0)} · ≈60秒 ${Number(counts.minute || 0)} · 慢/条件 ${Number(counts.slow || 0) + Number(counts.startup || 0)}`);
+    add("probe_id", "稀疏枚举键；中间缺号不代表丢包");
+    add("轮次关系", `每轮候选 ${Number(counts.perRound || 0)} · 隔轮候选 ${Number(counts.halfRound || 0)} · 低频/条件 ${Number(counts.sparse || 0)}`);
     add("全局轮次", global ? Number(global.value && global.value.be32) : "未见0x8000");
+    add("历史基线", "旧415包：0x8000轮次中位约30.031秒；当前集合待复核");
     add("边界校验", `selector tick ${bodyLayout.selectorTickMatch ? "匹配" : "不匹配"} · inner pair ${bodyLayout.innerPair.left}/${bodyLayout.innerPair.right}`);
   } else {
     add("字段槽", `${bodyLayout.words.length} × u32`);

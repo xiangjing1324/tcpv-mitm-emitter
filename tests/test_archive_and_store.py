@@ -229,11 +229,14 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(layout["inner_pair"], {"left": 3, "right": 3})
         by_id = {item["probe_id"]: item for item in layout["entries"]}
         self.assertEqual(by_id["0x2007"]["value"]["be32"], 34)
-        self.assertEqual(by_id["0x2007"]["value_kind"], "frequent")
+        self.assertEqual(by_id["0x2007"]["value_kind"], "per_round_candidate")
+        self.assertAlmostEqual(by_id["0x2007"]["global_round_ratio_candidate"], 34 / 35, places=3)
         self.assertEqual(by_id["0x2008"]["value"]["be32"], 17)
-        self.assertEqual(by_id["0x2008"]["value_kind"], "minute")
+        self.assertEqual(by_id["0x2008"]["value_kind"], "half_round_candidate")
         self.assertEqual(by_id["0x8000"]["value_kind"], "global_round")
         self.assertEqual(by_id["0x0651"]["value"]["float_be"], -8.0)
+        self.assertEqual(layout["probe_id_registry"], "sparse_enum_not_sequence")
+        self.assertEqual(layout["historical_reference"]["sample_count"], 415)
 
     def test_2001_and_2011_bodies_render_as_word_layouts_not_xor_text(self):
         words_2001 = [0x00000001, 0x00000005, 0x00004000, 0x00000000]
