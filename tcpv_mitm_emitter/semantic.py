@@ -17,7 +17,7 @@ from .shape_summary import (
 
 
 SCHEMA = "tersafe.semantic.v1"
-SEMANTIC_REVISION = 7
+SEMANTIC_REVISION = 8
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
