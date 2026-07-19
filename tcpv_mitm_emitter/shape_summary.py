@@ -144,7 +144,7 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
                 "周期探测调度与结果表（probe_id 含义待证）",
                 "observed",
                 "high",
-                ("body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "historical_30s_counter"),
+                ("body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "relative_to_probe_0x8000"),
             )
         if body_layout and body_layout.get("kind") == "fixed_word_block":
             return _semantic_profile(
@@ -413,19 +413,29 @@ def _typed_u32_views(raw: bytes) -> dict[str, Any]:
     return out
 
 
-def _probe_counter_cadence(tick: int, value: int, probe_id: int) -> tuple[str, str, float | None]:
+def _probe_counter_cadence(
+    tick: int,
+    value: int,
+    probe_id: int,
+    global_round: int | None,
+) -> tuple[str, str, float | None]:
     if value <= 0 or tick <= 0 or value > tick + 1:
         return "typed_value", "按 probe_id 解释的4字节值", None
-    period_ticks = tick / value
     if probe_id == 0x8000:
-        return "global_round", "全局调度轮数候选", period_ticks
-    if value == 1 or period_ticks >= 180:
-        return "startup_or_conditional", "启动一次/条件探测候选", period_ticks
-    if period_ticks <= 45:
-        return "frequent", "高频探测，历史约30秒一轮", period_ticks
-    if period_ticks <= 90:
-        return "minute", "隔轮探测，历史约60秒一轮", period_ticks
-    return "slow_or_conditional", "慢周期/条件探测候选", period_ticks
+        return "global_round", "全局调度轮数候选", 1.0
+    if not global_round or global_round <= 0:
+        return "counter_candidate", "累计计数候选；缺少0x8000轮次基准", None
+
+    round_ratio = value / global_round
+    if abs(value - global_round) <= 1:
+        return "per_round_candidate", "每调度轮一次候选（与全局轮次相差不超过1）", round_ratio
+    if abs(value * 2 - global_round) <= 1:
+        return "half_round_candidate", "隔调度轮一次候选（约为全局轮次一半）", round_ratio
+    if value <= max(3, int(global_round * 0.1)):
+        return "sparse_or_conditional", "低频/启动/条件累计候选", round_ratio
+    if value > global_round:
+        return "multi_per_round_candidate", "每轮多次累计候选；须连续包确认", round_ratio
+    return "sub_round_candidate", "低于每轮频率的累计候选；须连续包确认", round_ratio
 
 
 def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) -> dict[str, Any] | None:
@@ -448,17 +458,33 @@ def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) ->
     if inner_type == 0xFFF3 and len(body) >= 4 and (len(body) - 4) % 6 == 0:
         tick = int.from_bytes(body[:4], "big")
         selector1 = int(layout.get("selector1") or 0)
+        raw_entries = [
+            (
+                int.from_bytes(body[rel : rel + 2], "big"),
+                body[rel + 2 : rel + 6],
+                start + rel,
+            )
+            for rel in range(4, len(body), 6)
+        ]
+        global_round = next(
+            (
+                int.from_bytes(raw_value, "big")
+                for probe_id, raw_value, _offset in raw_entries
+                if probe_id == 0x8000
+            ),
+            None,
+        )
         entries: list[dict[str, Any]] = []
         cadence_counts: Counter[str] = Counter()
-        for rel in range(4, len(body), 6):
-            probe_id = int.from_bytes(body[rel : rel + 2], "big")
-            raw_value = body[rel + 2 : rel + 6]
+        for probe_id, raw_value, offset in raw_entries:
             value_be = int.from_bytes(raw_value, "big")
-            cadence, cadence_zh, period_ticks = _probe_counter_cadence(tick, value_be, probe_id)
+            cadence, cadence_zh, round_ratio = _probe_counter_cadence(
+                tick, value_be, probe_id, global_round
+            )
             cadence_counts[cadence] += 1
             item = {
                 "index": len(entries),
-                "offset": start + rel,
+                "offset": offset,
                 "probe_id": _fmt_hex(probe_id, 4),
                 "probe_id_value": probe_id,
                 "value": _typed_u32_views(raw_value),
@@ -466,8 +492,8 @@ def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) ->
                 "value_kind_zh": cadence_zh,
                 "counter_candidate": cadence != "typed_value",
             }
-            if period_ticks is not None:
-                item["period_ticks_candidate"] = round(period_ticks, 3)
+            if round_ratio is not None:
+                item["global_round_ratio_candidate"] = round(round_ratio, 3)
             entries.append(item)
         return {
             "kind": "periodic_probe_table",
@@ -479,8 +505,14 @@ def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) ->
             "tick": tick,
             "tick_hex": _fmt_hex(tick, 8),
             "tick_offset": start,
-            "tick_rate_observed_per_second": 0.98,
-            "elapsed_seconds_candidate": round(tick / 0.98) if tick else 0,
+            "historical_reference": {
+                "sample_count": 415,
+                "duration_seconds": 37290.096,
+                "tick_rate_median_per_second": 0.987682,
+                "global_round_period_median_seconds": 30.031,
+                "scope": "旧fff3连续样本；当前probe集合须独立复核",
+            },
+            "elapsed_seconds_historical_estimate": round(tick / 0.987682) if tick else 0,
             "selector_tick_match": ((selector1 >> 16) & 0xFFFF) == (tick & 0xFFFF),
             "selector_revision_or_flags": selector1 & 0xFFFF,
             "inner_pair": {
@@ -488,14 +520,15 @@ def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) ->
                 "right": int(layout.get("inner_field") or 0) & 0xFFFF,
             },
             "entry_count": len(entries),
+            "probe_id_registry": "sparse_enum_not_sequence",
             "cadence_counts": dict(cadence_counts),
             "entries": entries,
             "evidence": [
                 "body_len=4+n*6",
                 "entry=u16_probe_id+raw32_value",
                 "selector1_high16_matches_body_tick" if ((selector1 >> 16) & 0xFFFF) == (tick & 0xFFFF) else "selector1_tick_mismatch",
-                "historical_tick_rate_about_0.98_per_second",
-                "historical_repeated_counter_period_about_30_seconds",
+                "historical_fff3_reference_415_samples",
+                "cadence_classified_relative_to_probe_0x8000_not_tick_div_value",
             ],
         }
 
