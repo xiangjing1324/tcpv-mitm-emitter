@@ -4007,13 +4007,14 @@ function innerNodeIdCounts(rawValue) {
 function summaryPrimaryItems(ev, summaryText) {
   const kv = parseSummaryKeyValues(summaryText);
   const isRequest = Number(ev && ev.dir) === 0;
+  const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const items = [];
   const reportText = formatReportCodeText(kv.report || kv.code);
   if (reportText !== "-") {
     const label = reportBusinessLabel(reportText);
     items.push({
       kind: "report",
-      text: `解密 report：${reportText}${label ? `，${label}` : ""}，${isRequest ? "请求" : "响应"}`,
+      text: `${opaqueUndecrypted ? "未解密外层" : "解密 report"}：${reportText}${label ? `，${label}` : ""}，${isRequest ? "请求" : "响应"}`,
     });
   }
   const simText = simulationStatusText(kv.sim, kv.mode, kv.reason);
@@ -9057,11 +9058,15 @@ function appendAnalysisHint(container, text) {
 function buildEventAnalysisGrid(ev) {
   const analysis = getEventAnalysis(ev);
   if (!analysis) return null;
+  const opaqueUndecrypted = isOpaqueUndecryptedSummary(ev && ev.summary ? ev.summary : "");
 
   const grid = document.createElement("div");
   grid.className = "analysis-grid";
 
-  const metaCard = createAnalysisCard("解密概览", "analysis-card-meta");
+  const metaCard = createAnalysisCard(
+    opaqueUndecrypted ? "封包概览（未解密）" : "解密概览",
+    "analysis-card-meta"
+  );
   const metaChips = document.createElement("div");
   metaChips.className = "analysis-chip-list";
   const summary = analysis.summary;
@@ -9084,7 +9089,12 @@ function buildEventAnalysisGrid(ev) {
     }
     metaCard.body.appendChild(metaChips);
   } else {
-    appendAnalysisEmpty(metaCard.body, "当前包没有结构化摘要，仍可直接看下方原始封包和当前解密内容。");
+    appendAnalysisEmpty(
+      metaCard.body,
+      opaqueUndecrypted
+        ? "当前包是未解密外层；只能按原始封包观察，未知 value 已保持。"
+        : "当前包没有结构化摘要，仍可直接看下方原始封包和当前解密内容。"
+    );
   }
   grid.appendChild(metaCard.card);
 
@@ -9116,7 +9126,7 @@ function buildEventAnalysisGrid(ev) {
       {
         label: "长度变化",
         value: [
-          Number.isFinite(Number(semantic.length_delta)) ? `解密 ${Number(semantic.length_delta) >= 0 ? "+" : ""}${Number(semantic.length_delta)}` : "",
+          Number.isFinite(Number(semantic.length_delta)) ? `${opaqueUndecrypted ? "封包" : "解密"} ${Number(semantic.length_delta) >= 0 ? "+" : ""}${Number(semantic.length_delta)}` : "",
           Number.isFinite(Number(semantic.packet_length_delta)) ? `线上 ${Number(semantic.packet_length_delta) >= 0 ? "+" : ""}${Number(semantic.packet_length_delta)}` : "",
         ].filter(Boolean).join(" / ") || "0",
       },
