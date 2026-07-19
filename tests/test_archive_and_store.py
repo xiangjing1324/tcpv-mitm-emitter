@@ -185,18 +185,21 @@ class ArchiveAndStoreTests(unittest.TestCase):
         alternate = analyze_payload(_pubgm_0112235b_record(), direction=0)
         baseline = analyze_payload(_pubgm_0112235b_record(state=(1, 1, 1)), direction=0)
 
-        self.assertEqual(alternate["semantic_revision"], 6)
+        self.assertEqual(alternate["semantic_revision"], 7)
         packet = alternate["packet"]
         self.assertEqual(packet["semantic_category"], "metadata.device_profile_state")
-        self.assertEqual(packet["semantic_label_zh"], "设备/账号绑定画像 + 尾部状态三联")
+        self.assertEqual(packet["semantic_label_zh"], "设备/账号绑定画像 + 尾部状态三联（只观察）")
         fields = {item["name"]: item for item in packet["fields"]}
         self.assertEqual(fields["identity_bundle_layout"]["value"], "kv62+opaque_hex32+account10")
         self.assertEqual(fields["tail_state_triplet"]["value"], "09/09/02")
         self.assertEqual(fields["tail_state_triplet"]["non_contiguous_offsets"], ["0xfe", "0x106", "0x10c"])
-        self.assertEqual(fields["tail_state_class"]["value"], "alternate_candidate")
+        self.assertEqual(fields["tail_state_class"]["value"], "variant_09_09_02")
+        self.assertEqual(fields["tail_state_mutability"]["value"], "unproven_observe_only")
+        self.assertIn("outer-270f-confounded", fields["tail_state_class"]["source"])
         baseline_fields = {item["name"]: item for item in baseline["packet"]["fields"]}
         self.assertEqual(baseline_fields["tail_state_triplet"]["value"], "01/01/01")
-        self.assertEqual(baseline_fields["tail_state_class"]["value"], "baseline_candidate")
+        self.assertEqual(baseline_fields["tail_state_class"]["value"], "variant_01_01_01")
+        self.assertEqual(baseline_fields["tail_state_mutability"]["value"], "unproven_observe_only")
 
     def test_tcpview_frontend_renders_local_synthesis_badge(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
@@ -340,6 +343,13 @@ class ArchiveAndStoreTests(unittest.TestCase):
         typed_analysis = analyze_payload(opaque_typed, direction=0)["packet"]
         self.assertEqual(typed_analysis["semantic_category"], "telemetry.binary_probe")
         self.assertEqual(typed_analysis["semantic_tier"], "approximate")
+
+        unknown_short = bytearray(32)
+        unknown_short[6:10] = bytes.fromhex("12345678")
+        short_analysis = analyze_payload(bytes(unknown_short), direction=0)["packet"]
+        self.assertEqual(short_analysis["semantic_category"], "control.opaque_candidate")
+        self.assertEqual(short_analysis["semantic_tier"], "approximate")
+        self.assertIn("高概率候选", short_analysis["semantic_label_zh"])
 
     def test_typed_leaf_time_and_xor_ui_shapes_are_classified(self):
         current = bytearray(_typed_record(0x100A, length=68))
@@ -611,6 +621,9 @@ class ArchiveAndStoreTests(unittest.TestCase):
         response_packet = events[1]["analysis"]["packet"]
         correlation = events[1]["analysis"]["response_correlation"]
         self.assertEqual(request_packet["semantic_role"], "server_acknowledged_child_request")
+        request_fields = {item["name"]: item for item in request_packet["fields"]}
+        self.assertEqual(request_fields["delivery_requirement"]["value"], "required_no_drop")
+        self.assertIn("leaf_id_locked", request_fields["mutation_scope"]["value"])
         self.assertEqual(response_packet["semantic_role"], "010a0011_ack_response")
         self.assertEqual(correlation["status"], "exact_010a0011_leaf_ack")
         self.assertEqual(correlation["request_report_code"], "0x010a0011")

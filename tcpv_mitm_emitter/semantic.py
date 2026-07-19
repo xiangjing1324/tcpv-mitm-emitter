@@ -17,7 +17,7 @@ from .shape_summary import (
 
 
 SCHEMA = "tersafe.semantic.v1"
-SEMANTIC_REVISION = 6
+SEMANTIC_REVISION = 7
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
@@ -247,6 +247,22 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
                     "length": int(record[24]),
                     "source": "schema:u8-length-prefixed-ascii",
                     "confidence": "confirmed",
+                },
+                {
+                    "name": "delivery_requirement",
+                    "value": "required_no_drop",
+                    "offset": 0x06,
+                    "length": 4,
+                    "source": "runtime-policy+paired-live-samples:010a0011->010a0010",
+                    "confidence": "confirmed",
+                },
+                {
+                    "name": "mutation_scope",
+                    "value": "leaf_id_locked;token_and_label_observe_only",
+                    "offset": 0x0A,
+                    "length": max(len(record) - 0x0A, 0),
+                    "source": "causal-boundary:response-pairing-must-remain-stable",
+                    "confidence": "high",
                 },
             ]
         )
