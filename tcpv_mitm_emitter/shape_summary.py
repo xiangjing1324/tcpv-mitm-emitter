@@ -51,7 +51,7 @@ _PUBGM_0112235B_STATE_OFFSETS = (0xFE, 0x106, 0x10C)
 
 
 def _pubgm_0112235b_device_account_tail_fields(record: bytes) -> list[dict[str, Any]]:
-    """Expose only fields proven by repeated full-shape observations."""
+    """Expose the stable layout and observed tail variants without claiming writability."""
     data = bytes(record or b"")
     if len(data) != _PUBGM_0112235B_RECORD_LEN or data[6:10] != bytes.fromhex("0112235b"):
         return []
@@ -69,9 +69,9 @@ def _pubgm_0112235b_device_account_tail_fields(record: bytes) -> list[dict[str, 
 
     state = tuple(data[offset] for offset in _PUBGM_0112235B_STATE_OFFSETS)
     if state == (0x01, 0x01, 0x01):
-        state_class = "baseline_candidate"
+        state_class = "variant_01_01_01"
     elif state == (0x09, 0x09, 0x02):
-        state_class = "alternate_candidate"
+        state_class = "variant_09_09_02"
     else:
         state_class = "unmapped"
     source = "observed:46-full-shape-samples"
@@ -98,8 +98,16 @@ def _pubgm_0112235b_device_account_tail_fields(record: bytes) -> list[dict[str, 
             "value": state_class,
             "offset": 0xFE,
             "length": 3,
-            "source": "observed:paired-010a0024+010a0027-response-closure",
+            "source": "observed:natural-client-variants;outer-270f-confounded",
             "confidence": "observed",
+        },
+        {
+            "name": "tail_state_mutability",
+            "value": "unproven_observe_only",
+            "offset": 0xFE,
+            "length": 3,
+            "source": "causal-review:010a0024-response-attributable-to-outer-270f",
+            "confidence": "high",
         },
     ]
 
@@ -271,10 +279,16 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
             return _semantic_profile(
                 "device_account_profile_with_tail_state",
                 "metadata.device_profile_state",
-                "设备/账号绑定画像 + 尾部状态三联",
+                "设备/账号绑定画像 + 尾部状态三联（只观察）",
                 "observed",
                 "high",
-                ("full_shape_len269", "identity_bundle_layout", "tail_state_triplet", "paired_response_closure"),
+                (
+                    "full_shape_len269",
+                    "identity_bundle_layout",
+                    "natural_tail_variants",
+                    "outer_270f_causal_confound",
+                    "tail_write_unproven",
+                ),
             )
         if has_csob:
             return _semantic_profile(
@@ -345,8 +359,34 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
         return _semantic_profile(
             "telemetry_leaf", "telemetry.leaf", "探测遥测叶子（具体字段待证）", "approximate", "approximate", ("report_family_0x0102",)
         )
+    printable = sum(1 for value in data if 0x20 <= value <= 0x7E)
+    printable_ratio = (printable / len(data)) if data else 0.0
+    if len(data) <= 64:
+        return _semantic_profile(
+            "opaque_short_control_candidate",
+            "control.opaque_candidate",
+            "短控制/状态记录（高概率候选，字段待证）",
+            "approximate",
+            "approximate",
+            ("short_record_shape", f"printable_ratio_{printable_ratio:.2f}"),
+        )
+    if printable_ratio >= 0.30:
+        return _semantic_profile(
+            "opaque_text_metadata_candidate",
+            "metadata.opaque_text_candidate",
+            "文本型元数据记录（高概率候选，字段待证）",
+            "approximate",
+            "approximate",
+            ("printable_density", f"printable_ratio_{printable_ratio:.2f}"),
+        )
     return _semantic_profile(
-        "unresolved_payload", "unknown", "未解析记录", "unknown", "unknown", (), exact_meaning=False
+        "opaque_binary_telemetry_candidate",
+        "telemetry.opaque_binary_candidate",
+        "二进制遥测/环境探测（高概率候选，字段待证）",
+        "approximate",
+        "approximate",
+        ("binary_density", f"printable_ratio_{printable_ratio:.2f}"),
+        exact_meaning=False,
     )
 
 
