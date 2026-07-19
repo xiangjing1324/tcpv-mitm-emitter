@@ -174,6 +174,18 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn('"local_semantic_synthesis"', app_js)
         self.assertIn("compactSynthesisInsight(summaryText)", app_js)
 
+    def test_tcpview_frontend_labels_opaque_outer_packets_as_raw(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function compactOpaqueInsight(summaryText)", app_js)
+        self.assertIn('"OPAQUE"', app_js)
+        self.assertIn('"未解密外层"', app_js)
+        self.assertIn('"value保持"', app_js)
+        self.assertIn("修改前原始封包 [before/raw]", app_js)
+        self.assertIn("修改后原始封包 [after/raw]", app_js)
+        self.assertIn("未解密外层，不解析 child tree", app_js)
+
     def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
         tick = 0x0426
         entries = [

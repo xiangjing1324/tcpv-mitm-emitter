@@ -272,6 +272,12 @@ function installPreviewSummaryStyles() {
       --summary-chip-line: rgba(52, 211, 153, 0.42);
       font-weight: 800;
     }
+    .summary-insight-opaque {
+      --summary-chip-color: #fcd34d;
+      --summary-chip-bg: rgba(245, 158, 11, 0.16);
+      --summary-chip-line: rgba(251, 191, 36, 0.45);
+      font-weight: 800;
+    }
     .summary-insight-device {
       --summary-chip-color: #7dd3fc;
       --summary-chip-bg: rgba(14, 165, 233, 0.12);
@@ -4365,6 +4371,28 @@ function compactSynthesisInsight(summaryText) {
   };
 }
 
+function isOpaqueUndecryptedSummary(summaryText) {
+  return /(?:\[OPAQUE\]|\bundecrypted_outer_control(?:_passthrough)?\b|\bopaque_value_preserved\b)/.test(
+    String(summaryText || "")
+  );
+}
+
+function compactOpaqueInsight(summaryText) {
+  const raw = String(summaryText || "").trim();
+  if (!isOpaqueUndecryptedSummary(raw)) return null;
+  const shapeMatch = raw.match(/\b(pubgm_outer_type_[^\]\s]+)/);
+  return {
+    kind: "opaque",
+    text: [
+      "OPAQUE",
+      "未解密外层",
+      "value保持",
+      shapeMatch ? shapeMatch[1] : "",
+    ].filter(Boolean).join(" · "),
+    title: raw,
+  };
+}
+
 function collectPacketSignalMatches(sourceText, regex, maxItems = 2) {
   const out = [];
   const seen = new Set();
@@ -4476,6 +4504,7 @@ function buildSummaryInsightStrip(ev, summaryText) {
   );
   if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic) return null;
   const candidates = [
+    compactOpaqueInsight(summaryText),
     compactSynthesisInsight(summaryText),
     ...compactStructuredSemanticInsights(ev),
     compactPacketSemanticInsight(ev),
@@ -8544,6 +8573,7 @@ function buildEventTimestampStrip(summaryText, beforeBase64, decodedBase64) {
 
 function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   if (!beforeBase64 && !decodedBase64) return null;
+  if (isOpaqueUndecryptedSummary(summaryText)) return null;
   const originalOnly = !beforeBase64 && Boolean(decodedBase64);
   const beforeBytes = b64ToBytes(beforeBase64);
   const afterBytes = b64ToBytes(decodedBase64);
@@ -8800,6 +8830,7 @@ function buildStringResultPanel(beforeBase64, decodedBase64, summaryText = "") {
 
 function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
   if (!beforeBase64 && !decodedBase64) return null;
+  const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const sameLenExamples = parseLibrarySameLengthExamples(summaryText);
   const row = document.createElement("section");
   row.className = "tree-compare-row";
@@ -8814,7 +8845,9 @@ function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
   } else {
     const empty = document.createElement("div");
     empty.className = "dump-empty tree-compare-empty";
-    empty.textContent = "修改前没有可解析 child tree。";
+    empty.textContent = opaqueUndecrypted
+      ? "修改前是未解密外层，不解析 child tree。"
+      : "修改前没有可解析 child tree。";
     before.appendChild(empty);
   }
 
@@ -8828,7 +8861,9 @@ function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
   } else {
     const empty = document.createElement("div");
     empty.className = "dump-empty tree-compare-empty";
-    empty.textContent = "修改后/当前没有可解析 child tree。";
+    empty.textContent = opaqueUndecrypted
+      ? "修改后/当前是未解密外层，不解析 child tree。"
+      : "修改后/当前没有可解析 child tree。";
     after.appendChild(empty);
   }
 
@@ -9313,6 +9348,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   body.className = "body";
 
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
+  const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   body.appendChild(buildEventReadableSummary(ev, summaryText));
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
@@ -9359,8 +9395,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const panel = document.createElement(collapsed ? "details" : "section");
     panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
     if (collapsed && dumpOptions.open) panel.open = true;
-    const isRawSource = sourceKey === "full" || sourceKey === "raw_after";
-    const showDecodedAsciiRows = sourceShowsDecodedAsciiRows(sourceKey);
+    const isRawSource = opaqueUndecrypted || sourceKey === "full" || sourceKey === "raw_after";
+    const showDecodedAsciiRows = !opaqueUndecrypted && sourceShowsDecodedAsciiRows(sourceKey);
     const tailChecksum = showDecodedAsciiRows ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
     const timestampHighlights =
       isRawSource
@@ -9483,7 +9519,9 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   if (isRequest) {
     if (hasFullDump) {
       appendDumpSection(
-        showRawCompare ? "修改前加密 [raw before]" : "原始封包 [raw]",
+        showRawCompare
+          ? (opaqueUndecrypted ? "修改前原始封包 [raw before]" : "修改前加密 [raw before]")
+          : "原始封包 [raw]",
         fullPay,
         ev.full_len,
         "dump-panel-full",
@@ -9498,7 +9536,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     }
     if (showRawCompare) {
       appendDumpSection(
-        "修改后加密 [raw after]",
+        opaqueUndecrypted ? "修改后原始封包 [raw after]" : "修改后加密 [raw after]",
         rawAfterPay,
         ev.raw_len,
         "dump-panel-raw-after",
@@ -9510,22 +9548,28 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       );
     }
     if (hasBeforeDump) {
-      appendDumpSection("修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
+      appendDumpSection(opaqueUndecrypted ? "修改前原始封包 [before/raw]" : "修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
         changedOffsets: decodedChangedOffsets,
       });
     } else {
       appendEmptyDumpSection(
-        "修改前解密 [before missing]",
-        "当前事件没有 before_pay；通常是未经过仿生改写、旧事件、或该包只记录了当前解密片段。",
+        opaqueUndecrypted ? "修改前原始封包 [before/raw missing]" : "修改前解密 [before missing]",
+        opaqueUndecrypted
+          ? "当前事件没有 before_pay，无法显示修改前原始封包。"
+          : "当前事件没有 before_pay；通常是未经过仿生改写、旧事件、或该包只记录了当前解密片段。",
         "dump-panel-before"
       );
     }
     if (hasDecodedDump) {
-      const decodedTitle = hasBeforeDump
-        ? beforeDumpSameAsDecoded
-          ? "修改后解密 [after same]"
-          : "修改后解密 [after]"
-        : "当前解密 [current]";
+      const decodedTitle = opaqueUndecrypted
+        ? (hasBeforeDump
+          ? (beforeDumpSameAsDecoded ? "修改后原始封包 [after/raw same]" : "修改后原始封包 [after/raw]")
+          : "当前原始封包 [current/raw]")
+        : (hasBeforeDump
+          ? beforeDumpSameAsDecoded
+            ? "修改后解密 [after same]"
+            : "修改后解密 [after]"
+          : "当前解密 [current]");
       appendDumpSection(
         decodedTitle,
         decodedPay,
@@ -9535,7 +9579,11 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         { changedOffsets: decodedChangedOffsets }
       );
     } else {
-      appendEmptyDumpSection("修改后解密 [after missing]", "当前事件没有 pay，无法显示修改后/当前解密内容。", "dump-panel-decoded");
+      appendEmptyDumpSection(
+        opaqueUndecrypted ? "修改后原始封包 [after/raw missing]" : "修改后解密 [after missing]",
+        opaqueUndecrypted ? "当前事件没有 pay，无法显示修改后/当前原始封包。" : "当前事件没有 pay，无法显示修改后/当前解密内容。",
+        "dump-panel-decoded"
+      );
     }
   } else if (hasFullDump && !fullDumpSameAsDecoded) {
     appendDumpSection("响应原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
