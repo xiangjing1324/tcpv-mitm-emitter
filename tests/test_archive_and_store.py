@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -185,7 +186,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
         alternate = analyze_payload(_pubgm_0112235b_record(), direction=0)
         baseline = analyze_payload(_pubgm_0112235b_record(state=(1, 1, 1)), direction=0)
 
-        self.assertEqual(alternate["semantic_revision"], 7)
+        self.assertEqual(alternate["semantic_revision"], 8)
         packet = alternate["packet"]
         self.assertEqual(packet["semantic_category"], "metadata.device_profile_state")
         self.assertEqual(packet["semantic_label_zh"], "设备/账号绑定画像 + 尾部状态三联（只观察）")
@@ -341,8 +342,10 @@ class ArchiveAndStoreTests(unittest.TestCase):
 
         opaque_typed = _typed_record(0x1004, length=68)
         typed_analysis = analyze_payload(opaque_typed, direction=0)["packet"]
-        self.assertEqual(typed_analysis["semantic_category"], "telemetry.binary_probe")
+        self.assertEqual(typed_analysis["semantic_category"], "environment.capability_state")
         self.assertEqual(typed_analysis["semantic_tier"], "approximate")
+        self.assertEqual(typed_analysis["body_layout"]["kind"], "generic_typed_probe_body")
+        self.assertIn("field_boundaries", typed_analysis["body_layout"])
 
         unknown_short = bytearray(32)
         unknown_short[6:10] = bytes.fromhex("12345678")
@@ -350,6 +353,51 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(short_analysis["semantic_category"], "control.opaque_candidate")
         self.assertEqual(short_analysis["semantic_tier"], "approximate")
         self.assertIn("高概率候选", short_analysis["semantic_label_zh"])
+
+    def test_live_pubgm_typed_shapes_get_distinct_high_probability_candidates(self):
+        scalar = _typed_record(
+            0x0070,
+            length=36,
+            selector0=0x23800002,
+            selector1=0x34560001,
+            inner_field=0x3FB33333,
+        )
+        scalar_analysis = analyze_payload(scalar, direction=0)["packet"]
+        self.assertEqual(scalar_analysis["semantic_role"], "runtime_scalar_threshold_candidate")
+        self.assertEqual(scalar_analysis["semantic_category"], "environment.runtime_scalar")
+        self.assertEqual(
+            scalar_analysis["body_layout"]["inner_field_views"]["float_be"],
+            struct.unpack(">f", bytes.fromhex("3fb33333"))[0],
+        )
+
+        memory_words = [0, 0x0266C000, 0, 0x0D67C000, 0, 0]
+        memory = _typed_record(
+            0x00A5,
+            length=60,
+            selector0=0x23800002,
+            selector1=0x34560001,
+            inner_field=2,
+            body=b"".join(value.to_bytes(4, "big") for value in memory_words),
+        )
+        memory_analysis = analyze_payload(memory, direction=0)["packet"]
+        self.assertEqual(memory_analysis["semantic_role"], "memory_region_size_profile_candidate")
+        self.assertEqual(memory_analysis["semantic_category"], "environment.memory_layout")
+        self.assertEqual(memory_analysis["body_layout"]["traits"]["page_aligned_words"], 2)
+
+        digest_text = b"0123456789ABCDEF0123456789ABCDEF"
+        digest = _typed_record(
+            0x01C3,
+            length=36 + len(digest_text),
+            selector0=0x23800002,
+            selector1=0x34560001,
+            inner_field=0x10,
+            body=bytes(value ^ 0xB6 for value in digest_text),
+        )
+        digest_analysis = analyze_payload(digest, direction=0)["packet"]
+        self.assertEqual(digest_analysis["semantic_role"], "integrity_digest_or_hash_list_candidate")
+        self.assertEqual(digest_analysis["semantic_category"], "environment.integrity_digest")
+        self.assertEqual(digest_analysis["body_layout"]["traits"]["xor_b6_hex_run_count"], 1)
+        self.assertIn("shape_gated_value_writer_only", digest_analysis["body_layout"]["semantic_candidate"]["mutation_scope"])
 
     def test_typed_leaf_time_and_xor_ui_shapes_are_classified(self):
         current = bytearray(_typed_record(0x100A, length=68))

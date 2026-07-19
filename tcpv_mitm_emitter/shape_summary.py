@@ -49,6 +49,57 @@ _SEMANTIC_PROCESS_TOKENS = (
 _PUBGM_0112235B_RECORD_LEN = 0x010D
 _PUBGM_0112235B_STATE_OFFSETS = (0xFE, 0x106, 0x10C)
 
+_PUBGM_TYPED_APPROXIMATE_ROLE_BY_INNER_TYPE: dict[int, tuple[str, str, str, str]] = {
+    0x0069: (
+        "runtime_counter_or_timing_vector_candidate",
+        "telemetry.runtime_metrics",
+        "运行时计数/时序向量候选",
+        "u32_vector_3",
+    ),
+    0x0070: (
+        "runtime_scalar_threshold_candidate",
+        "environment.runtime_scalar",
+        "运行时阈值/版本标量候选",
+        "scalar_float_1_4",
+    ),
+    0x0071: (
+        "runtime_scalar_threshold_candidate",
+        "environment.runtime_scalar",
+        "运行时阈值/版本标量候选",
+        "scalar_float_1_3",
+    ),
+    0x0073: (
+        "capability_flag_and_float_vector_candidate",
+        "environment.capability_state",
+        "能力/图形状态浮点与掩码向量候选",
+        "float_and_mask_vector",
+    ),
+    0x007D: (
+        "device_integrity_fingerprint_blob_candidate",
+        "environment.device_integrity",
+        "设备完整性/指纹二进制块候选",
+        "binary_vector_10_words",
+    ),
+    0x00A5: (
+        "memory_region_size_profile_candidate",
+        "environment.memory_layout",
+        "内存区间/分配尺寸画像候选",
+        "page_aligned_size_vector",
+    ),
+    0x019A: (
+        "process_memory_layout_profile_candidate",
+        "environment.process_memory",
+        "进程内存布局与计数画像候选",
+        "page_aligned_size_and_count_vector",
+    ),
+    0x01C3: (
+        "integrity_digest_or_hash_list_candidate",
+        "environment.integrity_digest",
+        "完整性摘要/哈希列表候选",
+        "xor_hex_digest_vector",
+    ),
+}
+
 
 def _pubgm_0112235b_device_account_tail_fields(record: bytes) -> list[dict[str, Any]]:
     """Expose the stable layout and observed tail variants without claiming writability."""
@@ -267,6 +318,17 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
             return _semantic_profile(
                 "process_stack_probe_candidate", "environment.process_stack", "进程/调用栈探测（近似）", "approximate", "approximate", (f"inner_type_0x{inner_type:04x}", "historical_shape_family")
             )
+        if body_layout and body_layout.get("kind") == "generic_typed_probe_body":
+            candidate = body_layout.get("semantic_candidate")
+            if isinstance(candidate, dict):
+                return _semantic_profile(
+                    str(candidate.get("role") or "typed_leaf_binary_probe_candidate"),
+                    str(candidate.get("category") or "telemetry.binary_probe"),
+                    str(candidate.get("label_zh") or "稳定二进制探测/遥测候选（字段待证）"),
+                    "approximate",
+                    "approximate",
+                    tuple(candidate.get("evidence") or ()) + (f"inner_type_0x{inner_type:04x}",),
+                )
         return _semantic_profile(
             "typed_leaf_binary_probe", "telemetry.binary_probe", "稳定二进制探测/遥测（字段待证）", "approximate", "approximate", ("full_shape", f"inner_type_0x{inner_type:04x}")
         )
@@ -549,11 +611,12 @@ def _probe_counter_cadence(
 
 
 def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) -> dict[str, Any] | None:
-    """Parse only body layouts closed by cross-sample length and cadence evidence.
+    """Parse closed layouts and expose bounded candidates for every typed node.
 
-    Exact probe-id meanings remain unknown.  The parser exposes offsets, raw
-    values and evidence-backed scheduling relationships without inventing
-    field names or using printable-XOR scoring for these binary layouts.
+    Exact probe-id meanings remain unknown. Closed layouts retain their
+    evidence-backed interpretation; all other layouts expose raw typed views,
+    field boundaries and an explicitly approximate candidate instead of an
+    undifferentiated opaque label.
     """
     if not layout:
         return None
@@ -673,7 +736,110 @@ def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) ->
                 "all_zero_and_all_one_masks" if is_bitmap else "mixed_scalar_or_mask_words",
             ],
         }
-    return None
+
+    words: list[dict[str, Any]] = []
+    page_aligned = 0
+    flag_or_mask = 0
+    plausible_float = 0
+    for rel in range(0, min(len(body), 4 * 32), 4):
+        raw_word = body[rel : rel + 4]
+        if len(raw_word) != 4:
+            break
+        views = _typed_u32_views(raw_word)
+        be32 = int(views.get("be32") or 0)
+        if be32 > 0 and be32 % 0x1000 == 0:
+            page_aligned += 1
+        if be32 in {0, 1, 0xFFFFFFFF}:
+            flag_or_mask += 1
+        if "float_be" in views and abs(float(views["float_be"])) <= 10000:
+            plausible_float += 1
+        words.append(
+            {
+                "index": len(words),
+                "offset": start + rel,
+                "value": views,
+                "page_aligned_candidate": be32 > 0 and be32 % 0x1000 == 0,
+                "flag_or_mask_candidate": be32 in {0, 1, 0xFFFFFFFF},
+            }
+        )
+
+    xor_b6 = bytes(value ^ 0xB6 for value in body)
+    xor_hex_runs = [
+        {
+            "offset": start + int(match.start()),
+            "length": len(match.group(0)),
+            "text": match.group(0).decode("ascii", errors="replace")[:160],
+        }
+        for match in re.finditer(rb"[0-9A-Fa-f]{24,}", xor_b6)
+    ][:4]
+    mapped = _PUBGM_TYPED_APPROXIMATE_ROLE_BY_INNER_TYPE.get(inner_type)
+    if mapped:
+        candidate_role, candidate_category, candidate_label, shape_evidence = mapped
+    elif xor_hex_runs:
+        candidate_role = "integrity_digest_or_identifier_candidate"
+        candidate_category = "environment.integrity_digest"
+        candidate_label = "完整性摘要/标识符候选"
+        shape_evidence = "xor_b6_long_hex_run"
+    elif not body:
+        candidate_role = "scalar_capability_or_threshold_candidate"
+        candidate_category = "environment.runtime_scalar"
+        candidate_label = "能力/阈值标量候选"
+        shape_evidence = "fixed_inner_field_only"
+    elif page_aligned >= 2:
+        candidate_role = "memory_region_or_process_layout_candidate"
+        candidate_category = "environment.memory_layout"
+        candidate_label = "内存区间/进程布局候选"
+        shape_evidence = "page_aligned_u32_vector"
+    elif flag_or_mask >= max(2, len(words) // 2):
+        candidate_role = "capability_mask_or_runtime_state_candidate"
+        candidate_category = "environment.capability_state"
+        candidate_label = "能力掩码/运行时状态候选"
+        shape_evidence = "sparse_mask_u32_vector"
+    elif words:
+        candidate_role = "runtime_metric_or_integrity_vector_candidate"
+        candidate_category = "telemetry.runtime_or_integrity"
+        candidate_label = "运行时指标/完整性向量候选"
+        shape_evidence = "fixed_u32_vector"
+    else:
+        candidate_role = "typed_binary_environment_probe_candidate"
+        candidate_category = "telemetry.binary_probe"
+        candidate_label = "定型二进制环境探测候选"
+        shape_evidence = "fixed_typed_binary_body"
+
+    return {
+        "kind": "generic_typed_probe_body",
+        "label_zh": candidate_label,
+        "confidence": "approximate_shape",
+        "body_offset": start,
+        "body_len": len(body),
+        "field_boundaries": {
+            "leaf_id": {"offset": int(layout.get("shift") or 0) + 0x0A, "length": 4},
+            "inner_len": {"offset": int(layout.get("shift") or 0) + 0x14, "length": 2},
+            "inner_type": {"offset": int(layout.get("shift") or 0) + 0x16, "length": 2},
+            "selector0": {"offset": int(layout.get("shift") or 0) + 0x18, "length": 4},
+            "selector1": {"offset": int(layout.get("shift") or 0) + 0x1C, "length": 4},
+            "inner_field": {"offset": int(layout.get("shift") or 0) + 0x20, "length": 4},
+            "body": {"offset": start, "length": len(body)},
+        },
+        "inner_field_views": _typed_u32_views(int(layout.get("inner_field") or 0).to_bytes(4, "big")),
+        "word_count": len(words),
+        "words": words,
+        "traits": {
+            "page_aligned_words": page_aligned,
+            "flag_or_mask_words": flag_or_mask,
+            "plausible_float_words": plausible_float,
+            "xor_b6_hex_run_count": len(xor_hex_runs),
+        },
+        "xor_b6_hex_runs": xor_hex_runs,
+        "semantic_candidate": {
+            "role": candidate_role,
+            "category": candidate_category,
+            "label_zh": candidate_label,
+            "confidence": "approximate",
+            "evidence": [shape_evidence, "full_shape", "raw_u32_views"],
+            "mutation_scope": "probe_id_and_leaf_id_locked;shape_gated_value_writer_only",
+        },
+    }
 
 
 def _tail_info(record: bytes, layout: dict[str, int]) -> dict[str, Any]:
