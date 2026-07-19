@@ -801,7 +801,7 @@ def _report_role(report_code: int, direction: int) -> tuple[str, str]:
     if report_code == 0x0102000A:
         return "typed leaf shell；含义由完整 shape 判定", "confirmed"
     if report_code == 0x010A0011:
-        return "服务器确认型子请求；保活/握手为候选", "confirmed"
+        return "服务器确认型子请求（保活/握手候选）", "confirmed"
     if report_code == 0x010A0010:
         return "010a0011 回执；leaf_id 原样回显", "confirmed"
     if report_code in {0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
