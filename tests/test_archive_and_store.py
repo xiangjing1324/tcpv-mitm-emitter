@@ -164,6 +164,16 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
+    def test_tcpview_frontend_renders_local_synthesis_badge(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function compactSynthesisInsight(summaryText)", app_js)
+        self.assertIn('"SYNTH"', app_js)
+        self.assertIn('`child_synth=${synthCount}`', app_js)
+        self.assertIn('"local_semantic_synthesis"', app_js)
+        self.assertIn("compactSynthesisInsight(summaryText)", app_js)
+
     def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
         tick = 0x0426
         entries = [

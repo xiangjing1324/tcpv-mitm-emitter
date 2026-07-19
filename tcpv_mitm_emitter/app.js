@@ -266,6 +266,12 @@ function installPreviewSummaryStyles() {
       --summary-chip-line: var(--hex-idfv-line);
       font-weight: 700;
     }
+    .summary-insight-synth {
+      --summary-chip-color: #a7f3d0;
+      --summary-chip-bg: rgba(16, 185, 129, 0.16);
+      --summary-chip-line: rgba(52, 211, 153, 0.42);
+      font-weight: 800;
+    }
     .summary-insight-device {
       --summary-chip-color: #7dd3fc;
       --summary-chip-bg: rgba(14, 165, 233, 0.12);
@@ -4339,6 +4345,26 @@ function compactStructuredSemanticInsights(ev) {
   return out;
 }
 
+function compactSynthesisInsight(summaryText) {
+  const raw = String(summaryText || "").trim();
+  if (!raw || !/(?:\[SYNTH\]|\blocal_semantic_synthesis\b|\bchild_synth=[1-9]\d*)/.test(raw)) {
+    return null;
+  }
+  const synthCount = readSummaryValue(raw, "child_synth") || "1";
+  const detailMatch = raw.match(/\b(pubgm_outer_type_[^\]\s]+)/);
+  const detail = detailMatch ? detailMatch[1] : "";
+  return {
+    kind: "synth",
+    text: [
+      "SYNTH",
+      `child_synth=${synthCount}`,
+      "local_semantic_synthesis",
+      detail,
+    ].filter(Boolean).join(" · "),
+    title: raw,
+  };
+}
+
 function collectPacketSignalMatches(sourceText, regex, maxItems = 2) {
   const out = [];
   const seen = new Set();
@@ -4450,6 +4476,7 @@ function buildSummaryInsightStrip(ev, summaryText) {
   );
   if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic) return null;
   const candidates = [
+    compactSynthesisInsight(summaryText),
     ...compactStructuredSemanticInsights(ev),
     compactPacketSemanticInsight(ev),
     ...compactPacketTextInsights(ev, summaryText),
