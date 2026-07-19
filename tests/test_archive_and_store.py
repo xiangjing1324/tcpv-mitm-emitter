@@ -541,7 +541,51 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(dynamic["family"], "0x011223xx")
         self.assertEqual(dynamic["counts"]["request"], 0)
         pairing = next(item for item in summary["deep"]["reports"] if item["report_code"] == "0x010a0011")
-        self.assertEqual(pairing["meaning"], "配对/保护上下文（观察）")
+        self.assertEqual(pairing["meaning"], "服务器确认型子请求（保活/握手候选）")
+
+    def test_010a0011_child_correlates_exact_010a0010_response_by_leaf_id(self):
+        request = bytes.fromhex(
+            "00000001001d010a001100000ab2000000000000f42db1fe0468695f31"
+        )
+        response = bytes.fromhex(
+            "000000010016010a001000000ab20000000000000324"
+        )
+        events = [
+            {
+                "id": "11",
+                "cid": "client->server:65010",
+                "ts": 1000,
+                "dir": 0,
+                "seq": 11,
+                "display": request.hex(),
+                "analysis": analyze_payload(request, direction=0),
+            },
+            {
+                "id": "12",
+                "cid": "client->server:65010",
+                "ts": 1125,
+                "dir": 1,
+                "seq": 12,
+                "display": response.hex(),
+                "analysis": analyze_payload(response, direction=1),
+            },
+        ]
+
+        correlate_events(events)
+
+        request_packet = events[0]["analysis"]["packet"]
+        response_packet = events[1]["analysis"]["packet"]
+        correlation = events[1]["analysis"]["response_correlation"]
+        self.assertEqual(request_packet["semantic_role"], "server_acknowledged_child_request")
+        self.assertEqual(response_packet["semantic_role"], "010a0011_ack_response")
+        self.assertEqual(correlation["status"], "exact_010a0011_leaf_ack")
+        self.assertEqual(correlation["request_report_code"], "0x010a0011")
+        self.assertEqual(correlation["response_report_code"], "0x010a0010")
+        self.assertEqual(correlation["leaf_id"], "0x00000ab2")
+        self.assertEqual(correlation["delta_ms"], 125)
+        self.assertEqual(correlation["confidence"], "confirmed")
+        ack_status = next(field for field in response_packet["fields"] if field["name"] == "ack_status")
+        self.assertEqual(ack_status["value"], "0324")
 
     def test_response_correlation_and_65010_connection_timeline(self):
         request = _metadata_record(0x01122321, b"state:00300015,r:0/0/0,p:1/1,0\x00")

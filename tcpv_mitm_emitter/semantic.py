@@ -16,7 +16,7 @@ from .shape_summary import (
 
 
 SCHEMA = "tersafe.semantic.v1"
-SEMANTIC_REVISION = 4
+SEMANTIC_REVISION = 5
 _CS_RE = re.compile(rb"cs:([^,;\x00\r\n]+)")
 _OB_RE = re.compile(rb"ob:([^;\x00\r\n]+)")
 _STATE_RE = re.compile(rb"state:([^,;\x00\r\n]+)")
@@ -53,8 +53,10 @@ def report_role(report_code: int | None, *, direction: int) -> tuple[str, str]:
     if value == 0x0102000A:
         return "typed_leaf_shell", "confirmed"
     if value == 0x010A0011:
-        return "pairing_or_protection_context_observed", "observed"
-    if value in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
+        return "server_acknowledged_child_request", "confirmed"
+    if value == 0x010A0010:
+        return ("010a0011_ack_response" if int(direction) else "ack_context"), "confirmed"
+    if value in {0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057}:
         return ("response_feedback" if int(direction) else "request_context"), "observed"
     return "unknown", "unknown"
 
@@ -215,7 +217,58 @@ def _record_analysis(record: bytes, *, direction: int, index: int | None = None)
         item = _field(record, regex, name)
         if item:
             fields.append(item)
-    if report_code in {0x010A0010, 0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057} and len(record) >= 0x16:
+    if report_code == 0x010A0011 and len(record) >= 25 and 25 + int(record[24]) == len(record):
+        label = record[25:].decode("ascii", errors="replace")
+        fields.extend(
+            [
+                {
+                    "name": "leaf_id_correlation",
+                    "value": _fmt_hex(int.from_bytes(record[10:14], "big"), 8),
+                    "offset": 0x0A,
+                    "length": 4,
+                    "source": "paired-live-samples:010a0011->010a0010",
+                    "confidence": "confirmed",
+                },
+                {
+                    "name": "request_token_opaque",
+                    "value": record[20:24].hex(),
+                    "offset": 0x14,
+                    "length": 4,
+                    "source": "observed:fixed-request-shape",
+                    "confidence": "observed",
+                },
+                {
+                    "name": "client_label",
+                    "value": label,
+                    "offset": 0x19,
+                    "length": int(record[24]),
+                    "source": "schema:u8-length-prefixed-ascii",
+                    "confidence": "confirmed",
+                },
+            ]
+        )
+    if report_code == 0x010A0010 and len(record) == 0x16:
+        fields.extend(
+            [
+                {
+                    "name": "leaf_id_correlation",
+                    "value": _fmt_hex(int.from_bytes(record[10:14], "big"), 8),
+                    "offset": 0x0A,
+                    "length": 4,
+                    "source": "paired-live-samples:010a0011->010a0010",
+                    "confidence": "confirmed",
+                },
+                {
+                    "name": "ack_status",
+                    "value": record[20:22].hex(),
+                    "offset": 0x14,
+                    "length": 2,
+                    "source": "paired-live-samples:status-trailer",
+                    "confidence": "confirmed" if record[20:22] == b"\x03\x24" else "observed",
+                },
+            ]
+        )
+    if report_code in {0x010A0024, 0x010A0027, 0x010A0044, 0x010A0057} and len(record) >= 0x16:
         for name, offset in (("field_a", 0x0A), ("field_b", 0x0E), ("field_c", 0x12)):
             fields.append(
                 {
@@ -397,6 +450,7 @@ def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
 def correlate_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Attach conservative preceding-request/burst relationships in-place."""
     latest_request: dict[str, dict[str, Any]] = {}
+    pending_010a0011: dict[tuple[str, str], dict[str, Any]] = {}
     burst_counts: dict[tuple[str, str, str], int] = {}
     for event in sorted(events, key=lambda item: (int(item.get("ts") or 0), int(item.get("seq") or 0))):
         analysis = event.get("analysis") if isinstance(event.get("analysis"), dict) else {}
@@ -406,12 +460,41 @@ def correlate_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cid = str(event.get("cid") or "-")
         if int(event.get("dir") or 0) == 0:
             latest_request[cid] = event
+            request_nodes = [packet]
+            request_nodes.extend(packet.get("children") if isinstance(packet.get("children"), list) else [])
+            paired_leaves: list[str] = []
+            for node in request_nodes:
+                if not isinstance(node, dict) or str(node.get("report_code") or "").lower() != "0x010a0011":
+                    continue
+                leaf_id = str(node.get("leaf_id") or "").lower()
+                if not leaf_id:
+                    continue
+                pending_010a0011[(cid, leaf_id)] = event
+                paired_leaves.append(leaf_id)
             analysis["response_correlation"] = {
                 "status": "request_anchor",
                 "request_seq": int(event.get("seq") or 0),
                 "request_report_code": report_code,
+                "010a0011_leaf_ids": paired_leaves,
             }
             continue
+        response_leaf_id = str(packet.get("leaf_id") or "").lower()
+        if report_code.lower() == "0x010a0010" and response_leaf_id:
+            paired_request = pending_010a0011.pop((cid, response_leaf_id), None)
+            if paired_request is not None:
+                delta_ms = int(event.get("ts") or 0) - int(paired_request.get("ts") or 0)
+                analysis["response_correlation"] = {
+                    "status": "exact_010a0011_leaf_ack",
+                    "request_id": str(paired_request.get("id") or ""),
+                    "request_seq": int(paired_request.get("seq") or 0),
+                    "request_report_code": "0x010a0011",
+                    "response_report_code": "0x010a0010",
+                    "leaf_id": response_leaf_id,
+                    "delta_ms": delta_ms,
+                    "confidence": "confirmed",
+                    "reason": "leaf_id echoed exactly; 010a0010 status trailer observed",
+                }
+                continue
         request = latest_request.get(cid)
         if request is None:
             analysis["response_correlation"] = {

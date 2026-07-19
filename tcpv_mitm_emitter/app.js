@@ -3867,7 +3867,8 @@ function reportBusinessLabel(value) {
   const parsed = parseReportCodeNumber(value);
   if (!Number.isFinite(parsed)) return "";
   if (parsed === 0x010a001b) return "父容器";
-  if (parsed === 0x010a0011) return "配对/保护上下文（观察）";
+  if (parsed === 0x010a0011) return "服务器确认型子请求（保活/握手候选）";
+  if (parsed === 0x010a0010) return "010a0011 回执（leaf_id 回显）";
   if (parsed === 0x0102000a) return "typed leaf shell（按完整 shape 分类）";
   if (Math.floor(parsed / 0x100) === 0x011223) return `动态 metadata event family（subtype=0x${(parsed & 0xff).toString(16).padStart(2, "0")}）`;
   const family = Math.floor(parsed / 0x10000) & 0xffff;
@@ -3909,7 +3910,9 @@ function translatedReasonText(reason) {
   if (raw.includes("neutralize")) return `兜底清理（${raw}）`;
   if (raw.includes("blocklist")) return `命中黑名单清理规则（${raw}）`;
   if (raw.includes("device_preserve")) return `设备字段保护（${raw}）`;
-  if (raw.includes("010a0011")) return `010a0011 保护/兜底规则（${raw}）`;
+  if (raw.includes("local_self_preserve_ack_010a0010")) return `010a0011 本地原样保全并等待 010a0010 回执（${raw}）`;
+  if (raw.includes("010a0011_reserved_for_acknowledged_request")) return `010a0011 是服务器确认型请求，禁止用作其他 child 的通用替代（${raw}）`;
+  if (raw.includes("010a0011")) return `010a0011 不可删除保护（${raw}）`;
   if (raw.includes("011223")) return `011223xx 动态 metadata subtype（${raw}）`;
   return raw;
 }
@@ -4931,7 +4934,8 @@ function reportName(reportCode) {
   const value = Number(reportCode);
   const names = {
     0x010a001b: "container",
-    0x010a0011: "response-linked",
+    0x010a0011: "server-acknowledged-request",
+    0x010a0010: "0011-ack",
     0x0102000a: "leaf",
   };
   if (names[value]) return names[value];
@@ -4944,7 +4948,8 @@ function reportName(reportCode) {
 
 function classifyRecordBytes(byteValues, reportCode) {
   const report = Number(reportCode);
-  if (report === 0x010a0011) return "protected-response-linked";
+  if (report === 0x010a0011) return "required-server-acknowledged-request";
+  if (report === 0x010a0010) return "010a0011-ack-response";
   if (report === 0x010a001b) return "container";
   if (report === 0x0102000a) {
     const runs = extractPrintableRuns(byteValues, 4, 2);
@@ -5007,10 +5012,11 @@ function localChildSemanticProfile(record, reportCode) {
   const report = Number(reportCode);
   const rawLower = semanticAsciiView(record).toLowerCase();
   if (report === 0x010a001b) return semanticProfileValue("parent_container", "report.container", "批量上报父容器", "confirmed", ["report_code"]);
-  if (report === 0x010a0011) return semanticProfileValue("child_request_tag_or_protection_context", "control.child_context", "子请求标签/配对保护上下文", "observed", ["report_code", "historical_shape"]);
+  if (report === 0x010a0011) return semanticProfileValue("server_acknowledged_child_request", "control.acknowledged_child_request", "服务器确认型子请求（保活/握手候选）", "confirmed", ["paired_leaf_id", "010a0010_ack"]);
+  if (report === 0x010a0010) return semanticProfileValue("010a0011_ack_response", "response.ack", "010a0011 子请求回执（leaf_id 回显）", "confirmed", ["paired_leaf_id", "status_0324"]);
   if (report === 0x010a0036) return semanticProfileValue("sync_file_marker", "control.resource_sync", "配置/规则文件同步标记", "observed", ["report_code", "resource_name"]);
   if (report === 0x010a0056) return semanticProfileValue("sync_file_save_request", "control.resource_sync", "同步文件保存请求", "observed", ["report_code"]);
-  if ([0x010a0010, 0x010a0024, 0x010a0027, 0x010a0044, 0x010a0057].includes(report)) {
+  if ([0x010a0024, 0x010a0027, 0x010a0044, 0x010a0057].includes(report)) {
     return semanticProfileValue("response_feedback_fields", "response.feedback", "响应反馈/状态字段", "observed", ["fixed_response_offsets", "timeline_required"]);
   }
 
@@ -5459,7 +5465,7 @@ function buildTssTreeText(base64Text, options = {}) {
     }
     const reportText = child.reportCode !== null ? formatHexValue(child.reportCode, 8) : "-";
     const idText = Number.isFinite(child.idValue) ? ` id=${formatHexValue(child.idValue, 4)}` : "";
-    const keepText = child.reportCode === 0x010a0011 ? " keep=target" : "";
+    const keepText = child.reportCode === 0x010a0011 ? " keep=required ack=010a0010" : "";
     const tsText = Array.isArray(child.timestampCandidates) && child.timestampCandidates.length > 0
       ? ` timestamps=${child.timestampCandidates.join(",")}`
       : "";
@@ -5867,13 +5873,14 @@ function childRuleAnnotations(beforeChild, afterChild, action) {
     const report = parseReportCodeNumber(child.reportCode);
     if (!Number.isFinite(report)) continue;
     if (Math.floor(report / 0x100) === 0x011223) add(`011223xx：动态 metadata family；subtype=0x${(report & 0xff).toString(16).padStart(2, "0")}，含义由 payload 判定`);
-    if (report === 0x010a0011) add("010a0011：配对/保护上下文（观察），尚不能证明固定高级白名单含义");
+    if (report === 0x010a0011) add("010a0011：服务器确认型子请求，必须原样保留；leaf_id 与 010a0010 精确配对，保活/握手仍为候选含义");
+    if (report === 0x010a0010) add("010a0010：010a0011 回执；leaf_id 原样回显，现场尾状态为 0324");
     if (report === 0x0102000a) add("0102000a：typed leaf shell；必须按 inner_type/selector0/selector1/inner_field/len 分类");
   }
   const actionReport = compactReportToDisplay(action && action.report);
   const sourceReport = compactReportToDisplay(action && action.source);
   if (actionReport.startsWith("0x011223") || sourceReport.startsWith("0x011223")) add("011223xx：动态 metadata family，低字节只作 subtype");
-  if (actionReport === "0x010a0011" || sourceReport === "0x010a0011") add("010a0011：配对/保护上下文（观察）");
+  if (actionReport === "0x010a0011" || sourceReport === "0x010a0011") add("010a0011：不可删除、不可作为其他 child 的通用替代；等待 010a0010 回执");
 
   const semanticText = [mergedChildSemanticText(beforeChild, afterChild), action && action.reason]
     .join(" ")
@@ -7888,7 +7895,8 @@ function childRichTypeText(child) {
   if (Number(report) === 0x0102000a) {
     return role || "0102000a / typed leaf shell（shape-specific）";
   }
-  if (Number(report) === 0x010a0011) return "010a0011 / 配对或保护上下文（观察）";
+  if (Number(report) === 0x010a0011) return "010a0011 / 服务器确认型子请求（不可删除）";
+  if (Number(report) === 0x010a0010) return "010a0010 / 0011 回执（leaf_id 回显）";
   if (Number(report) === 0x010a001b) return "010a001b / 父容器";
   if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) {
     return role || (Math.floor(Number(report || 0) / 0x100) === 0x011223
