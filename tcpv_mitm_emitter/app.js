@@ -2468,6 +2468,26 @@ function readLe32(byteValues, offset) {
   ) >>> 0;
 }
 
+function readBeFloat32(byteValues, offset) {
+  if (!Array.isArray(byteValues) || offset < 0 || offset + 3 >= byteValues.length) return null;
+  try {
+    const raw = Uint8Array.from(byteValues.slice(offset, offset + 4));
+    return new DataView(raw.buffer).getFloat32(0, false);
+  } catch (_e) {
+    return null;
+  }
+}
+
+function compactDurationSeconds(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  if (value < 60) return `${value}秒`;
+  const minutes = Math.floor(value / 60);
+  const remain = value % 60;
+  if (minutes < 60) return `${minutes}分${String(remain).padStart(2, "0")}秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}时${String(minutes % 60).padStart(2, "0")}分`;
+}
+
 function isPlausibleTimestampSeconds(value) {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds >= TIMESTAMP_SECONDS_MIN && seconds <= TIMESTAMP_SECONDS_MAX;
@@ -2505,15 +2525,126 @@ function read0102000aLayout(record, report) {
   if (lenOffset < 0 || innerFieldOffset + 3 >= record.length) return null;
   const declaredLen = readBe16(record, lenOffset);
   const normalizedLen = Number.isFinite(declaredLen) && declaredLen > 0 ? declaredLen : record.length - shift;
+  const bodyStart = Math.max(0, shift + 0x24);
+  const recordEnd = Math.min(record.length, Math.max(bodyStart, shift + normalizedLen));
   return {
     shift,
     len: normalizedLen,
+    innerLen: readBe16(record, shift + 0x14),
     innerType: readBe16(record, innerTypeOffset),
     selector0: readBe32(record, selector0Offset),
     selector1: readBe32(record, selector1Offset),
     innerField: readBe32(record, innerFieldOffset),
-    bodyStart: Math.max(0, shift + 0x24),
+    bodyStart,
+    bodyEnd: recordEnd,
+    bodyLen: Math.max(0, recordEnd - bodyStart),
   };
+}
+
+function typedRaw32Views(byteValues, offset) {
+  const raw = Array.isArray(byteValues) ? byteValues.slice(offset, offset + 4) : [];
+  const be32 = readBe32(byteValues, offset);
+  const le32 = readLe32(byteValues, offset);
+  const floatBe = readBeFloat32(byteValues, offset);
+  return {
+    rawHex: raw.map((value) => Number(value).toString(16).padStart(2, "0")).join(""),
+    be32,
+    le32,
+    floatBe: Number.isFinite(floatBe) && (floatBe === 0 || (Math.abs(floatBe) >= 1e-6 && Math.abs(floatBe) <= 1e6)) ? floatBe : null,
+  };
+}
+
+function classifyProbeCounterCadence(tick, value, probeId) {
+  const safeTick = Number(tick);
+  const safeValue = Number(value);
+  if (!Number.isFinite(safeValue) || safeValue <= 0 || safeTick <= 0 || safeValue > safeTick + 1) {
+    return { kind: "typedValue", label: "按 probe_id 解释的4字节值", periodTicks: null };
+  }
+  const periodTicks = safeTick / safeValue;
+  if (Number(probeId) === 0x8000) return { kind: "globalRound", label: "全局调度轮数候选", periodTicks };
+  if (safeValue === 1 || periodTicks >= 180) return { kind: "startup", label: "启动一次/条件探测候选", periodTicks };
+  if (periodTicks <= 45) return { kind: "frequent", label: "高频探测，历史约30秒一轮", periodTicks };
+  if (periodTicks <= 90) return { kind: "minute", label: "隔轮探测，历史约60秒一轮", periodTicks };
+  return { kind: "slow", label: "慢周期/条件探测候选", periodTicks };
+}
+
+function parseTypedBodyStructure(record, layout) {
+  if (!Array.isArray(record) || !layout) return null;
+  const bodyStart = Math.max(0, Number(layout.bodyStart || 0));
+  const bodyEnd = Math.min(record.length, Number.isFinite(Number(layout.bodyEnd)) ? Number(layout.bodyEnd) : record.length);
+  if (bodyStart > bodyEnd) return null;
+  const bodyLen = Math.max(0, bodyEnd - bodyStart);
+  const innerType = Number(layout.innerType);
+
+  if (innerType === 0xfff3 && bodyLen >= 4 && (bodyLen - 4) % 6 === 0) {
+    const tick = readBe32(record, bodyStart);
+    const entries = [];
+    const cadenceCounts = { frequent: 0, minute: 0, slow: 0, startup: 0, globalRound: 0, typedValue: 0 };
+    for (let offset = bodyStart + 4; offset + 5 < bodyEnd; offset += 6) {
+      const probeId = readBe16(record, offset);
+      const value = typedRaw32Views(record, offset + 2);
+      const cadence = classifyProbeCounterCadence(tick, value.be32, probeId);
+      cadenceCounts[cadence.kind] = Number(cadenceCounts[cadence.kind] || 0) + 1;
+      entries.push({
+        index: entries.length,
+        offset,
+        probeId,
+        value,
+        valueKind: cadence.kind,
+        valueKindLabel: cadence.label,
+        periodTicks: cadence.periodTicks,
+      });
+    }
+    const selector1 = Number(layout.selector1 || 0) >>> 0;
+    return {
+      kind: "periodicProbeTable",
+      label: "周期探测调度与结果表",
+      confidence: "结构已确认 / probe_id 含义待证",
+      bodyStart,
+      bodyLen,
+      algebra: `4 + ${entries.length}×6 = ${bodyLen}`,
+      tick,
+      elapsedSeconds: tick ? Math.round(tick / 0.98) : 0,
+      selectorTickMatch: (((selector1 >>> 16) & 0xffff) === (Number(tick || 0) & 0xffff)),
+      selectorRevisionOrFlags: selector1 & 0xffff,
+      innerPair: {
+        left: (Number(layout.innerField || 0) >>> 16) & 0xffff,
+        right: Number(layout.innerField || 0) & 0xffff,
+      },
+      cadenceCounts,
+      entries,
+    };
+  }
+
+  if ([0x2001, 0x2011].includes(innerType) && bodyLen > 0 && bodyLen % 4 === 0) {
+    const words = [];
+    for (let offset = bodyStart; offset + 3 < bodyEnd; offset += 4) {
+      const value = typedRaw32Views(record, offset);
+      const setBits = [];
+      for (let bit = 0; bit < 32; bit += 1) {
+        if ((Number(value.be32) >>> bit) & 1) setBits.push(bit);
+      }
+      words.push({
+        index: words.length,
+        offset,
+        value,
+        setBits,
+        allZero: Number(value.be32) === 0,
+        allOne: Number(value.be32) === 0xffffffff,
+      });
+    }
+    const isBitmap = innerType === 0x2011;
+    return {
+      kind: isBitmap ? "bitmapWordBlock" : "fixedWordBlock",
+      label: isBitmap ? "位图/能力掩码探测块" : "固定字状态探测块",
+      confidence: "结构已确认 / 字段含义待证",
+      bodyStart,
+      bodyLen,
+      algebra: `${words.length}×u32 = ${bodyLen}`,
+      words,
+    };
+  }
+  return null;
 }
 
 function layoutMatchesKnownTimestampShape(layout, shape) {
@@ -4740,6 +4871,17 @@ function classifyRecordBytes(byteValues, reportCode) {
 
 function formatRecordValuePreview(byteValues, reportCode) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  if (Number(reportCode) === 0x0102000a) {
+    const report = detectTssReport(byteValues);
+    const layout = read0102000aLayout(byteValues, report);
+    const bodyLayout = parseTypedBodyStructure(byteValues, layout);
+    if (bodyLayout && bodyLayout.kind === "periodicProbeTable") {
+      return `结构:tick=${Number(bodyLayout.tick)} entries=${bodyLayout.entries.length} ${bodyLayout.algebra}`;
+    }
+    if (bodyLayout && ["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
+      return `结构:${bodyLayout.label} words=${bodyLayout.words.length} ${bodyLayout.algebra}`;
+    }
+  }
   const runs = extractPrintableRuns(byteValues, 3, 4);
   const text = runs
     .map((item) => String(item.text || "").trim())
@@ -4792,6 +4934,34 @@ function localChildSemanticProfile(record, reportCode) {
     const layout = read0102000aLayout(record, reportInfo);
     if (!layout) return semanticProfileValue("typed_leaf_unresolved_shape", "telemetry.typed_leaf", "探测遥测叶子（shape 未完整）", "approximate", ["report_family"]);
     const body = record.slice(Math.min(record.length, Number(layout.bodyStart || 0)));
+    const bodyLayout = parseTypedBodyStructure(record, layout);
+    if (bodyLayout && bodyLayout.kind === "periodicProbeTable") {
+      return semanticProfileValue(
+        "periodic_probe_schedule_table",
+        "telemetry.probe_scheduler",
+        "周期探测调度与结果表（probe_id 含义待证）",
+        "observed",
+        ["body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "historical_30s_counter"],
+      );
+    }
+    if (bodyLayout && bodyLayout.kind === "fixedWordBlock") {
+      return semanticProfileValue(
+        "fixed_probe_word_block",
+        "telemetry.binary_probe.words",
+        "固定字状态探测块（字段含义待证）",
+        "observed",
+        ["body_u32_slots", "inner_type_0x2001", "full_shape"],
+      );
+    }
+    if (bodyLayout && bodyLayout.kind === "bitmapWordBlock") {
+      return semanticProfileValue(
+        "probe_bitmap_or_capability_mask",
+        "telemetry.binary_probe.bitmap",
+        "位图/能力掩码探测块（bit 含义待证）",
+        "observed",
+        ["body_u32_slots", "zero_and_ffffffff_masks", "inner_type_0x2011", "full_shape"],
+      );
+    }
     const xorLower = semanticAsciiView(xorByteValues(body, 0xb6)).toLowerCase();
     const combined = `${rawLower} ${xorLower}`;
     const knownTime = KNOWN_0102000A_TIMESTAMP_LAYOUTS.find((shape) => layoutMatchesKnownTimestampShape(layout, shape));
@@ -4852,6 +5022,10 @@ function attachLocalChildSemantic(child, record) {
   child.semanticEvidence = profile.evidence;
   const reportInfo = Number(child.reportCode) === 0x0102000a ? detectTssReport(record) : null;
   child.typedLayout = reportInfo ? read0102000aLayout(record, reportInfo) : null;
+  child.bodyLayout = child.typedLayout ? parseTypedBodyStructure(record, child.typedLayout) : null;
+  if (child.bodyLayout) {
+    child.xorCommonPreview = "";
+  }
   return child;
 }
 
@@ -5421,6 +5595,38 @@ function compactReportToDisplay(value) {
   return formatReportCodeText(text);
 }
 
+function bodyLayoutSemanticLines(bodyLayout) {
+  if (!bodyLayout || typeof bodyLayout !== "object") return [];
+  if (bodyLayout.kind === "periodicProbeTable") {
+    const counts = bodyLayout.cadenceCounts || {};
+    const typed = (Array.isArray(bodyLayout.entries) ? bodyLayout.entries : [])
+      .filter((item) => item && item.valueKind === "typedValue")
+      .slice(0, 6)
+      .map((item) => `${formatHexValue(item.probeId, 4)}=${item.value.rawHex || "-"}`)
+      .join("，");
+    const lines = [
+      `body=布局 ${bodyLayout.algebra}；u32单调tick + N×(u16 probe_id + raw32 value)`,
+      `clock=tick=${Number(bodyLayout.tick || 0)} ${formatHexValue(bodyLayout.tick, 8)}；历史约0.98 tick/秒，运行约${compactDurationSeconds(bodyLayout.elapsedSeconds)}；selector高16匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}`,
+      `probes=调度分组 高频约30秒 ${Number(counts.frequent || 0)}项；约60秒 ${Number(counts.minute || 0)}项；慢周期 ${Number(counts.slow || 0)}项；启动/条件 ${Number(counts.startup || 0)}项；全局轮数 ${Number(counts.globalRound || 0)}项`,
+    ];
+    if (typed) lines.push(`typed_values=typed raw32 ${typed}`);
+    return lines;
+  }
+  if (["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
+    const words = (Array.isArray(bodyLayout.words) ? bodyLayout.words : [])
+      .map((word) => {
+        const suffix = word.allZero ? "全0" : word.allOne ? "全1" : `置位bit=${word.setBits.join("/") || "无"}`;
+        return `w${word.index}=${word.value.be32Hex || formatHexValue(word.value.be32, 8)}(${suffix})`;
+      })
+      .join("，");
+    return [
+      `body=布局 ${bodyLayout.algebra}；${bodyLayout.label} [${bodyLayout.confidence}]`,
+      `words=${words}`,
+    ];
+  }
+  return [];
+}
+
 function childSemanticLines(child) {
   if (!child || child.truncated) return [];
   const lines = [];
@@ -5433,6 +5639,7 @@ function childSemanticLines(child) {
       `shape=inner_type=${formatHexValue(layout.innerType, 4)} selector0=${formatHexValue(layout.selector0, 8)} selector1=${formatHexValue(layout.selector1, 8)} inner_field=${formatHexValue(layout.innerField, 8)} len=${Number(child.len || layout.len || 0)}`
     );
   }
+  lines.push(...bodyLayoutSemanticLines(child.bodyLayout));
   if (child.valuePreview) lines.push(`value=${child.valuePreview}`);
   if (Array.isArray(child.timestampCandidates) && child.timestampCandidates.length > 0) {
     lines.push(`timestamps=${child.timestampCandidates.join(",")}`);
@@ -5478,6 +5685,26 @@ function splitChildSemanticRows(child) {
     }
     if (line.startsWith("shape=")) {
       primaryRows.push(["完整 shape", semanticValueText(line, "shape="), "child-card-line-long child-card-shape"]);
+      continue;
+    }
+    if (line.startsWith("body=")) {
+      primaryRows.push(["Body布局", semanticValueText(line, "body="), "child-card-line-long child-card-layout"]);
+      continue;
+    }
+    if (line.startsWith("clock=")) {
+      primaryRows.push(["运行时钟", semanticValueText(line, "clock="), "child-card-line-long child-card-layout"]);
+      continue;
+    }
+    if (line.startsWith("probes=")) {
+      primaryRows.push(["探测分组", semanticValueText(line, "probes="), "child-card-line-long child-card-layout"]);
+      continue;
+    }
+    if (line.startsWith("typed_values=")) {
+      primaryRows.push(["Typed值", semanticValueText(line, "typed_values="), "child-card-line-long child-card-layout"]);
+      continue;
+    }
+    if (line.startsWith("words=")) {
+      primaryRows.push(["字段槽", semanticValueText(line, "words="), "child-card-line-long child-card-layout"]);
       continue;
     }
     if (line.startsWith("value=")) {
@@ -6263,6 +6490,40 @@ function ensureChildCommonStyles() {
       font-size: 12px;
       font-weight: 850;
     }
+    .child-body-layout-panel {
+      padding: 7px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+      background: linear-gradient(135deg, color-mix(in srgb, #22c55e 7%, var(--dump-bg)), color-mix(in srgb, #38bdf8 5%, var(--dump-bg)));
+    }
+    .child-body-layout-title {
+      color: color-mix(in srgb, #86efac 82%, var(--text));
+      font-size: 12px;
+      font-weight: 900;
+      margin-bottom: 5px;
+    }
+    .child-body-layout-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 4px;
+    }
+    .child-body-layout-item {
+      display: grid;
+      gap: 1px;
+      min-width: 0;
+      padding: 4px 6px;
+      border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--dump-bg) 84%, transparent);
+      font-size: 11px;
+    }
+    .child-body-layout-item strong {
+      color: color-mix(in srgb, #7dd3fc 82%, var(--text));
+      font-size: 10px;
+    }
+    .child-body-layout-item span {
+      color: var(--text);
+      overflow-wrap: anywhere;
+    }
     .child-hex-body {
       display: grid;
       gap: 0;
@@ -6285,10 +6546,23 @@ function ensureChildCommonStyles() {
       background: color-mix(in srgb, #38bdf8 8%, transparent);
     }
     .child-hex-row-len,
+    .child-hex-row-innerLen,
     .child-hex-row-innerType,
     .child-hex-row-selector,
     .child-hex-row-innerField {
       background: color-mix(in srgb, #a78bfa 8%, transparent);
+    }
+    .child-hex-row-bodyHeader {
+      background: color-mix(in srgb, #f59e0b 11%, transparent);
+      border-left: 2px solid color-mix(in srgb, #f59e0b 64%, transparent);
+    }
+    .child-hex-row-probeEntry {
+      background: color-mix(in srgb, #22c55e 5%, transparent);
+      border-left: 2px solid color-mix(in srgb, #22c55e 34%, transparent);
+    }
+    .child-hex-row-bodyWord {
+      background: color-mix(in srgb, #38bdf8 6%, transparent);
+      border-left: 2px solid color-mix(in srgb, #38bdf8 42%, transparent);
     }
     .child-hex-row-report .child-hex-note,
     .child-hex-row-id .child-hex-note {
@@ -6296,11 +6570,22 @@ function ensureChildCommonStyles() {
       font-weight: 800;
     }
     .child-hex-row-len .child-hex-note,
+    .child-hex-row-innerLen .child-hex-note,
     .child-hex-row-innerType .child-hex-note,
     .child-hex-row-selector .child-hex-note,
     .child-hex-row-innerField .child-hex-note {
       color: color-mix(in srgb, #c4b5fd 80%, var(--text));
       font-weight: 800;
+    }
+    .child-hex-row-bodyHeader .child-hex-note {
+      color: color-mix(in srgb, #fbbf24 86%, var(--text));
+      font-weight: 850;
+    }
+    .child-hex-row-probeEntry .child-hex-note {
+      color: color-mix(in srgb, #86efac 78%, var(--text));
+    }
+    .child-hex-row-bodyWord .child-hex-note {
+      color: color-mix(in srgb, #7dd3fc 82%, var(--text));
     }
     .child-hex-offset,
     .child-hex-bytes,
@@ -6969,20 +7254,64 @@ function childHexStructure(child, childBytes, options = {}) {
       const layout = read0102000aLayout(childBytes, report);
       if (layout) {
         const lenOffset = Number(layout.shift) + 4;
+        const innerLenOffset = Number(layout.shift) + 0x14;
         const innerTypeOffset = Number(layout.shift) + 0x16;
         const selector0Offset = Number(layout.shift) + 0x18;
         const selector1Offset = Number(layout.shift) + 0x1c;
         const innerFieldOffset = Number(layout.shift) + 0x20;
         valueStart = Number(layout.shift) + 0x24;
+        const bodyLayout = child && child.bodyLayout ? child.bodyLayout : parseTypedBodyStructure(childBytes, layout);
         addChildHexField(fields, lenOffset, 2, `total len(总长度) ${Number(layout.len)}，confirmed`, "len");
+        addChildHexField(fields, innerLenOffset, 2, `inner len(内部结构长度) ${Number(layout.innerLen || 0)}；从inner_type起覆盖到record末尾`, "innerLen");
         addChildHexField(fields, innerTypeOffset, 2, `inner type(shape字段) ${formatHexValue(layout.innerType, 4)}`, "innerType");
         addChildHexField(fields, selector0Offset, 4, `selector0(shape选择字0) ${formatHexValue(layout.selector0, 8)}`, "selector");
-        addChildHexField(fields, selector1Offset, 4, `selector1(shape选择字1) ${formatHexValue(layout.selector1, 8)}`, "selector");
+        const selector1Note = bodyLayout && bodyLayout.kind === "periodicProbeTable"
+          ? `selector1 ${formatHexValue(layout.selector1, 8)}；高16=${formatHexValue((Number(layout.selector1) >>> 16) & 0xffff, 4)}对应单调tick，低16=${Number(bodyLayout.selectorRevisionOrFlags)} revision/flags候选`
+          : `selector1(shape选择字1) ${formatHexValue(layout.selector1, 8)}`;
+        addChildHexField(fields, selector1Offset, 4, selector1Note, "selector");
         if (innerFieldOffset >= 0 && innerFieldOffset + 3 < childBytes.length) {
-          addChildHexField(fields, innerFieldOffset, 4, `inner field/body[0] ${formatHexValue(readBe32(childBytes, innerFieldOffset), 8)}，shape-specific`, "innerField");
+          const pairNote = bodyLayout && bodyLayout.kind === "periodicProbeTable"
+            ? `；u16 pair候选=${Number(bodyLayout.innerPair.left)}/${Number(bodyLayout.innerPair.right)}`
+            : "";
+          addChildHexField(fields, innerFieldOffset, 4, `inner field(shape字段) ${formatHexValue(readBe32(childBytes, innerFieldOffset), 8)}${pairNote}；它不是body[0]`, "innerField");
         }
-        if (valueStart >= 0 && valueStart < childBytes.length) {
-          addChildHexAnnotation(annotations, valueStart, `body candidate(值区候选) @${hexOffsetText(valueStart)}；XOR解析可从+0x20或+0x24择优，以下按16字节分行`);
+        if (bodyLayout && bodyLayout.kind === "periodicProbeTable") {
+          addChildHexField(
+            fields,
+            Number(bodyLayout.bodyStart),
+            4,
+            `单调运行tick ${formatHexValue(bodyLayout.tick, 8)} = ${Number(bodyLayout.tick)}；历史约0.98 tick/秒，约${compactDurationSeconds(bodyLayout.elapsedSeconds)}；selector匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}`,
+            "bodyHeader",
+          );
+          for (const item of bodyLayout.entries) {
+            const value = item.value || {};
+            const counterText = item.valueKind === "typedValue"
+              ? `BE=${Number(value.be32)} LE=${Number(value.le32)}${Number.isFinite(value.floatBe) ? ` floatBE=${Number(value.floatBe).toPrecision(7)}` : ""}`
+              : `计数候选=${Number(value.be32)}${Number.isFinite(item.periodTicks) ? `，tick/计数≈${Number(item.periodTicks).toFixed(1)}` : ""}`;
+            addChildHexField(
+              fields,
+              Number(item.offset),
+              6,
+              `探测项[${item.index}] probe_id=${formatHexValue(item.probeId, 4)}；raw32=${value.rawHex || "-"}；${counterText}；${item.valueKindLabel}`,
+              "probeEntry",
+            );
+          }
+          addChildHexAnnotation(annotations, valueStart, `body已闭合：${bodyLayout.algebra}；u32 tick + ${bodyLayout.entries.length}×(u16 probe_id + raw32 value)`);
+        } else if (bodyLayout && ["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
+          for (const word of bodyLayout.words) {
+            const value = word.value || {};
+            const flags = word.allZero ? "全0" : word.allOne ? "全1/FFFF掩码" : `BE置位bit=${word.setBits.join("/") || "无"}`;
+            addChildHexField(
+              fields,
+              Number(word.offset),
+              4,
+              `body word[${word.index}] raw=${value.rawHex || "-"}；BE=${formatHexValue(value.be32, 8)}(${Number(value.be32)})；LE=${formatHexValue(value.le32, 8)}；${flags}${Number.isFinite(value.floatBe) ? `；floatBE=${Number(value.floatBe).toPrecision(7)}` : ""}`,
+              "bodyWord",
+            );
+          }
+          addChildHexAnnotation(annotations, valueStart, `body已闭合：${bodyLayout.algebra}；${bodyLayout.label}，具体字段/bit含义待证`);
+        } else if (valueStart >= 0 && valueStart < childBytes.length) {
+          addChildHexAnnotation(annotations, valueStart, `body candidate(值区候选) @${hexOffsetText(valueStart)}；未命中已确认布局，以下按16字节分行`);
         }
       }
     }
@@ -7002,7 +7331,7 @@ function childHexStructure(child, childBytes, options = {}) {
 function buildChildHexModel(child, childBytes, options = {}) {
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return { rows: [], overlay: null, timestamps: [] };
   const { annotations, fields, valueStart, timestamps } = childHexStructure(child, childBytes, options);
-  const overlay = childBestDecodedOverlay(childBytes);
+  const overlay = child && child.bodyLayout ? null : childBestDecodedOverlay(childBytes);
   const changedOffsets = options && options.changedOffsets instanceof Set ? options.changedOffsets : null;
   const bodyStart = Number.isFinite(Number(valueStart)) ? Number(valueStart) : Math.min(16, childBytes.length);
   const normalizedFields = (Array.isArray(fields) ? fields : [])
@@ -7080,7 +7409,7 @@ function buildChildHexModel(child, childBytes, options = {}) {
 function childHexRowKindClass(kind) {
   const value = String(kind || "").trim();
   if (!value) return "";
-  if (!["report", "id", "len", "innerType", "selector", "innerField", "timestamp"].includes(value)) return "";
+  if (!["report", "id", "len", "innerLen", "innerType", "selector", "innerField", "bodyHeader", "probeEntry", "bodyWord", "timestamp"].includes(value)) return "";
   return ` child-hex-row-${value}`;
 }
 
@@ -7105,6 +7434,46 @@ function childTimestampDisplayFromNote(note) {
   };
 }
 
+function appendChildBodyLayoutPanel(wrap, bodyLayout) {
+  if (!wrap || !bodyLayout) return;
+  const panel = document.createElement("div");
+  panel.className = "child-body-layout-panel";
+  const title = document.createElement("div");
+  title.className = "child-body-layout-title";
+  title.textContent = `${bodyLayout.label || "Body结构"} · ${bodyLayout.confidence || "字段待证"}`;
+  panel.appendChild(title);
+  const grid = document.createElement("div");
+  grid.className = "child-body-layout-grid";
+  const add = (label, value) => {
+    const item = document.createElement("div");
+    item.className = "child-body-layout-item";
+    const strong = document.createElement("strong");
+    strong.textContent = label;
+    const text = document.createElement("span");
+    text.textContent = String(value || "-");
+    item.appendChild(strong);
+    item.appendChild(text);
+    grid.appendChild(item);
+  };
+  add("布局", bodyLayout.algebra);
+  if (bodyLayout.kind === "periodicProbeTable") {
+    const counts = bodyLayout.cadenceCounts || {};
+    const global = (bodyLayout.entries || []).find((entry) => Number(entry.probeId) === 0x8000);
+    add("运行tick", `${Number(bodyLayout.tick)} / 约${compactDurationSeconds(bodyLayout.elapsedSeconds)}`);
+    add("探测项", `${bodyLayout.entries.length} 项`);
+    add("周期分组", `≈30秒 ${Number(counts.frequent || 0)} · ≈60秒 ${Number(counts.minute || 0)} · 慢/条件 ${Number(counts.slow || 0) + Number(counts.startup || 0)}`);
+    add("全局轮次", global ? Number(global.value && global.value.be32) : "未见0x8000");
+    add("边界校验", `selector tick ${bodyLayout.selectorTickMatch ? "匹配" : "不匹配"} · inner pair ${bodyLayout.innerPair.left}/${bodyLayout.innerPair.right}`);
+  } else {
+    add("字段槽", `${bodyLayout.words.length} × u32`);
+    add("全0槽", bodyLayout.words.filter((word) => word.allZero).length);
+    add("全1槽", bodyLayout.words.filter((word) => word.allOne).length);
+    add("解释边界", "仅确认槽位/位图结构，具体字段与bit含义待证");
+  }
+  panel.appendChild(grid);
+  wrap.appendChild(panel);
+}
+
 function appendChildFullHexTable(box, child, childBytes, options = {}) {
   const model = buildChildHexModel(child, childBytes, options);
   const rows = model.rows;
@@ -7117,6 +7486,7 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 	  const len = Array.isArray(childBytes) ? childBytes.length : 0;
 	  title.textContent = `${childUiTerm("hex")} 完整 child bytes / ${childUiTerm("len")} ${len}`;
 	  wrap.appendChild(title);
+	  appendChildBodyLayoutPanel(wrap, child && child.bodyLayout);
 
 	  const body = document.createElement("div");
 	  body.className = "child-hex-body";
@@ -7502,6 +7872,7 @@ function childPreviewSegmentKind(label, fallbackClass = "") {
   if (value === "规则") return "rule";
   if (value === "风险") return "risk";
   if (value === "解析") return "parse";
+  if (["body布局", "运行时钟", "探测分组", "typed值", "字段槽"].includes(value)) return "parse";
   if (value === "可打印xor") return "xor";
   if (value === "时间戳" || value === "候选时间戳") return "time";
   if (value === "len" || value === "off") return "meta";
@@ -7515,6 +7886,11 @@ function childPreviewSegmentParts(rawSegment, fallbackClass = "") {
   const labels = [
     "source(来源)",
     "可打印XOR",
+    "Body布局",
+    "运行时钟",
+    "探测分组",
+    "Typed值",
+    "字段槽",
     "候选时间戳",
     "时间戳",
     "动作",
