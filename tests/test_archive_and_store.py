@@ -185,6 +185,8 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("修改前原始封包 [before/raw]", app_js)
         self.assertIn("修改后原始封包 [after/raw]", app_js)
         self.assertIn("未解密外层，不解析 child tree", app_js)
+        self.assertIn("封包概览（未解密）", app_js)
+        self.assertIn("只能按原始封包观察，未知 value 已保持", app_js)
 
     def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
         tick = 0x0426
