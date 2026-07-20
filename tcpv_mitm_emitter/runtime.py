@@ -22,6 +22,14 @@ from .semantic import analysis_from_event, analysis_needs_upgrade, analyze_paylo
 logger = logging.getLogger(__name__)
 
 
+def _normalize_instance_id(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    safe = "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)
+    return safe[:128]
+
+
 class TcpvRuntime:
     """Runtime manager for TCP packet event service and async Redis writer."""
 
@@ -50,6 +58,7 @@ class TcpvRuntime:
         self._last_spool_path = ""
         self._drop_before_ts_ms: dict[str, int] = {}
         self._analyzer = TersafeAnalyzer()
+        self._cleanup_instance_on_stop = True
 
     def start(
         self,
@@ -58,6 +67,8 @@ class TcpvRuntime:
         redis_host: str = "127.0.0.1",
         redis_port: int = 6379,
         redis_db: int = 0,
+        instance_id: str = "",
+        cleanup_on_stop: bool | None = None,
     ) -> bool:
         with self._lock:
             if self.enabled:
@@ -68,7 +79,9 @@ class TcpvRuntime:
                 redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
                 redis_client.ping()
 
-                self.instance_id = uuid.uuid4().hex
+                requested_instance_id = _normalize_instance_id(instance_id)
+                self.instance_id = requested_instance_id or uuid.uuid4().hex
+                self._cleanup_instance_on_stop = bool(cleanup_on_stop) if cleanup_on_stop is not None else not bool(requested_instance_id)
                 self.store = TcpvEventStore(redis_client=redis_client, instance_id=self.instance_id)
                 self._stop_event.clear()
                 self._drop_before_ts_ms = {}
@@ -100,7 +113,7 @@ class TcpvRuntime:
                 self._stop_event.set()
                 if self._worker_thread and self._worker_thread.is_alive():
                     self._worker_thread.join(timeout=1.0)
-                if self.store is not None:
+                if self.store is not None and self._cleanup_instance_on_stop:
                     try:
                         self.store.cleanup_instance()
                     except Exception:
@@ -131,7 +144,7 @@ class TcpvRuntime:
             if self._server_thread and self._server_thread.is_alive():
                 self._server_thread.join(timeout=3.0)
 
-            if self.store is not None:
+            if self.store is not None and self._cleanup_instance_on_stop:
                 try:
                     self.store.cleanup_instance()
                 except Exception:
@@ -152,6 +165,7 @@ class TcpvRuntime:
             self._last_write_error = ""
             self._last_spool_path = ""
             self._drop_before_ts_ms = {}
+            self._cleanup_instance_on_stop = True
             self._drain_queue()
 
     def emit_packet(
@@ -734,6 +748,8 @@ def init_emitter(
     redis_host: str = "127.0.0.1",
     redis_port: int = 6379,
     redis_db: int = 0,
+    instance_id: str = "",
+    cleanup_on_stop: bool | None = None,
 ) -> bool:
     return TCPV_RUNTIME.start(
         bind_host=bind_host,
@@ -741,6 +757,8 @@ def init_emitter(
         redis_host=redis_host,
         redis_port=redis_port,
         redis_db=redis_db,
+        instance_id=instance_id,
+        cleanup_on_stop=cleanup_on_stop,
     )
 
 
