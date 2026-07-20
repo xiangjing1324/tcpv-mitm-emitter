@@ -309,6 +309,24 @@ function installPreviewSummaryStyles() {
       --summary-chip-line: var(--hex-timestamp-line);
       font-weight: 700;
     }
+    .summary-insight-gcloud {
+      --summary-chip-color: #bae6fd;
+      --summary-chip-bg: rgba(14, 165, 233, 0.13);
+      --summary-chip-line: rgba(56, 189, 248, 0.34);
+      font-weight: 800;
+    }
+    .summary-insight-proto {
+      --summary-chip-color: #d9f99d;
+      --summary-chip-bg: rgba(132, 204, 22, 0.12);
+      --summary-chip-line: rgba(163, 230, 53, 0.30);
+      font-weight: 750;
+    }
+    .summary-insight-control {
+      --summary-chip-color: #fcd34d;
+      --summary-chip-bg: rgba(245, 158, 11, 0.13);
+      --summary-chip-line: rgba(251, 191, 36, 0.34);
+      font-weight: 800;
+    }
     .preview-hex {
       max-width: none;
       overflow: visible;
@@ -467,6 +485,121 @@ function installDumpAsciiRowStyles() {
     }
     .tree-compare-row.tree-compare-single {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .gcloud-brief {
+      margin: 8px 0 10px;
+      padding: 10px 12px;
+      border: 1px solid color-mix(in srgb, #38bdf8 30%, var(--line));
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel) 91%, #0ea5e9 9%);
+      display: grid;
+      gap: 9px;
+    }
+    .gcloud-brief-control {
+      border-color: color-mix(in srgb, #f59e0b 34%, var(--line));
+      background: color-mix(in srgb, var(--panel) 92%, #f59e0b 8%);
+    }
+    .gcloud-brief-fragment {
+      border-color: color-mix(in srgb, #facc15 36%, var(--line));
+      background: color-mix(in srgb, var(--panel) 92%, #facc15 8%);
+    }
+    .gcloud-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+    .gcloud-title {
+      min-width: 0;
+      color: var(--text);
+      font-weight: 850;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .gcloud-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      min-width: 0;
+    }
+    .gcloud-chip {
+      padding: 2px 6px;
+      border: 1px solid color-mix(in srgb, #38bdf8 30%, var(--line));
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel) 90%, #38bdf8 10%);
+      color: var(--text);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .gcloud-chip-control {
+      border-color: color-mix(in srgb, #f59e0b 38%, var(--line));
+      background: rgba(245, 158, 11, 0.12);
+    }
+    .gcloud-chip-proto {
+      border-color: color-mix(in srgb, #84cc16 34%, var(--line));
+      background: rgba(132, 204, 22, 0.11);
+    }
+    .gcloud-kv-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 6px;
+    }
+    .gcloud-kv {
+      min-width: 0;
+      padding: 6px 7px;
+      border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--panel) 86%, var(--bg));
+    }
+    .gcloud-kv-label {
+      margin-bottom: 2px;
+      color: var(--muted);
+      font-weight: 750;
+      font-size: 11px;
+    }
+    .gcloud-kv-value {
+      color: var(--text);
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+    .gcloud-node-details > summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 800;
+      list-style: none;
+    }
+    .gcloud-node-details > summary::-webkit-details-marker {
+      display: none;
+    }
+    .gcloud-node-list {
+      margin-top: 6px;
+      display: grid;
+      gap: 4px;
+    }
+    .gcloud-node-row {
+      display: grid;
+      grid-template-columns: minmax(142px, 220px) minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 5px 6px;
+      border: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+    }
+    .gcloud-node-path {
+      color: #7dd3fc;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+    .gcloud-node-value {
+      color: var(--text);
+      overflow-wrap: anywhere;
+    }
+    .gcloud-note {
+      color: var(--muted);
+      line-height: 1.45;
     }
   `;
 }
@@ -4118,6 +4251,584 @@ function bytesFromHexPrefix(hexText, maxBytes = 192) {
   return out.filter((value) => Number.isFinite(value));
 }
 
+function parseFlexibleInt(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const parsed = raw.toLowerCase().startsWith("0x")
+    ? Number.parseInt(raw.slice(2), 16)
+    : Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isGcloud65010Summary(summaryText = "") {
+  const raw = String(summaryText || "");
+  return /\btransport=tgcp65010\b/i.test(raw)
+    || /\bbeforedump=gcloud_4013\b/i.test(raw)
+    || (/\bcommand=0x(?:1001|1002|4013|9001)\b/i.test(raw) && /\b65010\b|tgcp/i.test(raw));
+}
+
+function parseGcloud65010Summary(summaryText = "") {
+  const raw = String(summaryText || "").trim();
+  const commandText = readSummaryValue(raw, "command");
+  const command = parseFlexibleInt(commandText);
+  return {
+    raw,
+    transport: readSummaryValue(raw, "transport") || "tgcp65010",
+    command,
+    commandText: command !== null ? formatHexValue(command, 4) : commandText,
+    direction: readSummaryValue(raw, "direction"),
+    seq: readSummaryValue(raw, "seq"),
+    crypto: readSummaryValue(raw, "crypto"),
+    plainLen: readSummaryValue(raw, "plain_len"),
+    padding: readSummaryValue(raw, "padding"),
+    beforedump: readSummaryValue(raw, "beforedump"),
+  };
+}
+
+function getGcloudPreviewBytes(ev, maxBytes = 384) {
+  const pay = String(ev && ev.pay ? ev.pay : "");
+  if (pay) {
+    const bytes = b64ToBytes(pay);
+    if (bytes.length > 0) return { bytes, source: "pay", complete: true };
+  }
+  for (const keyName of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
+    const bytes = bytesFromHexPrefix(ev && ev[keyName], maxBytes);
+    if (bytes.length > 0) {
+      return { bytes, source: keyName, complete: false };
+    }
+  }
+  return { bytes: [], source: "", complete: false };
+}
+
+function readGcloudBe16(bytes, offset) {
+  if (!Array.isArray(bytes) || offset + 2 > bytes.length) return null;
+  return ((bytes[offset] & 0xff) << 8) | (bytes[offset + 1] & 0xff);
+}
+
+function readGcloudBe32(bytes, offset) {
+  if (!Array.isArray(bytes) || offset + 4 > bytes.length) return null;
+  return (
+    ((bytes[offset] & 0xff) * 0x1000000)
+    + ((bytes[offset + 1] & 0xff) << 16)
+    + ((bytes[offset + 2] & 0xff) << 8)
+    + (bytes[offset + 3] & 0xff)
+  ) >>> 0;
+}
+
+function parseGcloudTgcpFrame(bytes) {
+  if (!Array.isArray(bytes) || bytes.length < 8 || bytes[0] !== 0x33 || bytes[1] !== 0x66) {
+    return null;
+  }
+  const command = readGcloudBe16(bytes, 6);
+  return {
+    magic: "33 66",
+    command,
+    commandText: command !== null ? formatHexValue(command, 4) : "-",
+    sideByte: bytes.length > 8 ? bytes[8] : null,
+    seqByte: bytes.length > 12 ? bytes[12] : null,
+    headerLen: readGcloudBe32(bytes, 13),
+    payloadLen: readGcloudBe32(bytes, 17),
+    totalLen: bytes.length,
+    prefix: bytes.slice(0, Math.min(16, bytes.length)).map(childHexByteText).join(" "),
+  };
+}
+
+function readGcloudVarint(bytes, pos, end) {
+  const limit = Math.min(Array.isArray(bytes) ? bytes.length : 0, Number(end || 0));
+  let value = 0;
+  let shift = 0;
+  let cursor = Number(pos || 0);
+  for (let count = 0; cursor < limit && count < 10; count += 1) {
+    const byte = bytes[cursor] & 0xff;
+    cursor += 1;
+    value += (byte & 0x7f) * (2 ** shift);
+    if ((byte & 0x80) === 0) {
+      return { ok: true, value, next: cursor };
+    }
+    shift += 7;
+  }
+  return { ok: false, value: 0, next: Number(pos || 0) };
+}
+
+function gcloudBytesToUtf8(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  try {
+    if (typeof TextDecoder !== "undefined") {
+      return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(byteValues));
+    }
+  } catch (_e) {
+    return "";
+  }
+  if (byteValues.every((byte) => byte >= 32 && byte < 127)) {
+    return byteValues.map((byte) => String.fromCharCode(byte)).join("");
+  }
+  return "";
+}
+
+function isGcloudVisibleString(text) {
+  const raw = String(text || "");
+  if (!raw) return false;
+  for (const ch of raw) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || code === 127) return false;
+  }
+  return true;
+}
+
+function parseGcloudProtoNodes(bytes, start = 0, end = null, depth = 0, maxNodes = 120) {
+  const limit = Math.min(Array.isArray(bytes) ? bytes.length : 0, end === null ? bytes.length : Number(end || 0));
+  let pos = Math.max(0, Number(start || 0));
+  const nodes = [];
+  let reason = "";
+  while (pos < limit && nodes.length < maxNodes) {
+    const tagOffset = pos;
+    const tag = readGcloudVarint(bytes, pos, limit);
+    if (!tag.ok || tag.value === 0) {
+      reason = "bad tag";
+      return { nodes, ok: false, end: pos, reason };
+    }
+    const field = Math.floor(tag.value / 8);
+    const wire = tag.value & 7;
+    if (field <= 0 || field > 512) {
+      reason = `field ${field} out of range`;
+      return { nodes, ok: false, end: tagOffset, reason };
+    }
+    pos = tag.next;
+    const node = {
+      off: tagOffset,
+      field,
+      wire,
+      depth,
+      end: pos,
+    };
+
+    if (wire === 0) {
+      const value = readGcloudVarint(bytes, pos, limit);
+      if (!value.ok) {
+        reason = `field[${field}] bad varint`;
+        return { nodes, ok: false, end: pos, reason };
+      }
+      node.value = value.value;
+      node.end = value.next;
+      pos = value.next;
+    } else if (wire === 1) {
+      if (pos + 8 > limit) {
+        node.truncated = true;
+        node.available = Math.max(0, limit - pos);
+        node.end = limit;
+        nodes.push(node);
+        return { nodes, ok: false, end: limit, reason: `field[${field}] fixed64 truncated` };
+      }
+      node.valueHex = bytes.slice(pos, pos + 8).map(childHexByteText).join(" ");
+      node.end = pos + 8;
+      pos += 8;
+    } else if (wire === 2) {
+      const lengthInfo = readGcloudVarint(bytes, pos, limit);
+      if (!lengthInfo.ok) {
+        reason = `field[${field}] bad length`;
+        return { nodes, ok: false, end: pos, reason };
+      }
+      const valueStart = lengthInfo.next;
+      const valueEnd = valueStart + lengthInfo.value;
+      node.len = lengthInfo.value;
+      node.valueStart = valueStart;
+      if (valueEnd > limit) {
+        node.truncated = true;
+        node.available = Math.max(0, limit - valueStart);
+        node.end = limit;
+        nodes.push(node);
+        return {
+          nodes,
+          ok: false,
+          end: limit,
+          reason: `field[${field}] len ${lengthInfo.value} > remain ${Math.max(0, limit - valueStart)}`,
+        };
+      }
+      const valueBytes = bytes.slice(valueStart, valueEnd);
+      const text = gcloudBytesToUtf8(valueBytes);
+      if (text && isGcloudVisibleString(text)) {
+        node.string = text;
+      } else if (depth < 3 && lengthInfo.value >= 2) {
+        const child = parseGcloudProtoNodes(bytes, valueStart, valueEnd, depth + 1, maxNodes - nodes.length);
+        if (child.nodes.length > 0) {
+          node.children = child.nodes;
+          node.childOk = child.ok;
+          node.childReason = child.reason || "";
+        }
+      }
+      node.end = valueEnd;
+      pos = valueEnd;
+    } else if (wire === 5) {
+      if (pos + 4 > limit) {
+        node.truncated = true;
+        node.available = Math.max(0, limit - pos);
+        node.end = limit;
+        nodes.push(node);
+        return { nodes, ok: false, end: limit, reason: `field[${field}] fixed32 truncated` };
+      }
+      node.valueHex = bytes.slice(pos, pos + 4).map(childHexByteText).join(" ");
+      node.end = pos + 4;
+      pos += 4;
+    } else {
+      reason = `wire ${wire} unsupported`;
+      return { nodes, ok: false, end: pos, reason };
+    }
+    nodes.push(node);
+  }
+  if (nodes.length >= maxNodes && pos < limit) {
+    return { nodes, ok: false, end: pos, reason: "node limit reached" };
+  }
+  return { nodes, ok: pos === limit, end: pos, reason };
+}
+
+function walkGcloudProtoNodes(nodes, path = [], topIndex = -1, out = []) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  list.forEach((node, index) => {
+    const nextTopIndex = path.length === 0 ? index : topIndex;
+    const nextPath = path.concat(Number(node && node.field));
+    out.push({ node, path: nextPath, topIndex: nextTopIndex });
+    walkGcloudProtoNodes(node && node.children, nextPath, nextTopIndex, out);
+  });
+  return out;
+}
+
+function gcloudPathKey(path) {
+  return (Array.isArray(path) ? path : []).join(".");
+}
+
+function gcloudPathText(path, topIndex = -1) {
+  const parts = Array.isArray(path) ? path : [];
+  if (parts.length <= 0) return "node";
+  const fieldText = parts.map((field) => `field[${field}]`).join(".");
+  if (parts.length === 1 && Number.isFinite(Number(topIndex))) {
+    return `node[${Number(topIndex)}] ${fieldText}`;
+  }
+  return fieldText;
+}
+
+function findGcloudCommandMatches(byteValues, maxBytes = 512) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const text = bytesToLatin1String(byteValues.slice(0, Math.min(maxBytes, byteValues.length)));
+  const out = [];
+  for (const match of text.matchAll(/CS[A-Za-z0-9_]{4,}/g)) {
+    out.push({ off: Number(match.index || 0), text: String(match[0] || "") });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function chooseGcloudCommandDisplay(structuredName, roughName) {
+  const structured = String(structuredName || "").trim();
+  const rough = String(roughName || "").trim();
+  if (!structured) return rough;
+  if (rough && rough.startsWith(structured) && rough.length <= structured.length + 2) return rough;
+  return structured;
+}
+
+function analyzeGcloudProtoCandidate(bytes, start, completeSource) {
+  const parsed = parseGcloudProtoNodes(bytes, start, bytes.length, 0, 120);
+  const flat = walkGcloudProtoNodes(parsed.nodes);
+  const strings = flat.filter((item) => item.node && item.node.string);
+  const commandField = strings.find((item) => /^CS[A-Za-z0-9_]{4,}$/.test(String(item.node.string || "")));
+  const parentKey = commandField ? gcloudPathKey(commandField.path.slice(0, -1)) : "";
+  const sibling = (field) => flat.find((item) => (
+    gcloudPathKey(item.path.slice(0, -1)) === parentKey && Number(item.node && item.node.field) === Number(field)
+  ));
+  const roughMatch = findGcloudCommandMatches(bytes.slice(start), 160)[0] || null;
+  const roughName = roughMatch ? roughMatch.text : "";
+  const commandName = commandField ? String(commandField.node.string || "") : "";
+  const commandDisplay = chooseGcloudCommandDisplay(commandName, roughName);
+  const commandIdNode = sibling(3);
+  const moduleNode = sibling(8);
+  const languageNode = sibling(9);
+  const topBody = flat.find((item) => item.path.length === 1 && Number(item.node && item.node.field) === 2);
+  const covered = Math.max(0, Number(parsed.end || start) - Number(start || 0));
+  const score = (parsed.ok ? 100000 : 0)
+    + (commandDisplay ? 20000 : 0)
+    + (flat.length > 0 ? 4000 : 0)
+    + Math.min(covered, 20000)
+    - Math.max(0, Number(start || 0)) * 40;
+  const fragment = Boolean(!parsed.ok && commandDisplay);
+  return {
+    start,
+    sourceComplete: !!completeSource,
+    ok: parsed.ok,
+    fragment,
+    end: parsed.end,
+    reason: parsed.reason || "",
+    nodes: parsed.nodes,
+    flat,
+    strings,
+    commandField,
+    commandName,
+    commandDisplay,
+    roughName,
+    commandId: commandIdNode && commandIdNode.node ? commandIdNode.node.value : null,
+    module: moduleNode && moduleNode.node ? String(moduleNode.node.string || "") : "",
+    language: languageNode && languageNode.node ? String(languageNode.node.string || "") : "",
+    bodyNode: topBody ? topBody.node : null,
+    covered,
+    score,
+  };
+}
+
+function analyzeGcloudBusinessProto(bytes, completeSource = true) {
+  if (!Array.isArray(bytes) || bytes.length <= 0) return null;
+  const starts = new Set();
+  for (let i = 0; i < Math.min(8, bytes.length); i += 1) starts.add(i);
+  for (const match of findGcloudCommandMatches(bytes, 192)) {
+    const from = Math.max(0, Number(match.off || 0) - 10);
+    for (let pos = from; pos <= Number(match.off || 0); pos += 1) {
+      if (bytes[pos] === 0x0a) starts.add(pos);
+    }
+  }
+  const candidates = Array.from(starts)
+    .filter((start) => Number.isFinite(start) && start >= 0 && start < bytes.length)
+    .map((start) => analyzeGcloudProtoCandidate(bytes, start, completeSource))
+    .sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+  return candidates[0] || null;
+}
+
+function gcloudProtoStatusText(proto) {
+  if (!proto) return "payload 未加载";
+  if (proto.ok && Number(proto.start || 0) === 0) return "protobuf ok";
+  if (proto.ok && Number(proto.start || 0) > 0) return `lead ${Number(proto.start)} + protobuf ok`;
+  if (proto.commandDisplay) return `proto fragment${proto.reason ? ` (${proto.reason})` : ""}`;
+  return proto.reason ? `protobuf 待证 (${proto.reason})` : "protobuf 待证";
+}
+
+function gcloudNodeValueText(node) {
+  if (!node) return "-";
+  if (node.truncated) {
+    return `len=${Number(node.len || 0)} available=${Number(node.available || 0)} fragment`;
+  }
+  if (node.string) return `string "${shortenText(node.string, 120)}"`;
+  if (Number(node.wire) === 0 && node.value !== undefined) {
+    const value = Number(node.value);
+    return `varint ${Number.isFinite(value) ? `${value} (${formatHexValue(value)})` : String(node.value)}`;
+  }
+  if (Number(node.wire) === 2) {
+    const childStatus = node.childOk === false && node.childReason ? `; child ${node.childReason}` : "";
+    return `len=${Number(node.len || 0)}${childStatus}`;
+  }
+  if (node.valueHex) return `wire${Number(node.wire)} ${node.valueHex}`;
+  return `wire${Number(node.wire)}`;
+}
+
+function gcloudProtoNodeRows(proto, maxRows = 18) {
+  if (!proto || !Array.isArray(proto.flat)) return [];
+  const rows = [];
+  const seen = new Set();
+  const add = (item) => {
+    if (!item || !item.node) return;
+    const key = gcloudPathKey(item.path);
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push({
+      path: gcloudPathText(item.path, item.topIndex),
+      value: gcloudNodeValueText(item.node),
+    });
+  };
+  for (const item of proto.flat) {
+    if (rows.length >= maxRows) break;
+    if (item.path.length <= 2 || item.node.string || item.node.truncated) add(item);
+  }
+  return rows;
+}
+
+function analyzeGcloudEvent(ev, summaryText = "") {
+  if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return null;
+  const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary));
+  const preview = getGcloudPreviewBytes(ev);
+  const bytes = preview.bytes;
+  const frame = parseGcloudTgcpFrame(bytes);
+  const command = meta.command !== null ? meta.command : (frame ? frame.command : null);
+
+  if (command === 0x9001) {
+    return {
+      kind: "control",
+      meta,
+      bytes,
+      frame,
+      title: "TGCP 9001 控制帧",
+      chips: [
+        "TGCP 9001",
+        meta.direction ? `dir=${meta.direction}` : "",
+        meta.seq ? `seq=${meta.seq}` : "",
+        frame && Number.isFinite(Number(frame.payloadLen)) ? `payload=${Number(frame.payloadLen)}` : "",
+      ].filter(Boolean),
+      rows: [
+        { label: "说明", value: "payload_len=0 的控制旁路帧；不是 4013 业务密文，因此不进入 AES 解密。" },
+        { label: "Header", value: frame ? `header_len=${frame.headerLen ?? "-"} total=${frame.totalLen}` : "raw preview 未加载" },
+        { label: "Magic", value: frame ? `${frame.magic} command=${frame.commandText}` : meta.commandText || "-" },
+      ],
+      nodeRows: [],
+    };
+  }
+
+  if (command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted") {
+    const proto = analyzeGcloudBusinessProto(bytes, preview.complete);
+    const title = proto && proto.commandDisplay
+      ? `GCloud 明文 ${proto.commandDisplay}`
+      : "GCloud 4013 明文";
+    const bodyNode = proto && proto.bodyNode ? proto.bodyNode : null;
+    return {
+      kind: proto && proto.ok ? "proto" : "fragment",
+      meta,
+      bytes,
+      proto,
+      title,
+      chips: [
+        proto && proto.commandDisplay ? proto.commandDisplay : "4013 decrypted",
+        proto && proto.commandId !== null && proto.commandId !== undefined ? `cmd_id=${formatHexValue(proto.commandId)}` : "",
+        proto && proto.module ? `module=${proto.module}` : "",
+        proto && proto.language ? proto.language : "",
+        proto ? gcloudProtoStatusText(proto) : "",
+      ].filter(Boolean),
+      rows: [
+        { label: "命令", value: proto && proto.commandDisplay ? proto.commandDisplay : "未从当前 payload/prefix 识别到 CS* 名称" },
+        { label: "Proto", value: proto ? gcloudProtoStatusText(proto) : "payload 未加载" },
+        { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${bytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
+        { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 field[2] body" },
+        { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
+      ],
+      nodeRows: gcloudProtoNodeRows(proto),
+    };
+  }
+
+  return {
+    kind: "raw",
+    meta,
+    bytes,
+    frame,
+    title: command !== null ? `TGCP ${formatHexValue(command, 4)}` : "TGCP 65010",
+    chips: [
+      command !== null ? formatHexValue(command, 4) : "",
+      meta.direction ? `dir=${meta.direction}` : "",
+      meta.crypto || "",
+    ].filter(Boolean),
+    rows: [
+      { label: "说明", value: "当前帧不是已解密的 4013 业务明文，按 TGCP 原始帧观察。" },
+      { label: "Header", value: frame ? `header_len=${frame.headerLen ?? "-"} payload_len=${frame.payloadLen ?? "-"}` : "raw preview 未加载" },
+    ],
+    nodeRows: [],
+  };
+}
+
+function buildGcloudSummaryInsights(ev, summaryText = "") {
+  if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return [];
+  const info = analyzeGcloudEvent(ev, summaryText);
+  if (!info) return [];
+  const out = [];
+  if (info.kind === "control") {
+    out.push({
+      kind: "control",
+      text: "TGCP 9001 控制",
+      title: "payload_len=0；控制旁路帧，不走 4013 AES 解密。",
+    });
+    if (info.meta && info.meta.seq) {
+      out.push({ kind: "gcloud", text: `seq ${info.meta.seq}`, title: info.meta.raw });
+    }
+    return out;
+  }
+  const proto = info.proto || null;
+  const name = proto && proto.commandDisplay ? proto.commandDisplay : "";
+  out.push({
+    kind: "gcloud",
+    text: name || (info.meta && info.meta.commandText ? `${info.meta.commandText} ${info.meta.crypto || ""}`.trim() : "GCloud 65010"),
+    title: info.meta ? info.meta.raw : "",
+  });
+  if (proto) {
+    out.push({
+      kind: "proto",
+      text: proto.ok ? "protobuf ok" : "proto fragment",
+      title: gcloudProtoStatusText(proto),
+    });
+    if (proto.module) out.push({ kind: "type", text: proto.module, title: "protobuf field[8] module" });
+  }
+  return out;
+}
+
+function appendGcloudKv(grid, label, value) {
+  const text = String(value || "").trim();
+  if (!text) return;
+  const item = document.createElement("div");
+  item.className = "gcloud-kv";
+  const key = document.createElement("div");
+  key.className = "gcloud-kv-label";
+  key.textContent = label;
+  const val = document.createElement("div");
+  val.className = "gcloud-kv-value";
+  val.textContent = text;
+  item.appendChild(key);
+  item.appendChild(val);
+  grid.appendChild(item);
+}
+
+function buildGcloudPacketPanel(ev, summaryText = "") {
+  const info = analyzeGcloudEvent(ev, summaryText);
+  if (!info) return null;
+  const panel = document.createElement("section");
+  panel.className = `gcloud-brief gcloud-brief-${info.kind || "raw"}`;
+
+  const head = document.createElement("div");
+  head.className = "gcloud-head";
+  const title = document.createElement("div");
+  title.className = "gcloud-title";
+  title.textContent = info.title || "GCloud 65010";
+  head.appendChild(title);
+  const chips = document.createElement("div");
+  chips.className = "gcloud-chip-list";
+  for (const text of (Array.isArray(info.chips) ? info.chips : []).slice(0, 7)) {
+    const chip = document.createElement("span");
+    chip.className = `gcloud-chip${info.kind === "control" ? " gcloud-chip-control" : ""}${info.kind === "proto" ? " gcloud-chip-proto" : ""}`;
+    chip.textContent = text;
+    chips.appendChild(chip);
+  }
+  head.appendChild(chips);
+  panel.appendChild(head);
+
+  const grid = document.createElement("div");
+  grid.className = "gcloud-kv-grid";
+  for (const row of Array.isArray(info.rows) ? info.rows : []) {
+    appendGcloudKv(grid, row.label, row.value);
+  }
+  if (grid.childElementCount > 0) panel.appendChild(grid);
+
+  if (Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
+    const details = document.createElement("details");
+    details.className = "gcloud-node-details";
+    details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = `protobuf nodes ×${info.nodeRows.length}`;
+    details.appendChild(summary);
+    const list = document.createElement("div");
+    list.className = "gcloud-node-list";
+    for (const row of info.nodeRows) {
+      const nodeRow = document.createElement("div");
+      nodeRow.className = "gcloud-node-row";
+      const path = document.createElement("div");
+      path.className = "gcloud-node-path";
+      path.textContent = row.path;
+      const value = document.createElement("div");
+      value.className = "gcloud-node-value";
+      value.textContent = row.value;
+      nodeRow.appendChild(path);
+      nodeRow.appendChild(value);
+      list.appendChild(nodeRow);
+    }
+    details.appendChild(list);
+    panel.appendChild(details);
+  } else if (info.kind === "control") {
+    const note = document.createElement("div");
+    note.className = "gcloud-note";
+    note.textContent = "这类 45 字节高频包是 9001 控制帧，不属于“业务明文解不开”的样本。";
+    panel.appendChild(note);
+  }
+
+  return panel;
+}
+
 function eventPrefixText(ev) {
   const chunks = [];
   for (const key of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
@@ -4562,17 +5273,20 @@ function buildSummaryInsightStrip(ev, summaryText) {
   const hasStructuredSemantic = !!(
     ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
   );
-  if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic) return null;
-  const candidates = [
-    compactOpaqueInsight(summaryText),
-    compactSynthesisInsight(summaryText),
-    ...compactStructuredSemanticInsights(ev),
-    compactPacketSemanticInsight(ev),
-    ...compactPacketTextInsights(ev, summaryText),
-    compactChildInsight(summaryText),
-    compactTypeInsight(summaryText),
-    compactTimeInsight(summaryText),
-  ].filter(Boolean);
+  const isGcloud = isGcloud65010Summary(summaryText);
+  if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic && !isGcloud) return null;
+  const candidates = isGcloud
+    ? buildGcloudSummaryInsights(ev, summaryText).filter(Boolean)
+    : [
+      compactOpaqueInsight(summaryText),
+      compactSynthesisInsight(summaryText),
+      ...compactStructuredSemanticInsights(ev),
+      compactPacketSemanticInsight(ev),
+      ...compactPacketTextInsights(ev, summaryText),
+      compactChildInsight(summaryText),
+      compactTypeInsight(summaryText),
+      compactTimeInsight(summaryText),
+    ].filter(Boolean);
   if (candidates.length <= 0) return null;
   const strip = document.createElement("span");
   strip.className = "summary-insights";
@@ -9410,7 +10124,12 @@ function buildEventBody(ev, hideAscii, eventId = "") {
 
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
+  const isGcloudEvent = isGcloud65010Summary(summaryText);
   body.appendChild(buildEventReadableSummary(ev, summaryText));
+  const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
+  if (gcloudPanel) {
+    body.appendChild(gcloudPanel);
+  }
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
@@ -9434,7 +10153,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
 
-	  if (isDecodedRequest) {
+	  if (isDecodedRequest && !isGcloudEvent) {
 	    const timeStrip = buildEventTimestampStrip(summaryText, beforePay, decodedPay);
 	    if (timeStrip) body.appendChild(timeStrip);
 	  }
@@ -9459,23 +10178,24 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const isRawSource = opaqueUndecrypted || sourceKey === "full" || sourceKey === "raw_after";
     const isDecodedSource = !opaqueUndecrypted && sourceShowsDecodedAsciiRows(sourceKey);
     const showDecodedAsciiRows = false;
-    const tailChecksum = isDecodedSource ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
+    const enableTersafeAnnotations = !isGcloudEvent;
+    const tailChecksum = enableTersafeAnnotations && isDecodedSource ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
     const timestampHighlights =
-      isRawSource
+      isRawSource || !enableTersafeAnnotations
         ? []
         : mergeTimestampHighlightItems(
           collectTimestampHighlightsForPayload(base64Text),
           collectChildTimestampHighlightsForPayload(base64Text, summaryText)
         );
     const idfvHighlights =
-      !isRawSource
+      !isRawSource && enableTersafeAnnotations
         ? collectIdfvHighlightsForPayload(base64Text)
         : [];
     const historyHighlights =
-      !isRawSource
+      !isRawSource && enableTersafeAnnotations
         ? collectHistoryOpenidHighlightsForPayload(base64Text)
         : [];
-    const semanticInfo = isRawSource ? null : collectPacketSemanticInfoForPayload(base64Text);
+    const semanticInfo = isRawSource || !enableTersafeAnnotations ? null : collectPacketSemanticInfoForPayload(base64Text);
     const timestampSummary = summarizeTimestampHighlights(timestampHighlights);
 
     const sectionTitle = document.createElement(collapsed ? "summary" : "div");
@@ -9661,7 +10381,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
   }
 
-  if (isRequest && (hasBeforeDump || hasDecodedDump)) {
+  if (!isGcloudEvent && isRequest && (hasBeforeDump || hasDecodedDump)) {
     const childCompare = buildChildComparePanel(beforePay, decodedPay, summaryText);
     if (childCompare) {
       childCompare.classList.add("child-compare-inline");
@@ -9676,7 +10396,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         body.appendChild(treeRow);
       }
     }
-  } else if (!isRequest && hasDecodedDump) {
+  } else if (!isGcloudEvent && !isRequest && hasDecodedDump) {
     const responseBeforePay = hasBeforeDump ? beforePay : "";
     const childCompare = buildChildComparePanel(responseBeforePay, decodedPay, summaryText);
     if (childCompare) {
@@ -9690,7 +10410,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     }
   }
 
-  const analysisGrid = buildEventAnalysisGrid(ev);
+  const analysisGrid = isGcloudEvent ? null : buildEventAnalysisGrid(ev);
   if (analysisGrid) {
     if (semanticCompareAdded) {
       const details = document.createElement("details");

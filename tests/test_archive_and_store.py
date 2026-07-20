@@ -241,6 +241,21 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertNotIn("hex-ascii-under-label", app_js)
         self.assertIn("border-left: 2px solid", web_py)
 
+    def test_tcpview_frontend_has_gcloud_65010_proto_view(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function isGcloud65010Summary", app_js)
+        self.assertIn("function analyzeGcloudBusinessProto", app_js)
+        self.assertIn("function buildGcloudPacketPanel", app_js)
+        self.assertIn("TGCP 9001 控制帧", app_js)
+        self.assertIn("payload_len=0 的控制旁路帧", app_js)
+        self.assertIn("proto fragment", app_js)
+        self.assertIn("protobuf nodes", app_js)
+        self.assertIn("summary-insight-gcloud", app_js)
+        self.assertIn("isGcloudEvent ? null : buildEventAnalysisGrid", app_js)
+        self.assertIn("!isGcloudEvent && isRequest", app_js)
+
     def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
         tick = 0x0426
         entries = [
