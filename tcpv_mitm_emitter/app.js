@@ -11087,12 +11087,12 @@ async function tick() {
 
     if (state.tick % 3 === 1 || !state.flowId) {
       await loadFlows(false);
-      if (state.flowId && state.events.length === 0) {
+      if (state.flowId && state.events.length === 0 && !state.loading) {
         await selectFlow(state.flowId);
       }
     }
 
-    if (state.autoRefresh && state.flowId) {
+    if (state.autoRefresh && state.flowId && !state.loading) {
       await syncLatestEvents();
     }
 
