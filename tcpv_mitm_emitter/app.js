@@ -1410,6 +1410,11 @@ async function syncLatestEvents(options = {}) {
           state.events = state.events.slice(-MAX_EVENTS_IN_MEMORY);
         }
         changed = true;
+        if (drain) {
+          renderEvents();
+          changed = false;
+          shouldRenderEmpty = false;
+        }
       } else if (state.events.length === 0) {
         shouldRenderEmpty = true;
       }
