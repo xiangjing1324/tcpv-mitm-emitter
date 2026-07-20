@@ -4739,7 +4739,7 @@ function gcloudPathKey(path) {
   return (Array.isArray(path) ? path : []).join(".");
 }
 
-function gcloudPathText(path, topIndex = -1) {
+function gcloudRawPathText(path, topIndex = -1) {
   const parts = Array.isArray(path) ? path : [];
   if (parts.length <= 0) return "node";
   const fieldText = parts.map((field) => `field[${field}]`).join(".");
@@ -4747,6 +4747,39 @@ function gcloudPathText(path, topIndex = -1) {
     return `node[${Number(topIndex)}] ${fieldText}`;
   }
   return fieldText;
+}
+
+function gcloudPathText(path, topIndex = -1) {
+  return gcloudRawPathText(path, topIndex);
+}
+
+function gcloudProtoPathLookup(proto) {
+  if (!proto || !Array.isArray(proto.flat)) return new Map();
+  if (proto._gcloudPathLookup instanceof Map) return proto._gcloudPathLookup;
+  const lookup = new Map();
+  for (const item of proto.flat) {
+    const key = gcloudPathKey(item && item.path);
+    if (key && !lookup.has(key)) lookup.set(key, item);
+  }
+  proto._gcloudPathLookup = lookup;
+  return lookup;
+}
+
+function gcloudSemanticPathText(path, proto = null, topIndex = -1, node = null) {
+  const parts = Array.isArray(path) ? path : [];
+  if (parts.length <= 0) return "node";
+  const lookup = gcloudProtoPathLookup(proto);
+  const labels = parts.map((field, index) => {
+    const prefix = parts.slice(0, index + 1);
+    const exactNode = index === parts.length - 1 ? node : null;
+    const found = lookup.get(gcloudPathKey(prefix));
+    const alias = gcloudProtoFieldAlias(prefix, exactNode || (found && found.node), proto);
+    return alias || `f${Number(field)}`;
+  });
+  if (parts.length === 1 && Number.isFinite(Number(topIndex))) {
+    return `node[${Number(topIndex)}] ${labels[0]}`;
+  }
+  return labels.join(" > ");
 }
 
 function findGcloudCommandMatches(byteValues, maxBytes = 512) {
@@ -5536,7 +5569,8 @@ function appendGcloudProtoTreeRows(container, nodes, proto, bytes, path = [], de
     const occurrence = Number(seenByField.get(Number(node.field)) || 0);
     seenByField.set(Number(node.field), occurrence + 1);
     const alias = gcloudProtoFieldAlias(nextPath, node, proto);
-    const pathText = gcloudPathText(nextPath, nextTopIndex);
+    const rawPathText = gcloudRawPathText(nextPath, nextTopIndex);
+    const pathText = gcloudSemanticPathText(nextPath, proto, nextTopIndex, node);
     let keyText = alias || (repeated ? `item[${occurrence}]` : `value ${index + 1}`);
     if (alias && repeated) {
       keyText = alias.endsWith("[]")
@@ -5547,7 +5581,7 @@ function appendGcloudProtoTreeRows(container, nodes, proto, bytes, path = [], de
     const row = document.createElement("div");
     row.className = `gcloud-tree-row ${gcloudTreeRowTone(node, alias)}`;
     row.style.setProperty("--depth", String(Math.min(depth, 8)));
-    row.title = pathText;
+    row.title = `${pathText} · ${rawPathText}`;
 
     const key = document.createElement("div");
     key.className = "gcloud-tree-key";
@@ -5618,7 +5652,8 @@ function gcloudProtoNodeRows(proto, maxRows = 18) {
     if (seen.has(key)) return;
     seen.add(key);
     rows.push({
-      path: gcloudPathText(item.path, item.topIndex),
+      path: gcloudSemanticPathText(item.path, proto, item.topIndex, item.node),
+      rawPath: gcloudRawPathText(item.path, item.topIndex),
       value: gcloudNodeValueText(item.node),
     });
   };
@@ -5754,7 +5789,7 @@ function gcloudProtoTimeRows(proto, maxItems = 6) {
     if (!item || !item.node || Number(item.node.wire) !== 0 || item.node.value === undefined) continue;
     const epoch = gcloudEpochScalarInfo(item.node.valueText || item.node.value);
     if (!epoch) continue;
-    const alias = gcloudProtoFieldAlias(item.path, item.node, proto) || gcloudPathText(item.path, item.topIndex);
+    const alias = gcloudProtoFieldAlias(item.path, item.node, proto) || gcloudSemanticPathText(item.path, proto, item.topIndex, item.node);
     const key = `${alias}|${epoch.text}|${epoch.unit}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -5823,7 +5858,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         { label: "命令", value: proto && proto.commandDisplay ? proto.commandDisplay : "未从当前 payload/prefix 识别到 CS* 名称" },
         { label: "Proto", value: proto ? gcloudProtoStatusText(proto) : "payload 未加载" },
         { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${protoBytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
-        { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 field[2] body" },
+        { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 body (field[2])" },
         ...timeRows,
         ...profileRows,
         ...(compression ? [{ label: "压缩", value: `LZ4 block ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
@@ -5950,16 +5985,18 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     details.className = "gcloud-node-details";
     details.open = !protoTree;
     const summary = document.createElement("summary");
-    summary.textContent = `raw field paths ×${info.nodeRows.length}`;
+    summary.textContent = `语义路径 ×${info.nodeRows.length}`;
     details.appendChild(summary);
     const list = document.createElement("div");
     list.className = "gcloud-node-list";
     for (const row of info.nodeRows) {
       const nodeRow = document.createElement("div");
       nodeRow.className = "gcloud-node-row";
+      if (row.rawPath) nodeRow.title = `${row.path} · ${row.rawPath}`;
       const path = document.createElement("div");
       path.className = "gcloud-node-path";
       path.textContent = row.path;
+      if (row.rawPath) path.title = row.rawPath;
       const value = document.createElement("div");
       value.className = "gcloud-node-value";
       value.textContent = row.value;
