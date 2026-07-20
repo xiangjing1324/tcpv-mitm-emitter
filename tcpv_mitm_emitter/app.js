@@ -427,18 +427,16 @@ function installDumpAsciiRowStyles() {
   }
   style.textContent = `
     .hex-ascii-under-line {
-      color: color-mix(in srgb, var(--hex-ascii-color) 86%, var(--muted));
-      opacity: 0.96;
-    }
-    .hex-ascii-under-label {
-      color: color-mix(in srgb, var(--hex-ascii-color) 76%, var(--muted));
-      font-weight: 700;
+      display: block;
+      color: color-mix(in srgb, var(--hex-ascii-color) 74%, var(--muted));
+      opacity: 0.82;
     }
     .hex-ascii-under {
-      color: color-mix(in srgb, var(--hex-ascii-color) 92%, var(--text));
+      color: color-mix(in srgb, var(--hex-ascii-color) 82%, var(--text));
     }
-    .hex-ascii-under-note {
-      color: color-mix(in srgb, var(--hex-ascii-color) 72%, var(--muted));
+    .hex-ascii-under-spacer {
+      color: transparent;
+      user-select: none;
     }
     .hex-byte-crc-tail {
       color: color-mix(in srgb, #facc15 88%, var(--text));
@@ -1825,7 +1823,8 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
       });
       continue;
     }
-    let ascii = chunk.map((v) => (v >= 32 && v <= 126 ? String.fromCharCode(v) : ".")).join("");
+    const asciiStats = dumpAsciiStats(chunk);
+    let ascii = chunk.map((v) => dumpAsciiChar(v)).join("");
     if (compactAscii && ascii.length > 10) {
       ascii = `${ascii.slice(0, 10)}…`;
     }
@@ -1842,6 +1841,8 @@ function formatHexDump(base64Text, hideAscii, annotationIndex = null, options = 
       historyIndexes,
       checksumTailIndexes,
       ascii,
+      asciiPrintableCount: asciiStats.printableCount,
+      asciiMaxRun: asciiStats.maxRun,
       compactAscii,
       comment: String(annotations.get(i) || ""),
     });
@@ -1889,14 +1890,44 @@ function renderHexBytesHtml(row) {
   return `<span class="hex-bytes">${parts.join(gap)}</span>`;
 }
 
+function isPrintableAsciiByte(byte) {
+  const value = Number(byte || 0) & 0xff;
+  return value >= 32 && value <= 126;
+}
+
 function dumpAsciiChar(byte) {
   const value = Number(byte || 0) & 0xff;
-  if (value >= 32 && value <= 126) return String.fromCharCode(value);
-  return ".";
+  if (isPrintableAsciiByte(value)) return String.fromCharCode(value);
+  return " ";
+}
+
+function dumpAsciiStats(bytes) {
+  const values = Array.isArray(bytes) ? bytes : [];
+  let printableCount = 0;
+  let currentRun = 0;
+  let maxRun = 0;
+  for (const byte of values) {
+    if (isPrintableAsciiByte(byte)) {
+      printableCount += 1;
+      currentRun += 1;
+      maxRun = Math.max(maxRun, currentRun);
+    } else {
+      currentRun = 0;
+    }
+  }
+  return { printableCount, maxRun };
+}
+
+function shouldRenderAsciiUnderRow(row) {
+  const printableCount = Number(row && row.asciiPrintableCount);
+  const maxRun = Number(row && row.asciiMaxRun);
+  if (!Number.isFinite(printableCount) || printableCount <= 0) return false;
+  return maxRun >= 3 || printableCount >= 5;
 }
 
 function renderHexAsciiUnderHtml(row) {
   if (!row || !Array.isArray(row.bytes) || !Array.isArray(row.groupSizes)) return "";
+  if (!shouldRenderAsciiUnderRow(row)) return "";
   let offsetInChunk = 0;
   const parts = row.groupSizes.map((size, groupIndex) => {
     const bytes = row.bytes.slice(offsetInChunk, offsetInChunk + size);
@@ -1906,8 +1937,9 @@ function renderHexAsciiUnderHtml(row) {
     return escapeHtml(text.padEnd(Math.max(0, width), " "));
   });
   const gap = escapeHtml(String(row.groupGap || "  "));
-  const note = row.comment ? ` <span class="hex-ascii-under-note">ASCII row</span>` : "";
-  return `<span class="hex-ascii-under-line"><span class="hex-ascii-under-label">ascii </span> <span class="hex-ascii-under">${parts.join(gap)}</span>${note}</span>`;
+  const spacerWidth = String(row.offset || "").length + 1;
+  const spacer = "&nbsp;".repeat(Math.max(0, spacerWidth));
+  return `<span class="hex-ascii-under-line"><span class="hex-ascii-under-spacer">${spacer}</span><span class="hex-ascii-under">${parts.join(gap)}</span></span>`;
 }
 
 function renderHexBodyHtml(dump, hideAscii, options = {}) {

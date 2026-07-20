@@ -226,6 +226,17 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("封包概览（未解密）", app_js)
         self.assertIn("只能按原始封包观察，未知 value 已保持", app_js)
 
+    def test_tcpview_frontend_keeps_decoded_hex_dump_quiet(self):
+        root = Path(__file__).parents[1]
+        app_js = (root / "tcpv_mitm_emitter" / "app.js").read_text(encoding="utf-8")
+        web_py = (root / "tcpv_mitm_emitter" / "web.py").read_text(encoding="utf-8")
+        self.assertIn('return " ";', app_js)
+        self.assertIn("function shouldRenderAsciiUnderRow(row)", app_js)
+        self.assertIn("hex-ascii-under-spacer", app_js)
+        self.assertNotIn("ASCII row", app_js)
+        self.assertNotIn("hex-ascii-under-label", app_js)
+        self.assertIn("border-left: 2px solid", web_py)
+
     def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
         tick = 0x0426
         entries = [

@@ -1334,7 +1334,10 @@ INDEX_HTML = """
     }
 
     .hex-head {
-      padding: 6px 9px;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 5px 9px;
       border-bottom: 1px solid var(--line);
       background: var(--dump-head-bg);
       color: var(--muted);
@@ -1345,9 +1348,9 @@ INDEX_HTML = """
 
     .hex-body {
       margin: 0;
-      padding: 8px 9px;
+      padding: 7px 9px 8px;
       white-space: pre;
-      line-height: 1.45;
+      line-height: 1.34;
       word-break: normal;
       overflow-wrap: normal;
       font-variant-numeric: tabular-nums;
@@ -1395,6 +1398,7 @@ INDEX_HTML = """
 
     .hex-ascii {
       color: var(--hex-ascii-color);
+      opacity: 0.82;
     }
 
     .hex-ascii-compact {
@@ -1407,7 +1411,7 @@ INDEX_HTML = """
     }
 
     .hex-comment {
-      color: color-mix(in srgb, var(--accent) 76%, var(--text));
+      color: color-mix(in srgb, var(--accent) 64%, var(--muted));
       display: inline-block;
       max-width: none;
       white-space: pre;
@@ -1418,12 +1422,18 @@ INDEX_HTML = """
 
     .hex-comment-block {
       display: block;
-      margin-left: 8ch;
-      margin-top: 1px;
+      margin-left: 9ch;
+      margin-top: 2px;
+      margin-bottom: 2px;
+      padding: 2px 8px;
+      border-left: 2px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+      border-radius: 0 4px 4px 0;
+      background: color-mix(in srgb, var(--accent) 7%, transparent);
       max-width: min(148ch, calc(100vw - 240px));
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: normal;
+      line-height: 1.38;
     }
 
     .tree-shell {
