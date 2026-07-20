@@ -1394,7 +1394,7 @@ async function syncLatestEvents(options = {}) {
   try {
     const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
     const needPayloadInList = state.search.active && modeSpec.scope === "full";
-    const includeAnalysisInList = !currentFlowLooksLikeGcloud65010();
+    const includeAnalysisInList = false;
     let page = 0;
     let changed = false;
     let shouldRenderEmpty = false;
