@@ -594,7 +594,7 @@ function installDumpAsciiRowStyles() {
     .gcloud-tree-row {
       --depth: 0;
       display: grid;
-      grid-template-columns: minmax(170px, 280px) minmax(74px, 118px) minmax(0, 1fr);
+      grid-template-columns: minmax(120px, 220px) minmax(68px, 92px) minmax(220px, 1.25fr) minmax(180px, 1fr);
       gap: 8px;
       align-items: start;
       margin-left: calc(var(--depth) * 18px);
@@ -607,13 +607,6 @@ function installDumpAsciiRowStyles() {
       color: #7dd3fc;
       font-weight: 850;
       overflow-wrap: anywhere;
-    }
-    .gcloud-tree-field {
-      display: block;
-      margin-top: 1px;
-      color: var(--muted);
-      font-weight: 650;
-      font-size: 11px;
     }
     .gcloud-tree-type {
       color: color-mix(in srgb, var(--muted) 84%, var(--text));
@@ -651,9 +644,27 @@ function installDumpAsciiRowStyles() {
       line-height: 1.35;
       overflow-wrap: anywhere;
     }
+    .gcloud-tree-raw {
+      min-width: 0;
+      color: color-mix(in srgb, var(--muted) 78%, var(--text));
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .gcloud-tree-raw-empty {
+      color: color-mix(in srgb, var(--muted) 54%, transparent);
+    }
     .gcloud-tree-fact-raw {
       flex-basis: 100%;
       white-space: normal;
+    }
+    @media (max-width: 1100px) {
+      .gcloud-tree-row {
+        grid-template-columns: minmax(110px, 190px) minmax(64px, 82px) minmax(0, 1fr);
+      }
+      .gcloud-tree-raw {
+        grid-column: 3;
+      }
     }
     .gcloud-node-list {
       margin-top: 6px;
@@ -4989,7 +5000,6 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
   };
   const valueBytes = gcloudNodeValueBytes(node, bytes);
   if (valueBytes.length > 0) {
-    add("raw_hex", gcloudHexBytes(valueBytes, 192), "gcloud-tree-fact-raw");
     const utf8 = gcloudBytesToUtf8(valueBytes);
     if (utf8 && isGcloudVisibleString(utf8) && !node.string) add("utf8", `"${shortenText(utf8, 240)}"`, "gcloud-tree-fact-raw");
     const ascii = gcloudReadableByteText(valueBytes);
@@ -5050,9 +5060,17 @@ function appendGcloudTreeValue(valueEl, node, bytes, meaning = "", pathText = ""
   }
 }
 
+function appendGcloudTreeRaw(rawEl, node, bytes) {
+  const valueBytes = gcloudNodeValueBytes(node, bytes);
+  rawEl.textContent = valueBytes.length > 0 ? gcloudHexBytes(valueBytes, 192) : "-";
+  rawEl.title = valueBytes.length > 0 ? `raw value bytes (${valueBytes.length})` : "no raw value bytes";
+  if (valueBytes.length <= 0) rawEl.classList.add("gcloud-tree-raw-empty");
+}
+
 function appendGcloudProtoTreeRows(container, nodes, proto, bytes, path = [], depth = 0, topIndex = -1, budget = null) {
   const list = Array.isArray(nodes) ? nodes : [];
   const countByField = new Map();
+  const seenByField = new Map();
   for (const node of list) {
     const field = Number(node && node.field);
     if (!Number.isFinite(field)) continue;
@@ -5068,21 +5086,25 @@ function appendGcloudProtoTreeRows(container, nodes, proto, bytes, path = [], de
     const nextTopIndex = path.length === 0 ? index : topIndex;
     const nextPath = path.concat(Number(node.field));
     const repeated = Number(countByField.get(Number(node.field)) || 0) > 1;
+    const occurrence = Number(seenByField.get(Number(node.field)) || 0);
+    seenByField.set(Number(node.field), occurrence + 1);
     const alias = gcloudProtoFieldAlias(nextPath, node, proto);
-    const fieldText = `${path.length === 0 ? `node[${nextTopIndex}] ` : ""}field[${Number(node.field)}]${repeated ? "[]" : ""}`;
     const pathText = gcloudPathText(nextPath, nextTopIndex);
+    let keyText = alias || (repeated ? `item[${occurrence}]` : `value ${index + 1}`);
+    if (alias && repeated) {
+      keyText = alias.endsWith("[]")
+        ? `${alias.slice(0, -2)}[${occurrence}]`
+        : `${alias}[${occurrence}]`;
+    }
 
     const row = document.createElement("div");
     row.className = "gcloud-tree-row";
     row.style.setProperty("--depth", String(Math.min(depth, 8)));
+    row.title = pathText;
 
     const key = document.createElement("div");
     key.className = "gcloud-tree-key";
-    key.textContent = alias || fieldText;
-    const raw = document.createElement("span");
-    raw.className = "gcloud-tree-field";
-    raw.textContent = alias ? `${fieldText} · ${pathText}` : pathText;
-    key.appendChild(raw);
+    key.textContent = keyText;
 
     const type = document.createElement("div");
     type.className = "gcloud-tree-type";
@@ -5092,9 +5114,14 @@ function appendGcloudProtoTreeRows(container, nodes, proto, bytes, path = [], de
     value.className = "gcloud-tree-value";
     appendGcloudTreeValue(value, node, bytes, alias || "", pathText);
 
+    const raw = document.createElement("div");
+    raw.className = "gcloud-tree-raw";
+    appendGcloudTreeRaw(raw, node, bytes);
+
     row.appendChild(key);
     row.appendChild(type);
     row.appendChild(value);
+    row.appendChild(raw);
     container.appendChild(row);
 
     if (Array.isArray(node.children) && node.children.length > 0) {
@@ -5122,9 +5149,13 @@ function buildGcloudProtoTree(proto, bytes = []) {
     const value = document.createElement("div");
     value.className = "gcloud-tree-value gcloud-tree-value-empty";
     value.textContent = `tree display capped at ${state.max} nodes`;
+    const raw = document.createElement("div");
+    raw.className = "gcloud-tree-raw gcloud-tree-raw-empty";
+    raw.textContent = "-";
     row.appendChild(key);
     row.appendChild(type);
     row.appendChild(value);
+    row.appendChild(raw);
     tree.appendChild(row);
   }
   return tree;
