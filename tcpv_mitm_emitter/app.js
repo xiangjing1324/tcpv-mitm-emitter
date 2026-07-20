@@ -118,6 +118,7 @@ const ANALYSIS_UTF8_MIN_CHARS = 2;
 const ANALYSIS_UTF8_MAX_ITEMS = 8;
 const ANALYSIS_BASE64_MAX_ITEMS = 6;
 const ANALYSIS_BASE64_MAX_BYTES = 512;
+const GCLOUD_BASE64_ANALYSIS_CACHE_MAX = 512;
 const ANALYSIS_XOR_SCAN_MAX_BYTES = 768;
 const PRINTABLE_RUN_ANCHOR_PATTERNS = [
   /\d{10,24}/,
@@ -172,6 +173,7 @@ const XOR_KEY_PRIORITY = new Map([
   [0xb3, 2],
   [0x8e, 1],
 ]);
+const GCLOUD_BASE64_ANALYSIS_CACHE = new Map();
 const TIMESTAMP_SECONDS_MIN = 1_672_531_200; // 2023-01-01
 const TIMESTAMP_SECONDS_MAX = 1_893_456_000; // 2030-01-01
 const TIMESTAMP_MAX_MARKS_PER_DUMP = 8;
@@ -5091,6 +5093,7 @@ function gcloudProtoFieldAlias(path, node, proto) {
   if (/^(online|chat|mail|security|mall|role)$/i.test(text)) return "module?";
   if (/^zh[-_]/i.test(text)) return "language?";
   if (text.length >= 8 && /[\u4e00-\u9fff]/.test(text) && /[？?。！，,]/.test(text)) return "text?";
+  if (gcloudAnalyzeBase64String(text)) return "base64_blob?";
   return "";
 }
 
@@ -5102,6 +5105,7 @@ function gcloudProtoTypeText(node) {
     if (hexInfo && hexInfo.kind === "ace-xor") return "ACE/xor";
     if (hexInfo && hexInfo.kind === "double-hex") return "hex->hex";
     if (hexInfo) return "hex-string";
+    if (gcloudAnalyzeBase64String(node.string)) return "base64";
     return "string";
   }
   if (Number(node.wire) === 0) return "varint";
@@ -5446,6 +5450,108 @@ function gcloudAnalyzeHexString(text) {
   };
 }
 
+function gcloudBase64DecodedLength(normalized) {
+  const raw = String(normalized || "").replace(/\s+/g, "");
+  if (!raw) return 0;
+  const padded = raw.length + ((4 - (raw.length % 4)) % 4);
+  const pad = raw.endsWith("==") ? 2 : (raw.endsWith("=") ? 1 : 0);
+  return Math.max(0, Math.floor((padded * 3) / 4) - pad);
+}
+
+function gcloudBytesToBinaryString(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  let out = "";
+  for (const byte of bytes) out += String.fromCharCode(byte & 0xff);
+  return out;
+}
+
+function gcloudBase64RoundTripOk(normalized, decodedBytes) {
+  if (typeof btoa !== "function") return true;
+  try {
+    const encoded = btoa(gcloudBytesToBinaryString(decodedBytes)).replace(/=+$/g, "");
+    const source = String(normalized || "").replace(/=+$/g, "");
+    return encoded === source;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function gcloudDecodedByteProfile(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length <= 0) return "";
+  const utf8 = normalizeVisibleText(decodeUtf8Strict(bytes));
+  if (/^[\[{]/.test(utf8)) return "JSON/text";
+  if (/^<\?xml|^<plist/i.test(utf8)) return "XML/plist";
+  if (bytes.length >= 4) {
+    const head4 = gcloudHexSlice(bytes, 0, 4).replace(/\s+/g, "");
+    if (head4 === "1f8b0800" || head4.startsWith("1f8b08")) return "gzip";
+    if (head4 === "04224d18") return "LZ4 frame";
+    if (head4 === "504b0304") return "ZIP";
+    if (head4 === "89504e47") return "PNG";
+    if (head4 === "25504446") return "PDF";
+    if (head4 === "cafebabe" || head4 === "feedface" || head4 === "feedfacf" || head4 === "cefaedfe" || head4 === "cffaedfe") return "Mach-O";
+    if (readBe32(bytes, 0) === 1 && readBe16(bytes, 4) !== null && readBe16(bytes, 4) <= bytes.length) return "binary record";
+  }
+  if (bytes.length >= 2 && bytes[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(bytes[1] & 0xff)) return "zlib";
+  if (gcloudReadableByteText(bytes)) return "text";
+  const parsed = parseGcloudProtoNodes(bytes, 0, bytes.length, 0, 20);
+  if (parsed && parsed.ok && Array.isArray(parsed.nodes) && parsed.nodes.length > 0) return "protobuf?";
+  const entropy = gcloudByteEntropy(bytes);
+  if (entropy >= 7.2) return "high-entropy binary";
+  return "binary";
+}
+
+function gcloudRememberBase64Analysis(key, value) {
+  const cacheKey = String(key || "");
+  if (!cacheKey) return value;
+  if (GCLOUD_BASE64_ANALYSIS_CACHE.size >= GCLOUD_BASE64_ANALYSIS_CACHE_MAX) {
+    const firstKey = GCLOUD_BASE64_ANALYSIS_CACHE.keys().next().value;
+    if (firstKey) GCLOUD_BASE64_ANALYSIS_CACHE.delete(firstKey);
+  }
+  GCLOUD_BASE64_ANALYSIS_CACHE.set(cacheKey, value);
+  return value;
+}
+
+function gcloudAnalyzeBase64String(text) {
+  const compact = String(text || "").replace(/\s+/g, "");
+  if (compact.length < 24 || compact.length > 16384) return null;
+  if (GCLOUD_BASE64_ANALYSIS_CACHE.has(compact)) return GCLOUD_BASE64_ANALYSIS_CACHE.get(compact);
+  if (gcloudIsHexText(compact, 16)) return null;
+  const variety = [/[A-Z]/, /[a-z]/, /\d/, /[+/=_-]/].filter((re) => re.test(compact)).length;
+  if (variety < 3) return null;
+  const normalized = normalizeBase64Candidate(compact);
+  if (!normalized) return gcloudRememberBase64Analysis(compact, null);
+  const decodedLength = gcloudBase64DecodedLength(normalized);
+  if (decodedLength < 12) return gcloudRememberBase64Analysis(compact, null);
+  const decoded = b64ToBytes(normalized);
+  if (!Array.isArray(decoded) || decoded.length < 12) return gcloudRememberBase64Analysis(compact, null);
+  if (!gcloudBase64RoundTripOk(normalized, decoded)) return gcloudRememberBase64Analysis(compact, null);
+
+  const profile = gcloudDecodedByteProfile(decoded);
+  const facts = [
+    { label: "source", value: `${compact.length} base64 chars -> ${decoded.length} bytes`, className: "gcloud-tree-fact-source" },
+    { label: "profile", value: profile, className: "gcloud-tree-fact-header" },
+    { label: "entropy", value: `${gcloudByteEntropy(decoded).toFixed(2)} bits/byte`, className: "gcloud-tree-fact-number" },
+  ];
+
+  const decodedText = describeDecodedBytes(decoded);
+  if (decodedText && decodedText.text) {
+    facts.push({
+      label: "decoded_text",
+      value: `"${shortenText(decodedText.text, 180)}"`,
+      className: "gcloud-tree-fact-text gcloud-tree-fact-raw",
+    });
+  }
+
+  return gcloudRememberBase64Analysis(compact, {
+    kind: "base64",
+    summary: `base64 -> ${decoded.length}-byte ${profile}`,
+    facts,
+    payload: decoded,
+    profile,
+  });
+}
+
 function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
   if (!node) return [];
   const facts = [];
@@ -5475,6 +5581,13 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
         for (const fact of hexInfo.facts) {
           add(fact.label, fact.value, fact.className || "");
         }
+      } else {
+        const base64Info = gcloudAnalyzeBase64String(node.string);
+        if (base64Info && Array.isArray(base64Info.facts)) {
+          for (const fact of base64Info.facts) {
+            add(fact.label, fact.value, fact.className || "");
+          }
+        }
       }
     }
   }
@@ -5487,6 +5600,8 @@ function gcloudProtoTreeValueText(node) {
   if (node.string) {
     const hexInfo = gcloudAnalyzeHexString(node.string);
     if (hexInfo) return hexInfo.summary;
+    const base64Info = gcloudAnalyzeBase64String(node.string);
+    if (base64Info) return base64Info.summary;
     return `"${node.string}"`;
   }
   if (Number(node.wire) === 0 && node.value !== undefined) {
@@ -5536,6 +5651,7 @@ function gcloudTreeRowTone(node, alias = "") {
   const meaning = String(alias || "").toLowerCase();
   if (node && node.string) {
     if (gcloudAnalyzeHexString(node.string)) return "gcloud-tree-tone-binary";
+    if (gcloudAnalyzeBase64String(node.string)) return "gcloud-tree-tone-binary";
     return "gcloud-tree-tone-text";
   }
   if (/^(header|cmd_id|command|module|language)/.test(meaning)) return "gcloud-tree-tone-meta";
@@ -5559,6 +5675,13 @@ function appendGcloudTreeRaw(rawEl, node, bytes) {
     if (hexInfo && Array.isArray(hexInfo.payload) && hexInfo.payload.length > 0) {
       rawEl.textContent = `decoded ${hexInfo.payload.length}B: ${gcloudHexBytes(hexInfo.payload, 192)}`;
       rawEl.title = `decoded payload bytes (${hexInfo.payload.length})`;
+      rawEl.classList.add("gcloud-tree-raw-decoded");
+      return;
+    }
+    const base64Info = gcloudAnalyzeBase64String(node.string);
+    if (base64Info && Array.isArray(base64Info.payload) && base64Info.payload.length > 0) {
+      rawEl.textContent = `base64 decoded ${base64Info.payload.length}B: ${gcloudHexBytes(base64Info.payload, 192)}`;
+      rawEl.title = `base64 decoded payload bytes (${base64Info.payload.length})`;
       rawEl.classList.add("gcloud-tree-raw-decoded");
       return;
     }
