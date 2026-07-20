@@ -749,6 +749,17 @@ function installDumpAsciiRowStyles() {
     .gcloud-tree-raw-decoded {
       color: color-mix(in srgb, #f9a8d4 72%, var(--text));
     }
+    .gcloud-tree-raw-layered {
+      display: grid;
+      gap: 3px;
+      color: color-mix(in srgb, var(--muted) 78%, var(--text));
+    }
+    .gcloud-tree-raw-source {
+      color: color-mix(in srgb, #94a3b8 80%, var(--text));
+    }
+    .gcloud-tree-raw-layered .gcloud-tree-raw-decoded {
+      color: color-mix(in srgb, #f9a8d4 76%, var(--text));
+    }
     .gcloud-tree-fact-raw {
       flex-basis: 100%;
       display: grid;
@@ -5663,6 +5674,13 @@ function gcloudTreeRowTone(node, alias = "") {
   return "gcloud-tree-tone-data";
 }
 
+function appendGcloudRawLayer(rawEl, className, text) {
+  const line = document.createElement("div");
+  line.className = className;
+  line.textContent = text;
+  rawEl.appendChild(line);
+}
+
 function appendGcloudTreeRaw(rawEl, node, bytes) {
   const decodedHexChildren = gcloudNodeDecodedHexChildren(node);
   if (Number(node && node.wire) === 2 && decodedHexChildren.length > 0) {
@@ -5673,18 +5691,21 @@ function appendGcloudTreeRaw(rawEl, node, bytes) {
     return;
   }
   if (node && node.string) {
+    const valueBytes = gcloudNodeValueBytes(node, bytes);
     const hexInfo = gcloudAnalyzeHexString(node.string);
     if (hexInfo && Array.isArray(hexInfo.payload) && hexInfo.payload.length > 0) {
-      rawEl.textContent = `decoded ${hexInfo.payload.length}B: ${gcloudHexBytes(hexInfo.payload, 192)}`;
-      rawEl.title = `decoded payload bytes (${hexInfo.payload.length})`;
-      rawEl.classList.add("gcloud-tree-raw-decoded");
+      rawEl.classList.add("gcloud-tree-raw-layered");
+      appendGcloudRawLayer(rawEl, "gcloud-tree-raw-source", `raw string ${valueBytes.length}B: ${gcloudHexBytes(valueBytes, 96)}`);
+      appendGcloudRawLayer(rawEl, "gcloud-tree-raw-decoded", `decoded ${hexInfo.payload.length}B: ${gcloudHexBytes(hexInfo.payload, 160)}`);
+      rawEl.title = `raw string bytes (${valueBytes.length}); decoded payload bytes (${hexInfo.payload.length})`;
       return;
     }
     const base64Info = gcloudAnalyzeBase64String(node.string);
     if (base64Info && Array.isArray(base64Info.payload) && base64Info.payload.length > 0) {
-      rawEl.textContent = `base64 decoded ${base64Info.payload.length}B: ${gcloudHexBytes(base64Info.payload, 192)}`;
-      rawEl.title = `base64 decoded payload bytes (${base64Info.payload.length})`;
-      rawEl.classList.add("gcloud-tree-raw-decoded");
+      rawEl.classList.add("gcloud-tree-raw-layered");
+      appendGcloudRawLayer(rawEl, "gcloud-tree-raw-source", `raw string ${valueBytes.length}B: ${gcloudHexBytes(valueBytes, 96)}`);
+      appendGcloudRawLayer(rawEl, "gcloud-tree-raw-decoded", `base64 decoded ${base64Info.payload.length}B: ${gcloudHexBytes(base64Info.payload, 160)}`);
+      rawEl.title = `raw base64 string bytes (${valueBytes.length}); base64 decoded payload bytes (${base64Info.payload.length})`;
       return;
     }
   }
