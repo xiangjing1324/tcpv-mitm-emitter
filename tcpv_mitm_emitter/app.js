@@ -740,6 +740,10 @@ function installDumpAsciiRowStyles() {
     .gcloud-tree-raw-empty {
       color: color-mix(in srgb, var(--muted) 54%, transparent);
     }
+    .gcloud-tree-raw-container {
+      color: color-mix(in srgb, #94a3b8 76%, var(--text));
+      font-style: italic;
+    }
     .gcloud-tree-raw-decoded {
       color: color-mix(in srgb, #f9a8d4 72%, var(--text));
     }
@@ -5154,6 +5158,11 @@ function gcloudNodeValueBytes(node, bytes) {
   return [];
 }
 
+function gcloudNodeDecodedHexChildren(node) {
+  if (!node || !Array.isArray(node.children)) return [];
+  return node.children.filter((child) => child && child.string && gcloudAnalyzeHexString(child.string));
+}
+
 function gcloudNodeRawBytes(node, bytes) {
   if (!node || !Array.isArray(bytes)) return [];
   const start = Math.max(0, Number(node.off || 0));
@@ -5450,6 +5459,11 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
     const epoch = gcloudEpochScalarInfo(node.valueText || node.value);
     if (epoch) add("time?", `${epoch.text} (${epoch.unit})`, "gcloud-tree-fact-time");
   }
+  const decodedHexChildren = gcloudNodeDecodedHexChildren(node);
+  if (Number(node.wire) === 2 && decodedHexChildren.length > 0) {
+    add("layer", `outer protobuf container; decoded hex shown in ${decodedHexChildren.length} child row${decodedHexChildren.length === 1 ? "" : "s"}`, "gcloud-tree-fact-source");
+    return facts;
+  }
   if (valueBytes.length > 0) {
     const utf8 = gcloudBytesToUtf8(valueBytes);
     if (utf8 && isGcloudVisibleString(utf8) && !node.string) add("utf8", `"${shortenText(utf8, 240)}"`, "gcloud-tree-fact-raw");
@@ -5532,10 +5546,18 @@ function gcloudTreeRowTone(node, alias = "") {
 }
 
 function appendGcloudTreeRaw(rawEl, node, bytes) {
+  const decodedHexChildren = gcloudNodeDecodedHexChildren(node);
+  if (Number(node && node.wire) === 2 && decodedHexChildren.length > 0) {
+    const childCount = Array.isArray(node.children) ? node.children.length : 0;
+    rawEl.textContent = `outer proto · ${Number(node.len || 0)}B -> decoded child`;
+    rawEl.title = `Parent value contains ${childCount} protobuf child row${childCount === 1 ? "" : "s"}; decoded payload bytes are shown on the child row.`;
+    rawEl.classList.add("gcloud-tree-raw-container");
+    return;
+  }
   if (node && node.string) {
     const hexInfo = gcloudAnalyzeHexString(node.string);
     if (hexInfo && Array.isArray(hexInfo.payload) && hexInfo.payload.length > 0) {
-      rawEl.textContent = gcloudHexBytes(hexInfo.payload, 192);
+      rawEl.textContent = `decoded ${hexInfo.payload.length}B: ${gcloudHexBytes(hexInfo.payload, 192)}`;
       rawEl.title = `decoded payload bytes (${hexInfo.payload.length})`;
       rawEl.classList.add("gcloud-tree-raw-decoded");
       return;
