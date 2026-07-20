@@ -5015,7 +5015,7 @@ function gcloudProtoFieldAlias(path, node, proto) {
     if (/^GenericGPUBrand$/i.test(text) || /GPU(?:Brand|Vendor|Model)/i.test(text)) return "gpu_brand";
     if (/^Mozilla\/\d/i.test(text)) return "user_agent";
     if (/^itopid$/i.test(text)) return "account_key";
-    if (/^qq_qq-\d+-iap-\d+-\d+-[A-Za-z0-9_-]+$/i.test(text)) return "iap_inc_id?";
+    if (/^qq_qq-\d+-iap-\d+-/i.test(text)) return "iap_inc_id?";
     if (/^\d{10,20}$/.test(text)) return "account_id?";
   }
   const contentAlias = gcloudStringContentAlias(text);
@@ -5654,7 +5654,15 @@ function gcloudProtoProfileRows(proto, ev = null) {
   const accountId = cidAccount ? cidAccount[1] : gcloudFirstString(strings, (text) => /^\d{10,20}$/.test(text));
   const accountKeyIndex = strings.findIndex((item) => /^itopid$/i.test(String(item && item.text ? item.text : "")));
   const accountKey = accountKeyIndex >= 0 ? strings[accountKeyIndex].text : "";
-  const iapIncId = gcloudFirstString(strings, (text) => /^qq_qq-\d+-iap-\d+-\d+-[A-Za-z0-9_-]+$/i.test(text));
+  let iapIncId = gcloudFirstString(strings, (text) => /^qq_qq-\d+-iap-\d+-\d+-[A-Za-z0-9_-]+$/i.test(text));
+  if (!iapIncId) {
+    const iapIndex = strings.findIndex((item) => /^qq_qq-\d+-iap-\d+-/i.test(String(item && item.text ? item.text : "")));
+    if (iapIndex >= 0) {
+      const first = String(strings[iapIndex].text || "");
+      const next = String(strings[iapIndex + 1] && strings[iapIndex + 1].text ? strings[iapIndex + 1].text : "");
+      iapIncId = /^[A-Za-z0-9_-]{3,}$/i.test(next) ? `${first}${next}` : first;
+    }
+  }
   const endpoint = gcloudFirstString(strings, (text) => /^(?:\d{1,3}\.){3}\d{1,3}:\d+$/.test(text))
     || gcloudFirstString(strings, (text) => /^\[[0-9a-f:]+\]:(?!0$)\d+$/i.test(text));
   const avatar = gcloudFirstString(strings, (text) => /^https?:\/\//i.test(text) && /qlogo\.cn\//i.test(text));
