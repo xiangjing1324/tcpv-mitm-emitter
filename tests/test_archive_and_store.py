@@ -101,13 +101,16 @@ class FakeRedis:
     def get(self, key):
         return self.values.get(key)
 
+    def exists(self, key):
+        return int(key in self.values or key in self.hashes or key in self.sets or key in self.streams)
+
     def set(self, key, value):
         self.values[key] = int(value)
         return True
 
-    def xadd(self, key, fields, maxlen=None, approximate=True):
+    def xadd(self, key, fields, id="*", maxlen=None, approximate=True):
         stream = self.streams.setdefault(key, [])
-        entry_id = str(len(stream) + 1)
+        entry_id = str(id) if str(id or "*") != "*" else str(len(stream) + 1)
         stream.append((entry_id, dict(fields)))
         if maxlen is not None and int(maxlen) > 0 and len(stream) > int(maxlen):
             del stream[: len(stream) - int(maxlen)]

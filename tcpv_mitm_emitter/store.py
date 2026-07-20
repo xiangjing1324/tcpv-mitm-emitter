@@ -38,6 +38,9 @@ class TcpvEventStore:
     def stream_key(self, account: str) -> str:
         return self._key(f"events:{account}")
 
+    def compact_stream_key(self, account: str) -> str:
+        return self._key(f"events_compact:{account}")
+
     def meta_key(self, account: str) -> str:
         return self._key(f"meta:{account}")
 
@@ -183,8 +186,11 @@ class TcpvEventStore:
         result = pipe.execute()
         stream_id = result[0]
         if isinstance(stream_id, (bytes, bytearray)):
-            return stream_id.decode("utf-8", errors="replace")
-        return str(stream_id)
+            event_id = stream_id.decode("utf-8", errors="replace")
+        else:
+            event_id = str(stream_id)
+        self._append_compact_event(account, event_id, fields)
+        return event_id
 
     def mark_flow_start(
         self,
@@ -327,6 +333,7 @@ class TcpvEventStore:
             clean = self.r.pipeline()
             for account in empty_accounts:
                 keys_to_remove.append(self.stream_key(account))
+                keys_to_remove.append(self.compact_stream_key(account))
                 keys_to_remove.append(self.meta_key(account))
                 keys_to_remove.append(self.seq_key(account))
                 clean.srem(self.accounts_key, account)
@@ -346,6 +353,8 @@ class TcpvEventStore:
         include_analysis: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         stream_key = self.stream_key(account)
+        if not include_payload and not include_analysis and self.r.exists(self.compact_stream_key(account)):
+            stream_key = self.compact_stream_key(account)
         batch = max(1, min(int(limit), self.api_max_limit))
         min_id = f"({after_id}" if after_id else "-"
 
@@ -441,6 +450,7 @@ class TcpvEventStore:
             return
         keys_to_remove = [
             self.stream_key(account),
+            self.compact_stream_key(account),
             self.meta_key(account),
             self.seq_key(account),
         ]
@@ -567,6 +577,24 @@ class TcpvEventStore:
             "chunk_idx": self._to_int(decoded.get("cidx"), -1),
             "analysis": analysis,
         }
+
+    def _append_compact_event(self, account: str, event_id: str, fields: dict[str, str]) -> None:
+        compact_key = self.compact_stream_key(account)
+        compact_fields = {
+            key: value
+            for key, value in fields.items()
+            if key not in {"pay", "fpay", "bpay", "rpay", "ana"}
+        }
+        try:
+            if self.stream_maxlen > 0:
+                self.r.xadd(compact_key, compact_fields, id=event_id, maxlen=self.stream_maxlen, approximate=True)
+            else:
+                self.r.xadd(compact_key, compact_fields, id=event_id)
+            if self.ttl_seconds > 0:
+                self.r.expire(compact_key, self.ttl_seconds)
+        except redis.ResponseError:
+            # Compact rows are an acceleration path only; the full stream is authoritative.
+            pass
 
     @staticmethod
     def _to_str(value: Any) -> str:
