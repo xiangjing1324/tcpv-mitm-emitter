@@ -4677,6 +4677,56 @@ function chooseGcloudCommandDisplay(structuredName, roughName) {
   return structured;
 }
 
+function decodeGcloudLz4Block(byteValues, maxOutput = 4 * 1024 * 1024) {
+  const input = Array.isArray(byteValues) ? byteValues : [];
+  if (input.length < 4) return null;
+  const output = [];
+  let pos = 0;
+  let sequences = 0;
+  let matches = 0;
+  try {
+    while (pos < input.length) {
+      const token = input[pos++] & 0xff;
+      let literalLength = token >>> 4;
+      if (literalLength === 15) {
+        let extra = 255;
+        while (extra === 255) {
+          if (pos >= input.length) return null;
+          extra = input[pos++] & 0xff;
+          literalLength += extra;
+        }
+      }
+      if (pos + literalLength > input.length || output.length + literalLength > maxOutput) return null;
+      for (let index = 0; index < literalLength; index += 1) output.push(input[pos++] & 0xff);
+      sequences += 1;
+      if (pos >= input.length) break;
+      if (pos + 2 > input.length) return null;
+      const offset = (input[pos] & 0xff) | ((input[pos + 1] & 0xff) << 8);
+      pos += 2;
+      if (offset <= 0 || offset > output.length) return null;
+      let matchLength = token & 0x0f;
+      if (matchLength === 15) {
+        let extra = 255;
+        while (extra === 255) {
+          if (pos >= input.length) return null;
+          extra = input[pos++] & 0xff;
+          matchLength += extra;
+        }
+      }
+      matchLength += 4;
+      if (output.length + matchLength > maxOutput) return null;
+      for (let index = 0; index < matchLength; index += 1) {
+        output.push(output[output.length - offset] & 0xff);
+      }
+      matches += 1;
+    }
+  } catch (_e) {
+    return null;
+  }
+  if (pos !== input.length || output.length <= 0 || sequences <= 0) return null;
+  return { bytes: output, sequences, matches };
+}
+
 function analyzeGcloudProtoCandidate(bytes, start, completeSource) {
   const parsed = parseGcloudProtoNodes(bytes, start, bytes.length, 0, 240);
   const flat = walkGcloudProtoNodes(parsed.nodes);
@@ -4724,7 +4774,7 @@ function analyzeGcloudProtoCandidate(bytes, start, completeSource) {
   };
 }
 
-function analyzeGcloudBusinessProto(bytes, completeSource = true) {
+function analyzeGcloudBusinessProtoBytes(bytes, completeSource = true) {
   if (!Array.isArray(bytes) || bytes.length <= 0) return null;
   const starts = new Set();
   for (let i = 0; i < Math.min(8, bytes.length); i += 1) starts.add(i);
@@ -4741,10 +4791,42 @@ function analyzeGcloudBusinessProto(bytes, completeSource = true) {
   return candidates[0] || null;
 }
 
+function analyzeGcloudBusinessProto(bytes, completeSource = true) {
+  if (!Array.isArray(bytes) || bytes.length <= 0) return null;
+  const direct = analyzeGcloudBusinessProtoBytes(bytes, completeSource);
+  const lz4 = decodeGcloudLz4Block(bytes);
+  if (lz4 && Array.isArray(lz4.bytes) && lz4.bytes.length > 0) {
+    const unpacked = analyzeGcloudBusinessProtoBytes(lz4.bytes, completeSource);
+    const directScore = Number(direct && direct.score ? direct.score : 0);
+    const unpackedScore = Number(unpacked && unpacked.score ? unpacked.score : 0);
+    if (
+      unpacked
+      && unpacked.commandDisplay
+      && (unpacked.ok || unpacked.fragment)
+      && Array.isArray(unpacked.flat)
+      && unpacked.flat.length >= 4
+      && unpackedScore > directScore + 1000
+    ) {
+      unpacked.viewBytes = lz4.bytes;
+      unpacked.compression = {
+        kind: "lz4-block",
+        inputLength: bytes.length,
+        outputLength: lz4.bytes.length,
+        sequences: lz4.sequences,
+        matches: lz4.matches,
+      };
+      return unpacked;
+    }
+  }
+  if (direct) direct.viewBytes = bytes;
+  return direct;
+}
+
 function gcloudProtoStatusText(proto) {
   if (!proto) return "payload 未加载";
-  if (proto.ok && Number(proto.start || 0) === 0) return "protobuf ok";
-  if (proto.ok && Number(proto.start || 0) > 0) return `lead ${Number(proto.start)} + protobuf ok`;
+  const prefix = proto.compression && proto.compression.kind === "lz4-block" ? "LZ4 -> " : "";
+  if (proto.ok && Number(proto.start || 0) === 0) return `${prefix}protobuf ok`;
+  if (proto.ok && Number(proto.start || 0) > 0) return `${prefix}lead ${Number(proto.start)} + protobuf ok`;
   if (proto.commandDisplay) return `proto fragment${proto.reason ? ` (${proto.reason})` : ""}`;
   return proto.reason ? `protobuf 待证 (${proto.reason})` : "protobuf 待证";
 }
@@ -4766,6 +4848,41 @@ function gcloudNodeValueText(node) {
   }
   if (node.valueHex) return `wire${Number(node.wire)} ${node.valueHex}`;
   return `wire${Number(node.wire)}`;
+}
+
+function gcloudNodeChildStrings(node, maxItems = 16) {
+  const out = [];
+  const visit = (current) => {
+    if (!current || out.length >= maxItems) return;
+    if (current.string) out.push(String(current.string));
+    for (const child of Array.isArray(current.children) ? current.children : []) visit(child);
+  };
+  visit(node);
+  return out;
+}
+
+function gcloudStringContentAlias(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return /qlogo\.cn\//i.test(value) ? "avatar_url" : "url";
+  if (/^tcp:\/\//i.test(value)) return "server_endpoint";
+  if (/^(?:\/?(?:private|var|Library|Applications|System)\/)|(?:[A-Za-z]:\\)|.*\.(?:dylib|framework|data|json|plist)$/i.test(value)) return "path";
+  if (/^IOS\d+(?:\.\d+)+$/i.test(value)) return "os_version";
+  if (/^(?:Apple\|)?i(?:Phone|Pad)\d+,\d+$/i.test(value)) return "device_model";
+  if (/^Mozilla\/\d/i.test(value)) return "user_agent";
+  if (/^Apple$/i.test(value)) return "device_vendor";
+  if (/GPU(?:Brand|Vendor|Model)/i.test(value)) return "gpu_brand";
+  if (/^(?:WiFi|WLAN|Cellular|Ethernet|5G|4G|3G)$/i.test(value)) return "network_type";
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return "uuid";
+  if (/^\[[0-9a-f:]+\]:\d+$/i.test(value) || /^(?:\d{1,3}\.){3}\d{1,3}:\d+$/.test(value)) return "network_address";
+  if (/^[a-z]{2}(?:[-_][A-Za-z]{2,8})+$/i.test(value)) return "language";
+  if (/^[A-Z]{2}$/.test(value)) return "region?";
+  if (/^[A-Z]{3}$/.test(value)) return "currency?";
+  if (/^\d+(?:\.\d+){2,}$/.test(value)) return "version?";
+  if (/^com\.[A-Za-z0-9_.-]+$/.test(value)) return "bundle_id";
+  if (/^[0-9]{10,20}$/.test(value)) return "id?";
+  if (/^[0-9a-f]{32,64}$/i.test(value)) return "hash?";
+  return "";
 }
 
 function gcloudProtoFieldAlias(path, node, proto) {
@@ -4799,6 +4916,13 @@ function gcloudProtoFieldAlias(path, node, proto) {
   if (generic[key]) return generic[key];
 
   const text = String(node && node.string ? node.string : "");
+  const contentAlias = gcloudStringContentAlias(text);
+  if (contentAlias) return contentAlias;
+  if (Array.isArray(node && node.children) && node.children.length > 0) {
+    const childText = gcloudNodeChildStrings(node).join(" | ");
+    if (/IOS\d+(?:\.\d+)+/i.test(childText) && /i(?:Phone|Pad)\d+,\d+/i.test(childText)) return "device_profile";
+    if (/\bitop(?:id)?\b/i.test(childText) && /\biap\b/i.test(childText)) return "account_context?";
+  }
   if (/^CS[A-Za-z0-9_]{4,}$/.test(text)) return "command";
   if (/^(online|chat|mail|security|mall|role)$/i.test(text)) return "module?";
   if (/^zh[-_]/i.test(text)) return "language?";
@@ -5214,6 +5338,8 @@ function analyzeGcloudEvent(ev, summaryText = "") {
 
   if (command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted") {
     const proto = analyzeGcloudBusinessProto(bytes, preview.complete);
+    const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
+    const compression = proto && proto.compression ? proto.compression : null;
     const title = proto && proto.commandDisplay
       ? `GCloud 明文 ${proto.commandDisplay}`
       : "GCloud 4013 明文";
@@ -5222,6 +5348,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       kind: proto && proto.ok ? "proto" : "fragment",
       meta,
       bytes,
+      protoBytes,
       proto,
       title,
       chips: [
@@ -5229,13 +5356,15 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         proto && proto.commandId !== null && proto.commandId !== undefined ? `cmd_id=${formatHexValue(proto.commandId)}` : "",
         proto && proto.module ? `module=${proto.module}` : "",
         proto && proto.language ? proto.language : "",
+        compression && compression.kind === "lz4-block" ? "LZ4" : "",
         proto ? gcloudProtoStatusText(proto) : "",
       ].filter(Boolean),
       rows: [
         { label: "命令", value: proto && proto.commandDisplay ? proto.commandDisplay : "未从当前 payload/prefix 识别到 CS* 名称" },
         { label: "Proto", value: proto ? gcloudProtoStatusText(proto) : "payload 未加载" },
-        { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${bytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
+        { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${protoBytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
         { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 field[2] body" },
+        ...(compression ? [{ label: "压缩", value: `LZ4 block ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
         { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
       ],
       nodeRows: gcloudProtoNodeRows(proto),
@@ -5341,7 +5470,7 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   }
   if (grid.childElementCount > 0) panel.appendChild(grid);
 
-  const protoTree = info.proto ? buildGcloudProtoTree(info.proto, info.bytes) : null;
+  const protoTree = info.proto ? buildGcloudProtoTree(info.proto, info.protoBytes || info.bytes) : null;
   if (protoTree) {
     const details = document.createElement("details");
     details.className = "gcloud-tree-details";
