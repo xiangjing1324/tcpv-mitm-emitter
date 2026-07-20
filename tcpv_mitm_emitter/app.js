@@ -602,11 +602,41 @@ function installDumpAsciiRowStyles() {
       border-left: 2px solid color-mix(in srgb, #38bdf8 35%, transparent);
       background: color-mix(in srgb, var(--panel) 90%, var(--bg));
     }
+    .gcloud-tree-tone-meta {
+      border-left-color: color-mix(in srgb, #38bdf8 68%, transparent);
+    }
+    .gcloud-tree-tone-structure {
+      border-left-color: color-mix(in srgb, #2dd4bf 62%, transparent);
+    }
+    .gcloud-tree-tone-text {
+      border-left-color: color-mix(in srgb, #4ade80 62%, transparent);
+    }
+    .gcloud-tree-tone-number {
+      border-left-color: color-mix(in srgb, #fbbf24 66%, transparent);
+    }
+    .gcloud-tree-tone-binary {
+      border-left-color: color-mix(in srgb, #fb7185 66%, transparent);
+    }
+    .gcloud-tree-tone-data {
+      border-left-color: color-mix(in srgb, var(--muted) 42%, transparent);
+    }
     .gcloud-tree-key {
       min-width: 0;
       color: #7dd3fc;
       font-weight: 850;
       overflow-wrap: anywhere;
+    }
+    .gcloud-tree-tone-structure > .gcloud-tree-key {
+      color: #5eead4;
+    }
+    .gcloud-tree-tone-text > .gcloud-tree-key {
+      color: #86efac;
+    }
+    .gcloud-tree-tone-number > .gcloud-tree-key {
+      color: #fcd34d;
+    }
+    .gcloud-tree-tone-binary > .gcloud-tree-key {
+      color: #fda4af;
     }
     .gcloud-tree-type {
       color: color-mix(in srgb, var(--muted) 84%, var(--text));
@@ -635,6 +665,9 @@ function installDumpAsciiRowStyles() {
     }
     .gcloud-tree-fact {
       max-width: 100%;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
       padding: 1px 4px;
       border: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
       border-radius: 4px;
@@ -643,6 +676,59 @@ function installDumpAsciiRowStyles() {
       font-size: 11px;
       line-height: 1.35;
       overflow-wrap: anywhere;
+    }
+    .gcloud-tree-fact-label {
+      color: color-mix(in srgb, var(--muted) 75%, var(--text));
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .gcloud-tree-fact-label::after {
+      content: ":";
+    }
+    .gcloud-tree-fact-value {
+      min-width: 0;
+      color: inherit;
+      overflow-wrap: anywhere;
+    }
+    .gcloud-tree-fact-source {
+      border-color: color-mix(in srgb, #94a3b8 52%, var(--line));
+      color: #cbd5e1;
+    }
+    .gcloud-tree-fact-envelope {
+      border-color: color-mix(in srgb, #f59e0b 58%, var(--line));
+      color: #fbbf24;
+      background: rgba(245, 158, 11, 0.08);
+    }
+    .gcloud-tree-fact-header {
+      border-color: color-mix(in srgb, #38bdf8 55%, var(--line));
+      color: #7dd3fc;
+      background: rgba(56, 189, 248, 0.07);
+    }
+    .gcloud-tree-fact-length {
+      border-color: color-mix(in srgb, #84cc16 52%, var(--line));
+      color: #bef264;
+      background: rgba(132, 204, 22, 0.07);
+    }
+    .gcloud-tree-fact-time,
+    .gcloud-tree-fact-text {
+      border-color: color-mix(in srgb, #22c55e 52%, var(--line));
+      color: #86efac;
+      background: rgba(34, 197, 94, 0.07);
+    }
+    .gcloud-tree-fact-number {
+      border-color: color-mix(in srgb, #eab308 52%, var(--line));
+      color: #fde047;
+      background: rgba(234, 179, 8, 0.07);
+    }
+    .gcloud-tree-fact-data {
+      border-color: color-mix(in srgb, #ec4899 43%, var(--line));
+      color: #f9a8d4;
+      background: rgba(236, 72, 153, 0.055);
+    }
+    .gcloud-tree-fact-warning {
+      border-color: color-mix(in srgb, #fb7185 52%, var(--line));
+      color: #fda4af;
+      background: rgba(251, 113, 133, 0.065);
     }
     .gcloud-tree-raw {
       min-width: 0;
@@ -654,8 +740,13 @@ function installDumpAsciiRowStyles() {
     .gcloud-tree-raw-empty {
       color: color-mix(in srgb, var(--muted) 54%, transparent);
     }
+    .gcloud-tree-raw-decoded {
+      color: color-mix(in srgb, #f9a8d4 72%, var(--text));
+    }
     .gcloud-tree-fact-raw {
       flex-basis: 100%;
+      display: grid;
+      grid-template-columns: minmax(82px, auto) minmax(0, 1fr);
       white-space: normal;
     }
     @media (max-width: 1100px) {
@@ -5053,45 +5144,189 @@ function gcloudReadableByteText(byteValues) {
   return gcloudPrintableAscii(bytes);
 }
 
+function gcloudHexSlice(byteValues, offset = 0, length = null) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const start = Math.max(0, Number(offset || 0));
+  const end = length === null
+    ? bytes.length
+    : Math.min(bytes.length, start + Math.max(0, Number(length || 0)));
+  return bytes.slice(start, end).map(childHexByteText).join(" ");
+}
+
+function gcloudByteEntropy(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length <= 0) return 0;
+  const counts = new Map();
+  for (const byte of bytes) counts.set(byte & 0xff, Number(counts.get(byte & 0xff) || 0) + 1);
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const probability = count / bytes.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
+}
+
+function gcloudEpochText(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 1577836800 || value > 2082758400) return "";
+  try {
+    return new Date(value * 1000).toISOString().replace(".000Z", "Z");
+  } catch (_e) {
+    return "";
+  }
+}
+
+function gcloudAnalyzeAcePayload(byteValues, meta = {}) {
+  const payload = Array.isArray(byteValues) ? byteValues : [];
+  const facts = [];
+  const add = (label, value, className = "") => facts.push({ label, value, className });
+  const signature = readBe16(payload, 0);
+  const subtype = readBe16(payload, 2);
+  const marker = String(meta.marker || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  const profileResult = (profile, summary) => {
+    facts.unshift({ label: "profile", value: profile, className: "gcloud-tree-fact-header" });
+    return { profile, summary, facts };
+  };
+
+  if (signature !== 0x200f || subtype === null) {
+    add("opaque_block", `${payload.length} bytes · entropy=${gcloudByteEntropy(payload).toFixed(2)} bits/byte · no verified inner format`, "gcloud-tree-fact-warning");
+    return profileResult("ACE opaque payload", `opaque ${payload.length}-byte payload`);
+  }
+
+  add("signature", `@0x0000 BE16 ${formatHexValue(signature, 4)}`, "gcloud-tree-fact-header");
+  add("subtype", `@0x0002 BE16 ${formatHexValue(subtype, 4)}`, "gcloud-tree-fact-header");
+
+  const word4 = readBe32(payload, 4);
+  const word8 = readBe32(payload, 8);
+  const reportExpectedLen = subtype === 1
+    && word4 !== null
+    && word8 !== null
+    && word4 === word8
+    && word4 >= 16
+    && word4 <= 4096
+    ? 16 + word4
+    : null;
+  if (reportExpectedLen !== null && payload.length <= reportExpectedLen && reportExpectedLen - payload.length <= 4) {
+    const missing = reportExpectedLen - payload.length;
+    add("body_length", `@0x0004 BE32 ${word4}; expected payload ${reportExpectedLen} = header 16 + body ${word4}`, "gcloud-tree-fact-length");
+    add("length_mirror", `@0x0008 BE32 ${word8} (matches body_length)`, "gcloud-tree-fact-length");
+    add("flags", `@0x000c ${gcloudHexSlice(payload, 12, 4)}`, "gcloud-tree-fact-header");
+    if (missing > 0) {
+      add("available_body", `${Math.max(0, payload.length - 16)}/${word4} bytes · missing ${missing} byte${missing === 1 ? "" : "s"}`, "gcloud-tree-fact-warning");
+      add("tail_status", "offset-sensitive tail fields hidden until full frame is present", "gcloud-tree-fact-warning");
+      return profileResult("ACE report · truncated frame", "subtype 1 report with mirrored body length; frame truncated");
+    }
+    add("report_token?", `@0x0070 ${formatHexValue(readBe32(payload, 112), 8)}`, "gcloud-tree-fact-data");
+    add("sequence?", `@0x0074 BE32 ${readBe32(payload, 116)} (same slot rises across samples)`, "gcloud-tree-fact-number");
+    add("footer_constant", `@0x0078 ${formatHexValue(readBe32(payload, 120), 8)} (stable in this profile)`, "gcloud-tree-fact-data");
+    return profileResult("ACE report · 16-byte header + 108-byte body", "subtype 1 report with mirrored body length");
+  }
+
+  if (subtype === 1 && payload.length === 124 && word8 === 0xe00000ff && readBe32(payload, 12) === 0x80808080) {
+    add("counter", `@0x0004 BE32 ${word4}`, "gcloud-tree-fact-number");
+    add("sentinel", `@0x0008 ${formatHexValue(word8, 8)}`, "gcloud-tree-fact-data");
+    add("status_mask", "@0x000c 0x80808080 × 4", "gcloud-tree-fact-data");
+    add("constant", `@0x0024 ${formatHexValue(readBe32(payload, 36), 8)}`, "gcloud-tree-fact-data");
+    return profileResult("ACE status vector", "subtype 1 sentinel/status vector");
+  }
+
+  if (subtype === 1 && payload.length === 132 && marker === "b7b5") {
+    const words = [];
+    for (let offset = 8; offset <= 36; offset += 4) {
+      const word = readBe32(payload, offset);
+      words.push(`${gcloudOffsetText(offset)}:${word <= 0xffff ? word : formatHexValue(word, 8)}`);
+    }
+    add("counter", `@0x0004 BE32 ${word4}`, "gcloud-tree-fact-number");
+    add("be32_vector", words.join(" · "), "gcloud-tree-fact-data gcloud-tree-fact-raw");
+    add("layout_note", "these aligned words are stable across same-marker samples; meanings are not named yet", "gcloud-tree-fact-warning");
+    return profileResult("ACE fixed numeric vector", "subtype 1 fixed numeric vector");
+  }
+
+  if (subtype === 1 && payload.length === 132 && marker === "b7b4") {
+    const opaque = payload.slice(8);
+    add("counter", `@0x0004 BE32 ${word4}`, "gcloud-tree-fact-number");
+    add("opaque_block", `@0x0008 ${opaque.length} bytes · entropy=${gcloudByteEntropy(opaque).toFixed(2)} bits/byte`, "gcloud-tree-fact-data");
+    add("decode_status", "packed/encrypted is possible, but no verified third-layer codec or key yet", "gcloud-tree-fact-warning");
+    return profileResult("ACE opaque feature block", "subtype 1 high-entropy feature block");
+  }
+
+  if (subtype === 1 && payload.length === 12) {
+    add("counter/status", `@0x0004 BE32 ${word4}`, "gcloud-tree-fact-number");
+    add("token", `@0x0008 ${formatHexValue(word8, 8)}`, "gcloud-tree-fact-data");
+    return profileResult("ACE short status frame", "subtype 1 short counter/status frame");
+  }
+
+  if (subtype === 7 && payload.length === 78) {
+    add("payload_shape", `@0x0004 ${payload.length - 4} bytes · sparse/tagged layout candidate`, "gcloud-tree-fact-data");
+    add("decode_status", "field boundaries need more same-subtype samples before naming", "gcloud-tree-fact-warning");
+    return profileResult("ACE subtype 7 sparse vector", "subtype 7 sparse/tagged vector candidate");
+  }
+
+  add("payload_shape", `${payload.length} bytes · entropy=${gcloudByteEntropy(payload.slice(4)).toFixed(2)} bits/byte`, "gcloud-tree-fact-data");
+  add("decode_status", `known ACE signature; subtype ${subtype} layout not classified`, "gcloud-tree-fact-warning");
+  return profileResult(`ACE subtype ${subtype} · unclassified`, `subtype ${subtype} unclassified payload`);
+}
+
 function gcloudAnalyzeHexString(text) {
   const raw = String(text || "").trim();
   if (!gcloudIsHexText(raw, 16)) return null;
   const layer1 = gcloudBytesFromHexText(raw, 8192);
   if (layer1.length <= 0) return null;
   const facts = [
-    { label: "hex_string", value: `${raw.length} chars -> ${layer1.length} bytes` },
-    { label: "decoded_hex", value: gcloudHexBytes(layer1, 160), className: "gcloud-tree-fact-raw" },
+    { label: "source", value: `${raw.length} hex chars -> ${layer1.length} bytes`, className: "gcloud-tree-fact-source" },
   ];
 
   if (layer1.length >= 6 && (layer1[0] === 0x11 || layer1[0] === 0x12) && layer1[4] === 0x00 && layer1[5] === layer1.length - 6) {
     const key = layer1[1] & 0xff;
     const marker = layer1.slice(2, 4).map(childHexByteText).join("");
     const payload = layer1.slice(6).map((byte) => (byte ^ key) & 0xff);
-    const kindText = `ACE XOR ver=${formatHexValue(layer1[0], 2)} key=${formatHexValue(key, 2)} marker=${marker} len=${payload.length}`;
-    facts.push({ label: "ace_xor", value: kindText });
-    facts.push({ label: "payload_hex", value: gcloudHexBytes(payload, 192), className: "gcloud-tree-fact-raw" });
+    const kindText = `ACE XOR · ver=${formatHexValue(layer1[0], 2)} · key=${formatHexValue(key, 2)} · marker=${marker} · payload=${payload.length} bytes`;
+    facts.push({ label: "envelope", value: kindText, className: "gcloud-tree-fact-envelope" });
+    const inner = gcloudAnalyzeAcePayload(payload, { marker, version: layer1[0], key });
+    facts.push(...inner.facts);
     const payloadText = gcloudReadableByteText(payload);
-    if (payloadText) facts.push({ label: "payload_text", value: `"${shortenText(payloadText, 220)}"`, className: "gcloud-tree-fact-raw" });
+    if (payloadText) facts.push({ label: "payload_text", value: `"${shortenText(payloadText, 220)}"`, className: "gcloud-tree-fact-text gcloud-tree-fact-raw" });
     return {
       kind: "ace-xor",
-      summary: `${kindText} -> ${payload.length} bytes payload`,
+      summary: `ACE/XOR · ${inner.summary} · ${payload.length} bytes`,
       facts,
       payload,
+      profile: inner.profile,
     };
   }
 
   if (gcloudBytesAreAsciiHex(layer1)) {
     const innerText = gcloudBytesToAscii(layer1);
     const layer2 = gcloudBytesFromHexText(innerText, 8192);
-    facts.push({ label: "nested_hex", value: `${layer1.length} ASCII-hex bytes -> ${layer2.length} bytes` });
-    facts.push({ label: "payload_hex", value: gcloudHexBytes(layer2, 192), className: "gcloud-tree-fact-raw" });
+    facts.push({ label: "envelope", value: `${layer1.length} ASCII-hex bytes -> ${layer2.length} payload bytes`, className: "gcloud-tree-fact-envelope" });
+    if (layer2.length === 64 && readBe32(layer2, 0) === 0x80dba23f) {
+      facts.push({ label: "profile", value: "ACE fixed 64-byte binary block", className: "gcloud-tree-fact-header" });
+      facts.push({ label: "signature", value: "@0x0000 0x80dba23f", className: "gcloud-tree-fact-header" });
+      facts.push({ label: "decode_status", value: `opaque payload · entropy=${gcloudByteEntropy(layer2).toFixed(2)} bits/byte · transform unknown`, className: "gcloud-tree-fact-warning" });
+    }
     const payloadText = gcloudReadableByteText(layer2);
-    if (payloadText) facts.push({ label: "payload_text", value: `"${shortenText(payloadText, 220)}"`, className: "gcloud-tree-fact-raw" });
+    if (payloadText) facts.push({ label: "payload_text", value: `"${shortenText(payloadText, 220)}"`, className: "gcloud-tree-fact-text gcloud-tree-fact-raw" });
     return {
       kind: "double-hex",
-      summary: `hex string -> ASCII hex -> ${layer2.length} bytes payload`,
+      summary: `hex -> hex · ${layer2.length}-byte binary payload`,
       facts,
       payload: layer2,
+    };
+  }
+
+  const epoch = layer1.length === 10 ? readBe32(layer1, 0) : null;
+  const epochText = gcloudEpochText(epoch);
+  const flags = layer1.length === 10 ? readBe16(layer1, 8) : null;
+  if (epochText && flags !== null && (flags & 0xff00) === 0x0100) {
+    facts.push({ label: "profile", value: "AntiData timestamp record", className: "gcloud-tree-fact-header" });
+    facts.push({ label: "timestamp", value: `@0x0000 BE32 ${epoch} · ${epochText}`, className: "gcloud-tree-fact-time" });
+    facts.push({ label: "token", value: `@0x0004 ${formatHexValue(readBe32(layer1, 4), 8)}`, className: "gcloud-tree-fact-data" });
+    facts.push({ label: "flags", value: `@0x0008 ${formatHexValue(flags, 4)}`, className: "gcloud-tree-fact-number" });
+    return {
+      kind: "hex-bytes",
+      summary: `timestamp ${epochText} · token · flags ${formatHexValue(flags, 4)}`,
+      facts,
+      payload: layer1,
     };
   }
 
@@ -5101,11 +5336,12 @@ function gcloudAnalyzeHexString(text) {
       facts.push({
         label: "record_head",
         value: `v=${readBe32(layer1, 0)} total=${total} selector=${formatHexValue(readBe16(layer1, 6), 4)} sublen=${readBe16(layer1, 8) ?? "-"}`,
+        className: "gcloud-tree-fact-header",
       });
     }
   }
   const utf8 = gcloudBytesToUtf8(layer1);
-  if (utf8 && isGcloudVisibleString(utf8)) facts.push({ label: "decoded_text", value: `"${shortenText(utf8, 220)}"`, className: "gcloud-tree-fact-raw" });
+  if (utf8 && isGcloudVisibleString(utf8)) facts.push({ label: "decoded_text", value: `"${shortenText(utf8, 220)}"`, className: "gcloud-tree-fact-text gcloud-tree-fact-raw" });
   return {
     kind: "hex-bytes",
     summary: `hex string -> ${layer1.length} bytes`,
@@ -5177,14 +5413,43 @@ function appendGcloudTreeValue(valueEl, node, bytes, meaning = "", pathText = ""
     for (const fact of facts) {
       const chip = document.createElement("span");
       chip.className = `gcloud-tree-fact${fact.className ? ` ${fact.className}` : ""}`;
-      chip.textContent = `${fact.label}=${fact.value}`;
+      const label = document.createElement("span");
+      label.className = "gcloud-tree-fact-label";
+      label.textContent = fact.label;
+      const value = document.createElement("span");
+      value.className = "gcloud-tree-fact-value";
+      value.textContent = fact.value;
+      chip.appendChild(label);
+      chip.appendChild(value);
       factWrap.appendChild(chip);
     }
     valueEl.appendChild(factWrap);
   }
 }
 
+function gcloudTreeRowTone(node, alias = "") {
+  const meaning = String(alias || "").toLowerCase();
+  if (node && node.string) {
+    if (gcloudAnalyzeHexString(node.string)) return "gcloud-tree-tone-binary";
+    return "gcloud-tree-tone-text";
+  }
+  if (/^(header|cmd_id|command|module|language)/.test(meaning)) return "gcloud-tree-tone-meta";
+  if (/^(body|message|items|item|sender|device_profile|account_context)/.test(meaning)) return "gcloud-tree-tone-structure";
+  if (node && [0, 1, 5].includes(Number(node.wire))) return "gcloud-tree-tone-number";
+  if (node && Number(node.wire) === 2 && Array.isArray(node.children) && node.children.length > 0) return "gcloud-tree-tone-structure";
+  return "gcloud-tree-tone-data";
+}
+
 function appendGcloudTreeRaw(rawEl, node, bytes) {
+  if (node && node.string) {
+    const hexInfo = gcloudAnalyzeHexString(node.string);
+    if (hexInfo && Array.isArray(hexInfo.payload) && hexInfo.payload.length > 0) {
+      rawEl.textContent = gcloudHexBytes(hexInfo.payload, 192);
+      rawEl.title = `decoded payload bytes (${hexInfo.payload.length})`;
+      rawEl.classList.add("gcloud-tree-raw-decoded");
+      return;
+    }
+  }
   const valueBytes = gcloudNodeValueBytes(node, bytes);
   rawEl.textContent = valueBytes.length > 0 ? gcloudHexBytes(valueBytes, 192) : "-";
   rawEl.title = valueBytes.length > 0 ? `raw value bytes (${valueBytes.length})` : "no raw value bytes";
@@ -5222,7 +5487,7 @@ function appendGcloudProtoTreeRows(container, nodes, proto, bytes, path = [], de
     }
 
     const row = document.createElement("div");
-    row.className = "gcloud-tree-row";
+    row.className = `gcloud-tree-row ${gcloudTreeRowTone(node, alias)}`;
     row.style.setProperty("--depth", String(Math.min(depth, 8)));
     row.title = pathText;
 
