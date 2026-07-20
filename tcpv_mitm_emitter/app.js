@@ -5482,6 +5482,7 @@ function gcloudDecodedByteProfile(byteValues) {
   const utf8 = normalizeVisibleText(decodeUtf8Strict(bytes));
   if (/^[\[{]/.test(utf8)) return "JSON/text";
   if (/^<\?xml|^<plist/i.test(utf8)) return "XML/plist";
+  if (utf8 && isGcloudVisibleString(utf8) && looksMeaningfulText(utf8, 3, false)) return "text";
   if (bytes.length >= 4) {
     const head4 = gcloudHexSlice(bytes, 0, 4).replace(/\s+/g, "");
     if (head4 === "1f8b0800" || head4.startsWith("1f8b08")) return "gzip";
@@ -5493,7 +5494,7 @@ function gcloudDecodedByteProfile(byteValues) {
     if (readBe32(bytes, 0) === 1 && readBe16(bytes, 4) !== null && readBe16(bytes, 4) <= bytes.length) return "binary record";
   }
   if (bytes.length >= 2 && bytes[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(bytes[1] & 0xff)) return "zlib";
-  if (gcloudReadableByteText(bytes)) return "text";
+  if (gcloudReadableByteText(bytes)) return "mixed text/binary";
   const parsed = parseGcloudProtoNodes(bytes, 0, bytes.length, 0, 20);
   if (parsed && parsed.ok && Array.isArray(parsed.nodes) && parsed.nodes.length > 0) return "protobuf?";
   const entropy = gcloudByteEntropy(bytes);
@@ -5536,8 +5537,9 @@ function gcloudAnalyzeBase64String(text) {
 
   const decodedText = describeDecodedBytes(decoded);
   if (decodedText && decodedText.text) {
+    const textLabel = /^(?:JSON\/text|XML\/plist|text)$/.test(profile) ? "decoded_text" : "strings";
     facts.push({
-      label: "decoded_text",
+      label: textLabel,
       value: `"${shortenText(decodedText.text, 180)}"`,
       className: "gcloud-tree-fact-text gcloud-tree-fact-raw",
     });
