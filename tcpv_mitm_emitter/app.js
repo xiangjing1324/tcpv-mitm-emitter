@@ -4988,6 +4988,7 @@ function gcloudProtoFieldAlias(path, node, proto) {
   };
   const commandName = String(proto && proto.commandDisplay ? proto.commandDisplay : "");
   const chatWorldLoad = /CSChatWorldLoad/i.test(commandName);
+  const accountLogin = /CSAccountLogin/i.test(commandName);
   const chatAliases = chatWorldLoad ? {
     "2.2": "items[]",
     "2.2.1": "message",
@@ -5007,6 +5008,16 @@ function gcloudProtoFieldAlias(path, node, proto) {
   if (generic[key]) return generic[key];
 
   const text = String(node && node.string ? node.string : "");
+  if (accountLogin) {
+    if (/^IOS\d+(?:\.\d+)+$/i.test(text)) return "os_version";
+    if (/^(?:Apple\|)?i(?:Phone|Pad)\d+,\d+$/i.test(text)) return "device_model";
+    if (/^(?:WiFi|WLAN|Cellular|Ethernet|5G|4G|3G)$/i.test(text)) return "network_type";
+    if (/^GenericGPUBrand$/i.test(text) || /GPU(?:Brand|Vendor|Model)/i.test(text)) return "gpu_brand";
+    if (/^Mozilla\/\d/i.test(text)) return "user_agent";
+    if (/^itopid$/i.test(text)) return "account_key";
+    if (/^qq_qq-\d+-iap-\d+-\d+-[A-Za-z0-9_-]+$/i.test(text)) return "iap_inc_id?";
+    if (/^\d{10,20}$/.test(text)) return "account_id?";
+  }
   const contentAlias = gcloudStringContentAlias(text);
   if (contentAlias) return contentAlias;
   if (Array.isArray(node && node.children) && node.children.length > 0) {
@@ -5571,6 +5582,115 @@ function gcloudProtoNodeRows(proto, maxRows = 18) {
   return rows;
 }
 
+function gcloudCollectProtoStrings(proto, maxItems = 160) {
+  const out = [];
+  const walk = (nodes, path = [], topIndex = -1) => {
+    if (!Array.isArray(nodes) || out.length >= maxItems) return;
+    nodes.forEach((node, index) => {
+      if (!node || out.length >= maxItems) return;
+      const nextTopIndex = path.length === 0 ? index : topIndex;
+      const nextPath = path.concat(Number(node.field));
+      if (node.string) {
+        const alias = gcloudProtoFieldAlias(nextPath, node, proto);
+        out.push({
+          text: String(node.string || ""),
+          alias,
+          path: nextPath,
+          topIndex: nextTopIndex,
+        });
+      }
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        walk(node.children, nextPath, nextTopIndex);
+      }
+    });
+  };
+  walk(proto && proto.nodes ? proto.nodes : []);
+  return out;
+}
+
+function gcloudFirstString(strings, predicate) {
+  const list = Array.isArray(strings) ? strings : [];
+  for (const item of list) {
+    const text = String(item && item.text ? item.text : "");
+    if (text && predicate(text, item)) return text;
+  }
+  return "";
+}
+
+function gcloudCompactUserAgent(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  const os = value.match(/CPU OS ([0-9_]+)/i);
+  const mobile = value.match(/Mobile\/([A-Za-z0-9]+)/i);
+  const parts = [];
+  if (os) parts.push(`iOS ${String(os[1]).replace(/_/g, ".")}`);
+  if (mobile) parts.push(`Mobile/${mobile[1]}`);
+  return parts.length > 0 ? parts.join(" ") : shortenText(value, 56);
+}
+
+function gcloudProfilePart(label, value, maxLen = 72) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return `${label}=${shortenText(text, maxLen)}`;
+}
+
+function gcloudJoinProfileParts(parts) {
+  return (Array.isArray(parts) ? parts : []).filter(Boolean).join("  ");
+}
+
+function gcloudProtoProfileRows(proto, ev = null) {
+  if (!proto || !Array.isArray(proto.nodes)) return [];
+  const strings = gcloudCollectProtoStrings(proto);
+  if (strings.length <= 0) return [];
+
+  const os = gcloudFirstString(strings, (text) => /^IOS\d+(?:\.\d+)+$/i.test(text));
+  const model = gcloudFirstString(strings, (text) => /^(?:Apple\|)?i(?:Phone|Pad)\d+,\d+$/i.test(text));
+  const network = gcloudFirstString(strings, (text) => /^(?:WiFi|WLAN|Cellular|Ethernet|5G|4G|3G)$/i.test(text));
+  const gpu = gcloudFirstString(strings, (text) => /^GenericGPUBrand$/i.test(text) || /GPU(?:Brand|Vendor|Model)/i.test(text));
+  const userAgent = gcloudFirstString(strings, (text) => /^Mozilla\/\d/i.test(text));
+  const clientVersion = gcloudFirstString(strings, (text) => /^\d+(?:\.\d+){2,}$/.test(text));
+  const deviceUuid = gcloudFirstString(strings, (text) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text));
+  const cidAccount = String(ev && ev.cid ? ev.cid : "").match(/\[acc:(\d{10,24})\]/);
+  const accountId = cidAccount ? cidAccount[1] : gcloudFirstString(strings, (text) => /^\d{10,20}$/.test(text));
+  const accountKeyIndex = strings.findIndex((item) => /^itopid$/i.test(String(item && item.text ? item.text : "")));
+  const accountKey = accountKeyIndex >= 0 ? strings[accountKeyIndex].text : "";
+  const iapIncId = gcloudFirstString(strings, (text) => /^qq_qq-\d+-iap-\d+-\d+-[A-Za-z0-9_-]+$/i.test(text));
+  const endpoint = gcloudFirstString(strings, (text) => /^(?:\d{1,3}\.){3}\d{1,3}:\d+$/.test(text))
+    || gcloudFirstString(strings, (text) => /^\[[0-9a-f:]+\]:(?!0$)\d+$/i.test(text));
+  const avatar = gcloudFirstString(strings, (text) => /^https?:\/\//i.test(text) && /qlogo\.cn\//i.test(text));
+  const region = gcloudFirstString(strings, (text) => /^[A-Z]{2}$/.test(text));
+  const currency = gcloudFirstString(strings, (text) => /^[A-Z]{3}$/.test(text));
+
+  const rows = [];
+  const device = gcloudJoinProfileParts([
+    gcloudProfilePart("model", model),
+    gcloudProfilePart("os", os),
+    gcloudProfilePart("net", network),
+    gcloudProfilePart("gpu", gpu),
+    gcloudProfilePart("ua", gcloudCompactUserAgent(userAgent)),
+    gcloudProfilePart("client", clientVersion),
+  ]);
+  if (device) rows.push({ label: "设备画像", value: device });
+
+  const account = gcloudJoinProfileParts([
+    gcloudProfilePart("account", accountId),
+    gcloudProfilePart("key", accountKey),
+    gcloudProfilePart("iap_inc_id?", iapIncId, 96),
+    gcloudProfilePart("uuid", deviceUuid),
+  ]);
+  if (account) rows.push({ label: "账号/标识", value: account });
+
+  const networkRow = gcloudJoinProfileParts([
+    gcloudProfilePart("endpoint", endpoint),
+    gcloudProfilePart("avatar", avatar, 96),
+    gcloudProfilePart("region", region),
+    gcloudProfilePart("currency", currency),
+  ]);
+  if (networkRow) rows.push({ label: "网络/资源", value: networkRow });
+
+  return rows;
+}
+
 function analyzeGcloudEvent(ev, summaryText = "") {
   if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return null;
   const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary));
@@ -5609,6 +5729,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       ? `GCloud 明文 ${proto.commandDisplay}`
       : "GCloud 4013 明文";
     const bodyNode = proto && proto.bodyNode ? proto.bodyNode : null;
+    const profileRows = gcloudProtoProfileRows(proto, ev);
     return {
       kind: proto && proto.ok ? "proto" : "fragment",
       meta,
@@ -5629,6 +5750,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         { label: "Proto", value: proto ? gcloudProtoStatusText(proto) : "payload 未加载" },
         { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${protoBytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
         { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 field[2] body" },
+        ...profileRows,
         ...(compression ? [{ label: "压缩", value: `LZ4 block ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
         { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
       ],
