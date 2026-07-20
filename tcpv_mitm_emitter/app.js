@@ -444,6 +444,30 @@ function installDumpAsciiRowStyles() {
       border-radius: 2px;
       font-weight: 850;
     }
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only,
+    .dump-grid-request.dump-grid-current-only {
+      grid-template-columns: minmax(0, 1fr);
+      overflow-x: hidden;
+    }
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only > .dump-panel-full,
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only > .dump-panel-raw-after,
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only > .dump-panel-before,
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only > .dump-panel-decoded,
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only > .string-result-inline,
+    .dump-grid-request.dump-grid-decrypted.dump-grid-current-only > .child-compare-inline,
+    .dump-grid-request.dump-grid-current-only > .dump-panel-full,
+    .dump-grid-request.dump-grid-current-only > .dump-panel-raw-after,
+    .dump-grid-request.dump-grid-current-only > .dump-panel-before,
+    .dump-grid-request.dump-grid-current-only > .dump-panel-decoded,
+    .dump-grid-request.dump-grid-current-only > .string-result-inline,
+    .dump-grid-request.dump-grid-current-only > .child-compare-inline {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
+    }
+    .tree-compare-row.tree-compare-single {
+      grid-template-columns: minmax(0, 1fr);
+    }
   `;
 }
 
@@ -8871,45 +8895,32 @@ function buildStringResultPanel(beforeBase64, decodedBase64, summaryText = "") {
 
 function buildTreeCompareRow(beforeBase64, decodedBase64, summaryText = "") {
   if (!beforeBase64 && !decodedBase64) return null;
-  const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const sameLenExamples = parseLibrarySameLengthExamples(summaryText);
-  const row = document.createElement("section");
-  row.className = "tree-compare-row";
-
-  const before = document.createElement("div");
-  before.className = "tree-compare-panel tree-compare-before";
   const beforeTree = beforeBase64
     ? createTssTreeSummary("修改前解析 / child tree", beforeBase64, "tree-shell-compare", { sameLenExamples })
     : null;
-  if (beforeTree) {
-    before.appendChild(beforeTree);
-  } else {
-    const empty = document.createElement("div");
-    empty.className = "dump-empty tree-compare-empty";
-    empty.textContent = opaqueUndecrypted
-      ? "修改前是未解密外层，不解析 child tree。"
-      : "修改前没有可解析 child tree。";
-    before.appendChild(empty);
-  }
-
-  const after = document.createElement("div");
-  after.className = "tree-compare-panel tree-compare-after";
   const afterTree = decodedBase64
     ? createTssTreeSummary("修改后/当前解析 / child tree", decodedBase64, "tree-shell-compare", { sameLenExamples })
     : null;
-  if (afterTree) {
-    after.appendChild(afterTree);
-  } else {
-    const empty = document.createElement("div");
-    empty.className = "dump-empty tree-compare-empty";
-    empty.textContent = opaqueUndecrypted
-      ? "修改后/当前是未解密外层，不解析 child tree。"
-      : "修改后/当前没有可解析 child tree。";
-    after.appendChild(empty);
+  if (!beforeTree && !afterTree) return null;
+
+  const row = document.createElement("section");
+  row.className = "tree-compare-row";
+  if (!beforeTree || !afterTree) row.classList.add("tree-compare-single");
+
+  if (beforeTree) {
+    const before = document.createElement("div");
+    before.className = "tree-compare-panel tree-compare-before";
+    before.appendChild(beforeTree);
+    row.appendChild(before);
   }
 
-  row.appendChild(before);
-  row.appendChild(after);
+  if (afterTree) {
+    const after = document.createElement("div");
+    after.className = "tree-compare-panel tree-compare-after";
+    after.appendChild(afterTree);
+    row.appendChild(after);
+  }
   return row;
 }
 
@@ -9446,8 +9457,9 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     panel.className = `dump-panel ${collapsed ? "dump-fold" : ""} ${toneClass || ""}`.trim();
     if (collapsed && dumpOptions.open) panel.open = true;
     const isRawSource = opaqueUndecrypted || sourceKey === "full" || sourceKey === "raw_after";
-    const showDecodedAsciiRows = !opaqueUndecrypted && sourceShowsDecodedAsciiRows(sourceKey);
-    const tailChecksum = showDecodedAsciiRows ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
+    const isDecodedSource = !opaqueUndecrypted && sourceShowsDecodedAsciiRows(sourceKey);
+    const showDecodedAsciiRows = false;
+    const tailChecksum = isDecodedSource ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
     const timestampHighlights =
       isRawSource
         ? []
@@ -9518,8 +9530,11 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     }
     panel.appendChild(sectionTitle);
 
+    const stringAnnotationIndex = dumpOptions.showStringAnnotations
+      ? getDumpAnnotationIndex(ev, sourceKey, base64Text)
+      : new Map();
     const annotationIndex = mergeDumpAnnotationIndexes(
-      getDumpAnnotationIndex(ev, sourceKey, base64Text),
+      stringAnnotationIndex,
       buildPacketSemanticAnnotationIndex(semanticInfo, getBytesPerRow()),
       buildTimestampAnnotationIndex(timestampHighlights, getBytesPerRow())
     );
@@ -9541,7 +9556,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     pre.className = "hex-body";
     pre.innerHTML = renderHexBodyHtml(dump, hideAscii, {
       blockComments: true,
-      asciiRows: showDecodedAsciiRows,
+      asciiRows: false,
     });
 
     hexShell.appendChild(hexHead);
@@ -9601,6 +9616,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       appendDumpSection(opaqueUndecrypted ? "修改前原始封包 [before/raw]" : "修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
         changedOffsets: decodedChangedOffsets,
       });
+    } else if (hasDecodedDump) {
+      dumpGrid.classList.add("dump-grid-current-only");
     } else {
       appendEmptyDumpSection(
         opaqueUndecrypted ? "修改前原始封包 [before/raw missing]" : "修改前解密 [before missing]",
