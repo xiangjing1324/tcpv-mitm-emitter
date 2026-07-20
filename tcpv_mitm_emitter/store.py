@@ -343,6 +343,7 @@ class TcpvEventStore:
         after_id: str | None = None,
         limit: int = 200,
         include_payload: bool = True,
+        include_analysis: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         stream_key = self.stream_key(account)
         batch = max(1, min(int(limit), self.api_max_limit))
@@ -353,11 +354,26 @@ class TcpvEventStore:
         if has_more:
             rows = rows[:batch]
 
-        events = [self._decode_row(entry_id, fields, include_payload=include_payload) for entry_id, fields in rows]
+        events = [
+            self._decode_row(
+                entry_id,
+                fields,
+                include_payload=include_payload,
+                include_analysis=include_analysis,
+            )
+            for entry_id, fields in rows
+        ]
         last_id = events[-1]["id"] if events else after_id
         return events, last_id, has_more
 
-    def iter_events(self, account: str, *, include_payload: bool = True, batch_size: int = 5000) -> list[dict[str, Any]]:
+    def iter_events(
+        self,
+        account: str,
+        *,
+        include_payload: bool = True,
+        include_analysis: bool = True,
+        batch_size: int = 5000,
+    ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         after_id: str | None = None
         while True:
@@ -366,6 +382,7 @@ class TcpvEventStore:
                 after_id=after_id,
                 limit=batch_size,
                 include_payload=include_payload,
+                include_analysis=include_analysis,
             )
             events.extend(rows)
             if not has_more or not rows:
@@ -385,7 +402,7 @@ class TcpvEventStore:
         entry_id, fields = rows[0]
         if self._to_str(entry_id) != target_id:
             return None
-        return self._decode_row(entry_id, fields, include_payload=True)
+        return self._decode_row(entry_id, fields, include_payload=True, include_analysis=True)
 
     def get_connections(self, account: str, recent: int = 2000) -> list[dict[str, Any]]:
         stream_key = self.stream_key(account)
@@ -512,10 +529,11 @@ class TcpvEventStore:
         entry_id: bytes | str,
         fields: dict[Any, Any],
         include_payload: bool = True,
+        include_analysis: bool = True,
     ) -> dict[str, Any]:
         decoded = {self._to_str(k): self._to_str(v) for k, v in fields.items()}
         analysis: dict[str, Any] = {}
-        if decoded.get("ana"):
+        if include_analysis and decoded.get("ana"):
             try:
                 value = json.loads(decoded["ana"])
                 if isinstance(value, dict):

@@ -229,12 +229,14 @@ def create_app(runtime) -> FastAPI:
         after_id: str | None = Query(None),
         limit: int = Query(200, ge=1, le=100000),
         include_payload: bool = Query(True),
+        include_analysis: bool = Query(True),
     ) -> dict:
         items, last_id, has_more = runtime.get_events(
             account=account,
             after_id=after_id,
             limit=limit,
             include_payload=include_payload,
+            include_analysis=include_analysis,
         )
         return {
             "events": items,

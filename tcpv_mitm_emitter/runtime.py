@@ -397,23 +397,26 @@ class TcpvRuntime:
         after_id: str | None,
         limit: int,
         include_payload: bool = True,
+        include_analysis: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         store = self.store
         if store is None:
             return [], after_id, False
+        decode_payload = include_payload or include_analysis
         events, last_id, has_more = store.get_events(
             account=account,
             after_id=after_id,
             limit=limit,
-            # Redis Stream rows already contain the payload fields. Decode them
-            # here even for compact list responses so old rows without `ana`
-            # can be upgraded by the local semantic parser.
-            include_payload=True,
+            # Old rows without `ana` still need payload bytes when the caller
+            # asks for analysis; compact list callers can skip both.
+            include_payload=decode_payload,
+            include_analysis=include_analysis,
         )
-        for event in events:
-            if analysis_needs_upgrade(event.get("analysis")):
-                event["analysis"] = analysis_from_event(event)
-        correlate_events(events)
+        if include_analysis:
+            for event in events:
+                if analysis_needs_upgrade(event.get("analysis")):
+                    event["analysis"] = analysis_from_event(event)
+            correlate_events(events)
         if not include_payload:
             for event in events:
                 event["pay"] = ""

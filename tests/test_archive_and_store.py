@@ -805,6 +805,24 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["analysis"]["schema"], "tersafe.semantic.v1")
         self.assertEqual(events[0]["analysis"]["packet"]["dynamic_subtype"], 0x7A)
 
+    def test_runtime_can_omit_analysis_for_lightweight_event_lists(self):
+        record = _metadata_record(0x0112237A, b"state:00300015,r:0/0/0,p:1/1,0\x00")
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.append_event("acct", "cid", 0, record, ts_ms=1000)
+        runtime = TcpvRuntime()
+        runtime.store = store
+
+        events, _last_id, _has_more = runtime.get_events(
+            account="acct",
+            after_id=None,
+            limit=10,
+            include_payload=False,
+            include_analysis=False,
+        )
+
+        self.assertEqual(events[0]["pay"], "")
+        self.assertEqual(events[0]["analysis"], {})
+
     def test_store_decodes_raw_after_payload(self):
         store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
         store.append_event(

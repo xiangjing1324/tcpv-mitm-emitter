@@ -98,6 +98,7 @@ const cfgNumber = (key, fallback) => {
 const MAX_FULL_SCAN_BYTES = 8192;
 const MAX_EVENTS_IN_MEMORY = cfgNumber("max_events_in_memory", 50000);
 const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 500);
+const INITIAL_DRAIN_PAGES = cfgNumber("initial_drain_pages", 4);
 const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
@@ -1351,6 +1352,20 @@ function currentFlowLooksLikePort8092(ev = null, summaryText = "") {
   return /\bport8092\b|(?:^|\D)8092(?:\D|$)/.test(raw);
 }
 
+function currentFlowLooksLikeGcloud65010(ev = null, summaryText = "") {
+  const flow = getCurrentFlowMeta();
+  const parts = [
+    summaryText,
+    ev && ev.summary,
+    ev && ev.cid,
+    flow && flow.last_cid,
+    flow && flow.listen_tag,
+    flow && flow.source_port,
+  ];
+  const raw = parts.map((part) => String(part || "")).join(" ").toLowerCase();
+  return /\btgcp65010\b|\bgcloud\b|(?:^|\D)65010(?:\D|$)/.test(raw);
+}
+
 async function selectFlow(flowId) {
   if (!flowId) return;
   if (state.flowId !== flowId) {
@@ -1362,7 +1377,8 @@ async function selectFlow(flowId) {
   renderSelectedTitle();
   updateSearchUi();
   renderEvents();
-  await syncLatestEvents({ drain: true, maxPages: 60, force: true });
+  setStatus("loading selected flow...");
+  await syncLatestEvents({ drain: true, maxPages: INITIAL_DRAIN_PAGES, force: true });
 }
 
 async function syncLatestEvents(options = {}) {
@@ -1378,6 +1394,7 @@ async function syncLatestEvents(options = {}) {
   try {
     const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
     const needPayloadInList = state.search.active && modeSpec.scope === "full";
+    const includeAnalysisInList = !currentFlowLooksLikeGcloud65010();
     let page = 0;
     let changed = false;
     let shouldRenderEmpty = false;
@@ -1387,6 +1404,7 @@ async function syncLatestEvents(options = {}) {
         account: requestFlowId,
         limit: String(EVENTS_FETCH_LIMIT),
         include_payload: needPayloadInList ? "1" : "0",
+        include_analysis: includeAnalysisInList ? "1" : "0",
       });
       if (state.afterId) {
         params.set("after_id", state.afterId);
