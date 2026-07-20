@@ -10050,7 +10050,16 @@ function buildEventReadableSummary(ev, summaryText) {
   const primary = document.createElement("div");
   primary.className = "event-summary-primary";
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
-  if (semantic) {
+  const isGcloud = isGcloud65010Summary(summaryText);
+  if (isGcloud) {
+    for (const item of buildGcloudSummaryInsights(ev, summaryText).slice(0, 6)) {
+      const chip = document.createElement("div");
+      chip.className = "event-summary-chip event-summary-chip-state";
+      chip.textContent = item.text;
+      chip.title = item.title || item.text;
+      primary.appendChild(chip);
+    }
+  } else if (semantic) {
     const packet = semantic.packet && typeof semantic.packet === "object" ? semantic.packet : {};
     const semanticActions = Array.isArray(semantic.actions) ? semantic.actions : [];
     const sourceAction = semanticActions.find((item) => (
@@ -10075,7 +10084,7 @@ function buildEventReadableSummary(ev, summaryText) {
       primary.appendChild(chip);
     }
   }
-  if (items.length > 0) {
+  if (!isGcloud && items.length > 0) {
     for (const item of items.slice(0, 6)) {
       const chip = document.createElement("div");
       chip.className = `event-summary-chip event-summary-chip-${item.kind || "info"}`;
