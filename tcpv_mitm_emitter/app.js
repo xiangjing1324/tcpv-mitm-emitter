@@ -575,6 +575,59 @@ function installDumpAsciiRowStyles() {
     .gcloud-node-details > summary::-webkit-details-marker {
       display: none;
     }
+    .gcloud-tree-details > summary {
+      cursor: pointer;
+      color: var(--text);
+      font-weight: 850;
+      list-style: none;
+    }
+    .gcloud-tree-details > summary::-webkit-details-marker {
+      display: none;
+    }
+    .gcloud-proto-tree {
+      margin-top: 7px;
+      display: grid;
+      gap: 3px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .gcloud-tree-row {
+      --depth: 0;
+      display: grid;
+      grid-template-columns: minmax(170px, 280px) minmax(74px, 118px) minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      margin-left: calc(var(--depth) * 18px);
+      padding: 4px 6px;
+      border-left: 2px solid color-mix(in srgb, #38bdf8 35%, transparent);
+      background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+    }
+    .gcloud-tree-key {
+      min-width: 0;
+      color: #7dd3fc;
+      font-weight: 850;
+      overflow-wrap: anywhere;
+    }
+    .gcloud-tree-field {
+      display: block;
+      margin-top: 1px;
+      color: var(--muted);
+      font-weight: 650;
+      font-size: 11px;
+    }
+    .gcloud-tree-type {
+      color: color-mix(in srgb, var(--muted) 84%, var(--text));
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .gcloud-tree-value {
+      min-width: 0;
+      color: var(--text);
+      overflow-wrap: anywhere;
+    }
+    .gcloud-tree-value-empty {
+      color: var(--muted);
+    }
     .gcloud-node-list {
       margin-top: 6px;
       display: grid;
@@ -4651,6 +4704,149 @@ function gcloudNodeValueText(node) {
   return `wire${Number(node.wire)}`;
 }
 
+function gcloudProtoFieldAlias(path, node, proto) {
+  const key = gcloudPathKey(path);
+  const generic = {
+    "1": "header",
+    "1.3": "cmd_id",
+    "1.7": "command",
+    "1.8": "module",
+    "1.9": "language",
+    "2": "body",
+  };
+  const commandName = String(proto && proto.commandDisplay ? proto.commandDisplay : "");
+  const chatWorldLoad = /CSChatWorldLoad/i.test(commandName);
+  const chatAliases = chatWorldLoad ? {
+    "2.2": "items[]",
+    "2.2.1": "message",
+    "2.2.1.3": "text?",
+    "2.2.2": "sender?",
+    "2.2.2.2": "name?",
+    "2.2.2.3": "id?",
+    "2.5": "status?",
+  } : {};
+  if (chatAliases[key]) return chatAliases[key];
+  if (generic[key]) return generic[key];
+
+  const text = String(node && node.string ? node.string : "");
+  if (/^CS[A-Za-z0-9_]{4,}$/.test(text)) return "command";
+  if (/^(online|chat|mail|security|mall|role)$/i.test(text)) return "module?";
+  if (/^zh[-_]/i.test(text)) return "language?";
+  if (text.length >= 8 && /[\u4e00-\u9fff]/.test(text) && /[？?。！，,]/.test(text)) return "text?";
+  return "";
+}
+
+function gcloudProtoTypeText(node) {
+  if (!node) return "-";
+  if (node.truncated) return "fragment";
+  if (node.string) return "string";
+  if (Number(node.wire) === 0) return "varint";
+  if (Number(node.wire) === 1) return "fixed64";
+  if (Number(node.wire) === 5) return "fixed32";
+  if (Number(node.wire) === 2 && Array.isArray(node.children) && node.children.length > 0) return "message";
+  if (Number(node.wire) === 2) return "bytes";
+  return `wire${Number(node.wire)}`;
+}
+
+function gcloudProtoTreeValueText(node) {
+  if (!node) return "";
+  if (node.truncated) return `len=${Number(node.len || 0)} available=${Number(node.available || 0)}`;
+  if (node.string) return `"${shortenText(node.string, 180)}"`;
+  if (Number(node.wire) === 0 && node.value !== undefined) {
+    const value = Number(node.value);
+    return Number.isFinite(value) ? `${value} (${formatHexValue(value)})` : String(node.value);
+  }
+  if (Number(node.wire) === 2) {
+    const childCount = Array.isArray(node.children) ? node.children.length : 0;
+    const childStatus = node.childOk === false && node.childReason ? `; ${node.childReason}` : "";
+    return childCount > 0 ? `len=${Number(node.len || 0)} children=${childCount}${childStatus}` : `len=${Number(node.len || 0)}`;
+  }
+  if (node.valueHex) return node.valueHex;
+  return "";
+}
+
+function appendGcloudProtoTreeRows(container, nodes, proto, path = [], depth = 0, topIndex = -1, budget = null) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const countByField = new Map();
+  for (const node of list) {
+    const field = Number(node && node.field);
+    if (!Number.isFinite(field)) continue;
+    countByField.set(field, Number(countByField.get(field) || 0) + 1);
+  }
+  const state = budget || { count: 0, max: 90, truncated: false };
+  list.forEach((node, index) => {
+    if (!node || state.count >= state.max) {
+      state.truncated = true;
+      return;
+    }
+    state.count += 1;
+    const nextTopIndex = path.length === 0 ? index : topIndex;
+    const nextPath = path.concat(Number(node.field));
+    const repeated = Number(countByField.get(Number(node.field)) || 0) > 1;
+    const alias = gcloudProtoFieldAlias(nextPath, node, proto);
+    const fieldText = `${path.length === 0 ? `node[${nextTopIndex}] ` : ""}field[${Number(node.field)}]${repeated ? "[]" : ""}`;
+    const pathText = gcloudPathText(nextPath, nextTopIndex);
+
+    const row = document.createElement("div");
+    row.className = "gcloud-tree-row";
+    row.style.setProperty("--depth", String(Math.min(depth, 8)));
+
+    const key = document.createElement("div");
+    key.className = "gcloud-tree-key";
+    key.textContent = alias || fieldText;
+    const raw = document.createElement("span");
+    raw.className = "gcloud-tree-field";
+    raw.textContent = alias ? `${fieldText} · ${pathText}` : pathText;
+    key.appendChild(raw);
+
+    const type = document.createElement("div");
+    type.className = "gcloud-tree-type";
+    type.textContent = gcloudProtoTypeText(node);
+
+    const value = document.createElement("div");
+    value.className = "gcloud-tree-value";
+    const valueText = gcloudProtoTreeValueText(node);
+    value.textContent = valueText || "{...}";
+    if (!valueText) value.classList.add("gcloud-tree-value-empty");
+
+    row.appendChild(key);
+    row.appendChild(type);
+    row.appendChild(value);
+    container.appendChild(row);
+
+    if (Array.isArray(node.children) && node.children.length > 0) {
+      appendGcloudProtoTreeRows(container, node.children, proto, nextPath, depth + 1, nextTopIndex, state);
+    }
+  });
+  return state;
+}
+
+function buildGcloudProtoTree(proto) {
+  if (!proto || !Array.isArray(proto.nodes) || proto.nodes.length <= 0) return null;
+  const tree = document.createElement("div");
+  tree.className = "gcloud-proto-tree";
+  const state = appendGcloudProtoTreeRows(tree, proto.nodes, proto);
+  if (state && state.truncated) {
+    const row = document.createElement("div");
+    row.className = "gcloud-tree-row";
+    row.style.setProperty("--depth", "0");
+    const key = document.createElement("div");
+    key.className = "gcloud-tree-key";
+    key.textContent = "more";
+    const type = document.createElement("div");
+    type.className = "gcloud-tree-type";
+    type.textContent = "truncated";
+    const value = document.createElement("div");
+    value.className = "gcloud-tree-value gcloud-tree-value-empty";
+    value.textContent = `tree display capped at ${state.max} nodes`;
+    row.appendChild(key);
+    row.appendChild(type);
+    row.appendChild(value);
+    tree.appendChild(row);
+  }
+  return tree;
+}
+
 function gcloudProtoNodeRows(proto, maxRows = 18) {
   if (!proto || !Array.isArray(proto.flat)) return [];
   const rows = [];
@@ -4831,12 +5027,25 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   }
   if (grid.childElementCount > 0) panel.appendChild(grid);
 
+  const protoTree = info.proto ? buildGcloudProtoTree(info.proto) : null;
+  if (protoTree) {
+    const details = document.createElement("details");
+    details.className = "gcloud-tree-details";
+    details.open = true;
+    const summary = document.createElement("summary");
+    const count = info.proto && Array.isArray(info.proto.flat) ? info.proto.flat.length : info.nodeRows.length;
+    summary.textContent = `protobuf tree ×${count}`;
+    details.appendChild(summary);
+    details.appendChild(protoTree);
+    panel.appendChild(details);
+  }
+
   if (Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
     const details = document.createElement("details");
     details.className = "gcloud-node-details";
-    details.open = true;
+    details.open = !protoTree;
     const summary = document.createElement("summary");
-    summary.textContent = `protobuf nodes ×${info.nodeRows.length}`;
+    summary.textContent = `raw field paths ×${info.nodeRows.length}`;
     details.appendChild(summary);
     const list = document.createElement("div");
     list.className = "gcloud-node-list";
