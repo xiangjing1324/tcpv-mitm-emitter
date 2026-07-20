@@ -4778,6 +4778,12 @@ function gcloudProtoFieldAlias(path, node, proto) {
     "2.2.2.3": "id?",
     "2.5": "status?",
   } : {};
+  const aceAliases = /CSAceSendLightFeatureDataNtf/i.test(commandName) ? {
+    "2.1": "feature_hex_blob",
+  } : (/CSAceSendAntiDataNtf/i.test(commandName) ? {
+    "2.1": "anti_data_hex_blob",
+  } : {});
+  if (aceAliases[key]) return aceAliases[key];
   if (chatAliases[key]) return chatAliases[key];
   if (generic[key]) return generic[key];
 
@@ -4792,7 +4798,13 @@ function gcloudProtoFieldAlias(path, node, proto) {
 function gcloudProtoTypeText(node) {
   if (!node) return "-";
   if (node.truncated) return "fragment";
-  if (node.string) return "string";
+  if (node.string) {
+    const hexInfo = gcloudAnalyzeHexString(node.string);
+    if (hexInfo && hexInfo.kind === "ace-xor") return "ACE/xor";
+    if (hexInfo && hexInfo.kind === "double-hex") return "hex->hex";
+    if (hexInfo) return "hex-string";
+    return "string";
+  }
   if (Number(node.wire) === 0) return "varint";
   if (Number(node.wire) === 1) return "fixed64";
   if (Number(node.wire) === 5) return "fixed32";
@@ -4864,6 +4876,133 @@ function gcloudPrintableAscii(byteValues) {
   return text.replace(/\.+$/g, "");
 }
 
+function gcloudIsHexText(text, minChars = 8) {
+  const raw = String(text || "").trim();
+  return raw.length >= Number(minChars || 8) && raw.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(raw);
+}
+
+function gcloudBytesFromHexText(text, maxBytes = 4096) {
+  const raw = String(text || "").trim();
+  if (!gcloudIsHexText(raw, 2)) return [];
+  const byteCount = Math.min(Math.floor(raw.length / 2), Math.max(1, Number(maxBytes || 4096)));
+  const out = [];
+  for (let index = 0; index < byteCount; index += 1) {
+    out.push(parseInt(raw.slice(index * 2, index * 2 + 2), 16) & 0xff);
+  }
+  return out;
+}
+
+function gcloudBytesAreAsciiHex(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  return bytes.length >= 8
+    && bytes.length % 2 === 0
+    && bytes.every((byte) => (
+      (byte >= 0x30 && byte <= 0x39)
+      || (byte >= 0x41 && byte <= 0x46)
+      || (byte >= 0x61 && byte <= 0x66)
+    ));
+}
+
+function gcloudBytesToAscii(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  return bytes.map((byte) => String.fromCharCode(byte & 0xff)).join("");
+}
+
+function gcloudSigned32Text(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "";
+  return String(num > 0x7fffffff ? num - 0x100000000 : num);
+}
+
+function gcloudWordPreview(byteValues, maxWords = 12) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length < 4) return "";
+  const out = [];
+  const limit = Math.min(Math.floor(bytes.length / 4), Math.max(1, Number(maxWords || 12)));
+  for (let wordIndex = 0; wordIndex < limit; wordIndex += 1) {
+    const off = wordIndex * 4;
+    const chunk = bytes.slice(off, off + 4);
+    const be = readBe32(bytes, off);
+    const le = readLe32(bytes, off);
+    const ascii = gcloudPrintableAscii(chunk).replace(/\.+$/g, "");
+    out.push(
+      `${gcloudOffsetText(off)} ${gcloudHexBytes(chunk, 4)}`
+      + ` be32=${be}(${formatHexValue(be, 8)})`
+      + ` le32=${le}(${formatHexValue(le, 8)})`
+      + (be !== null && be > 0x7fffffff ? ` sbe32=${gcloudSigned32Text(be)}` : "")
+      + (ascii && ascii.length >= 2 ? ` ascii="${ascii}"` : "")
+    );
+  }
+  if (bytes.length > limit * 4) out.push(`... +${bytes.length - limit * 4} bytes`);
+  return out.join("; ");
+}
+
+function gcloudAnalyzeHexString(text) {
+  const raw = String(text || "").trim();
+  if (!gcloudIsHexText(raw, 16)) return null;
+  const layer1 = gcloudBytesFromHexText(raw, 8192);
+  if (layer1.length <= 0) return null;
+  const facts = [
+    { label: "hex_string", value: `${raw.length} chars -> ${layer1.length} bytes` },
+    { label: "hex_bytes", value: gcloudHexBytes(layer1, 160), className: "gcloud-tree-fact-raw" },
+  ];
+
+  if (layer1.length >= 6 && (layer1[0] === 0x11 || layer1[0] === 0x12) && layer1[4] === 0x00 && layer1[5] === layer1.length - 6) {
+    const key = layer1[1] & 0xff;
+    const marker = layer1.slice(2, 4).map(childHexByteText).join("");
+    const payload = layer1.slice(6).map((byte) => (byte ^ key) & 0xff);
+    const kindText = `ACE XOR ver=${formatHexValue(layer1[0], 2)} key=${formatHexValue(key, 2)} marker=${marker} len=${payload.length}`;
+    facts.push({ label: "ace_xor", value: kindText });
+    if (payload.length >= 2) facts.push({ label: "payload_be16", value: `${readBe16(payload, 0)} (${formatHexValue(readBe16(payload, 0), 4)})` });
+    if (payload.length >= 4) facts.push({ label: "payload_type?", value: `${readBe16(payload, 2)} (${formatHexValue(readBe16(payload, 2), 4)})` });
+    if (payload.length >= 8) facts.push({ label: "payload_id?", value: `${readBe32(payload, 4)} (${formatHexValue(readBe32(payload, 4), 8)})` });
+    facts.push({ label: "payload_hex", value: gcloudHexBytes(payload, 192), className: "gcloud-tree-fact-raw" });
+    const wordText = gcloudWordPreview(payload, 14);
+    if (wordText) facts.push({ label: "payload_words", value: wordText, className: "gcloud-tree-fact-raw" });
+    return {
+      kind: "ace-xor",
+      summary: `${kindText} -> ${payload.length} bytes payload`,
+      facts,
+      payload,
+    };
+  }
+
+  if (gcloudBytesAreAsciiHex(layer1)) {
+    const innerText = gcloudBytesToAscii(layer1);
+    const layer2 = gcloudBytesFromHexText(innerText, 8192);
+    facts.push({ label: "nested_hex", value: `${layer1.length} ASCII-hex bytes -> ${layer2.length} bytes` });
+    facts.push({ label: "nested_bytes", value: gcloudHexBytes(layer2, 192), className: "gcloud-tree-fact-raw" });
+    const wordText = gcloudWordPreview(layer2, 14);
+    if (wordText) facts.push({ label: "nested_words", value: wordText, className: "gcloud-tree-fact-raw" });
+    return {
+      kind: "double-hex",
+      summary: `hex string -> ASCII hex -> ${layer2.length} bytes payload`,
+      facts,
+      payload: layer2,
+    };
+  }
+
+  if (layer1.length >= 6) {
+    const total = readBe16(layer1, 4);
+    if (readBe32(layer1, 0) === 1 && total === layer1.length) {
+      facts.push({
+        label: "record_head",
+        value: `v=${readBe32(layer1, 0)} total=${total} selector=${formatHexValue(readBe16(layer1, 6), 4)} sublen=${readBe16(layer1, 8) ?? "-"}`,
+      });
+    }
+  }
+  const utf8 = gcloudBytesToUtf8(layer1);
+  if (utf8 && isGcloudVisibleString(utf8)) facts.push({ label: "hex_utf8", value: `"${shortenText(utf8, 220)}"`, className: "gcloud-tree-fact-raw" });
+  const wordText = gcloudWordPreview(layer1, 14);
+  if (wordText) facts.push({ label: "hex_words", value: wordText, className: "gcloud-tree-fact-raw" });
+  return {
+    kind: "hex-bytes",
+    summary: `hex string -> ${layer1.length} bytes`,
+    facts,
+    payload: layer1,
+  };
+}
+
 function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
   if (!node) return [];
   const facts = [];
@@ -4903,9 +5042,17 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
       add("le64", gcloudBigintText(gcloudReadUint64(valueBytes, 0, true)));
     }
     const utf8 = gcloudBytesToUtf8(valueBytes);
-    if (utf8 && isGcloudVisibleString(utf8)) add("utf8", `"${utf8}"`, "gcloud-tree-fact-raw");
+    if (utf8 && isGcloudVisibleString(utf8)) add("utf8", `"${shortenText(utf8, 240)}"`, "gcloud-tree-fact-raw");
     const ascii = gcloudPrintableAscii(valueBytes);
     if (ascii && ascii.length >= 3 && ascii !== utf8) add("ascii", `"${shortenText(ascii, 240)}"`, "gcloud-tree-fact-raw");
+    if (node.string) {
+      const hexInfo = gcloudAnalyzeHexString(node.string);
+      if (hexInfo && Array.isArray(hexInfo.facts)) {
+        for (const fact of hexInfo.facts) {
+          add(fact.label, fact.value, fact.className || "");
+        }
+      }
+    }
   }
   const rawBytes = gcloudNodeRawBytes(node, bytes);
   if (rawBytes.length > 0 && rawBytes.length !== valueBytes.length) {
@@ -4917,7 +5064,11 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
 function gcloudProtoTreeValueText(node) {
   if (!node) return "";
   if (node.truncated) return `len=${Number(node.len || 0)} available=${Number(node.available || 0)}`;
-  if (node.string) return `"${node.string}"`;
+  if (node.string) {
+    const hexInfo = gcloudAnalyzeHexString(node.string);
+    if (hexInfo) return hexInfo.summary;
+    return `"${node.string}"`;
+  }
   if (Number(node.wire) === 0 && node.value !== undefined) {
     const valueText = String(node.valueText || node.value);
     const hexText = String(node.valueHexText || formatHexValue(node.value));
