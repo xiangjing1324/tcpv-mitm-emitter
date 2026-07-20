@@ -4958,6 +4958,8 @@ function gcloudStringContentAlias(text) {
   if (/^https?:\/\//i.test(value)) return /qlogo\.cn\//i.test(value) ? "avatar_url" : "url";
   if (/^tcp:\/\//i.test(value)) return "server_endpoint";
   if (/^(?:\/?(?:private|var|Library|Applications|System)\/)|(?:[A-Za-z]:\\)|.*\.(?:dylib|framework|data|json|plist)$/i.test(value)) return "path";
+  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(value)) return "ip_address";
+  if (/^com\.[A-Za-z0-9_.-]+$/.test(value)) return "bundle_id";
   if (/^IOS\d+(?:\.\d+)+$/i.test(value)) return "os_version";
   if (/^(?:Apple\|)?i(?:Phone|Pad)\d+,\d+$/i.test(value)) return "device_model";
   if (/^Mozilla\/\d/i.test(value)) return "user_agent";
@@ -4966,11 +4968,11 @@ function gcloudStringContentAlias(text) {
   if (/^(?:WiFi|WLAN|Cellular|Ethernet|5G|4G|3G)$/i.test(value)) return "network_type";
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return "uuid";
   if (/^\[[0-9a-f:]+\]:\d+$/i.test(value) || /^(?:\d{1,3}\.){3}\d{1,3}:\d+$/.test(value)) return "network_address";
+  if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(value)) return "host";
   if (/^[a-z]{2}(?:[-_][A-Za-z]{2,8})+$/i.test(value)) return "language";
   if (/^[A-Z]{2}$/.test(value)) return "region?";
   if (/^[A-Z]{3}$/.test(value)) return "currency?";
   if (/^\d+(?:\.\d+){2,}$/.test(value)) return "version?";
-  if (/^com\.[A-Za-z0-9_.-]+$/.test(value)) return "bundle_id";
   if (/^[0-9]{10,20}$/.test(value)) return "id?";
   if (/^[0-9a-f]{32,64}$/i.test(value)) return "hash?";
   return "";
@@ -4989,6 +4991,11 @@ function gcloudProtoFieldAlias(path, node, proto) {
   const commandName = String(proto && proto.commandDisplay ? proto.commandDisplay : "");
   const chatWorldLoad = /CSChatWorldLoad/i.test(commandName);
   const accountLogin = /CSAccountLogin/i.test(commandName);
+  const onlineHeartbeatRes = /^CSOnlineHeartbeatRes/i.test(commandName);
+  const prepareMapBoardRes = /^CSPrepareMapBoardRes/i.test(commandName);
+  const prepareTdmMapBoardRes = /^CSPrepareTDMMapBoardRes/i.test(commandName);
+  const switchUnlockInfoRes = /^CSSwitchLoadSystemUnlockInfoRes/i.test(commandName);
+  const collectionRes = /^CSCollection/i.test(commandName);
   const chatAliases = chatWorldLoad ? {
     "2.2": "items[]",
     "2.2.1": "message",
@@ -5006,6 +5013,24 @@ function gcloudProtoFieldAlias(path, node, proto) {
   if (aceAliases[key]) return aceAliases[key];
   if (chatAliases[key]) return chatAliases[key];
   if (generic[key]) return generic[key];
+  if (onlineHeartbeatRes && key === "2.2") return "server_time?";
+  if (chatWorldLoad && key === "2.2.1.1") return "message_time?";
+  if (prepareMapBoardRes) {
+    if (key === "2.3.10") return "server_time?";
+    if (key === "2.3.8.2") return "match_start?";
+    if (key === "2.3.9.2") return "match_end?";
+    if (/^2\.3\.(?:6|7|24)$/.test(key)) return "schedule_start?";
+    if (/^2\.3\.(?:4|9|25)$/.test(key)) return "schedule_end?";
+  }
+  if (prepareTdmMapBoardRes) {
+    if (/^2\.2\.(?:24|26)$/.test(key)) return "period_start?";
+    if (/^2\.2\.(?:25|27)$/.test(key)) return "period_end?";
+  }
+  if (switchUnlockInfoRes) {
+    if (key === "2.2.3") return "unlock_start?";
+    if (key === "2.2.4") return "unlock_end?";
+  }
+  if (collectionRes && /^(?:2\.2\.25|2\.3\.25|2\.4\.25|2\.5\.2)$/.test(key)) return "time?";
 
   const text = String(node && node.string ? node.string : "");
   if (accountLogin) {
@@ -5185,6 +5210,24 @@ function gcloudEpochText(seconds) {
   } catch (_e) {
     return "";
   }
+}
+
+function gcloudEpochScalarInfo(value) {
+  const raw = String(value ?? "").trim();
+  if (!/^\d{10,13}$/.test(raw)) return null;
+  const numberValue = Number(raw);
+  if (!Number.isFinite(numberValue)) return null;
+  let seconds = numberValue;
+  let unit = "s";
+  if (raw.length === 13) {
+    seconds = Math.floor(numberValue / 1000);
+    unit = "ms";
+  } else if (raw.length !== 10) {
+    return null;
+  }
+  const text = gcloudEpochText(seconds);
+  if (!text) return null;
+  return { seconds, unit, text };
 }
 
 function gcloudAnalyzeAcePayload(byteValues, meta = {}) {
@@ -5370,6 +5413,10 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
     facts.push({ label, value: text, className });
   };
   const valueBytes = gcloudNodeValueBytes(node, bytes);
+  if (Number(node.wire) === 0 && node.value !== undefined) {
+    const epoch = gcloudEpochScalarInfo(node.valueText || node.value);
+    if (epoch) add("time?", `${epoch.text} (${epoch.unit})`, "gcloud-tree-fact-time");
+  }
   if (valueBytes.length > 0) {
     const utf8 = gcloudBytesToUtf8(valueBytes);
     if (utf8 && isGcloudVisibleString(utf8) && !node.string) add("utf8", `"${shortenText(utf8, 240)}"`, "gcloud-tree-fact-raw");
@@ -5699,6 +5746,24 @@ function gcloudProtoProfileRows(proto, ev = null) {
   return rows;
 }
 
+function gcloudProtoTimeRows(proto, maxItems = 6) {
+  if (!proto || !Array.isArray(proto.flat)) return [];
+  const seen = new Set();
+  const parts = [];
+  for (const item of proto.flat) {
+    if (!item || !item.node || Number(item.node.wire) !== 0 || item.node.value === undefined) continue;
+    const epoch = gcloudEpochScalarInfo(item.node.valueText || item.node.value);
+    if (!epoch) continue;
+    const alias = gcloudProtoFieldAlias(item.path, item.node, proto) || gcloudPathText(item.path, item.topIndex);
+    const key = `${alias}|${epoch.text}|${epoch.unit}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(`${alias}=${epoch.text}${epoch.unit === "ms" ? " ms" : ""}`);
+    if (parts.length >= maxItems) break;
+  }
+  return parts.length > 0 ? [{ label: "时间字段", value: parts.join("  ") }] : [];
+}
+
 function analyzeGcloudEvent(ev, summaryText = "") {
   if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return null;
   const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary));
@@ -5738,6 +5803,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       : "GCloud 4013 明文";
     const bodyNode = proto && proto.bodyNode ? proto.bodyNode : null;
     const profileRows = gcloudProtoProfileRows(proto, ev);
+    const timeRows = gcloudProtoTimeRows(proto);
     return {
       kind: proto && proto.ok ? "proto" : "fragment",
       meta,
@@ -5758,6 +5824,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         { label: "Proto", value: proto ? gcloudProtoStatusText(proto) : "payload 未加载" },
         { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${protoBytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
         { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 field[2] body" },
+        ...timeRows,
         ...profileRows,
         ...(compression ? [{ label: "压缩", value: `LZ4 block ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
         { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
