@@ -97,7 +97,7 @@ const cfgNumber = (key, fallback) => {
 };
 const MAX_FULL_SCAN_BYTES = 8192;
 const MAX_EVENTS_IN_MEMORY = cfgNumber("max_events_in_memory", 50000);
-const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 2000);
+const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 500);
 const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
