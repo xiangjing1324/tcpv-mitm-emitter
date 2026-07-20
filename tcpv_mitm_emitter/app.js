@@ -6,6 +6,7 @@ const state = {
   hasMore: true,
   events: [],
   loading: false,
+  syncToken: 0,
   autoRefresh: true,
   tick: 0,
   expandedIds: new Set(),
@@ -1355,15 +1356,20 @@ async function selectFlow(flowId) {
   if (state.flowId !== flowId) {
     state.flowId = flowId;
   }
+  state.syncToken += 1;
   resetEventStateForFlowChange();
   renderFlowList();
   renderSelectedTitle();
   updateSearchUi();
-  await syncLatestEvents({ drain: true, maxPages: 60 });
+  renderEvents();
+  await syncLatestEvents({ drain: true, maxPages: 60, force: true });
 }
 
 async function syncLatestEvents(options = {}) {
-  if (!state.flowId || state.loading) return;
+  const force = !!(options && options.force);
+  if (!state.flowId || (state.loading && !force)) return;
+  const requestFlowId = state.flowId;
+  const requestToken = state.syncToken;
   const drain = !!(options && options.drain);
   const maxPagesRaw = Number(options && options.maxPages);
   const maxPages = Number.isFinite(maxPagesRaw) && maxPagesRaw > 0 ? Math.floor(maxPagesRaw) : 1;
@@ -1378,7 +1384,7 @@ async function syncLatestEvents(options = {}) {
 
     while (page < maxPages) {
       const params = new URLSearchParams({
-        account: state.flowId,
+        account: requestFlowId,
         limit: String(EVENTS_FETCH_LIMIT),
         include_payload: needPayloadInList ? "1" : "0",
       });
@@ -1386,6 +1392,9 @@ async function syncLatestEvents(options = {}) {
         params.set("after_id", state.afterId);
       }
       const data = await apiJson(`/events?${params.toString()}`);
+      if (requestFlowId !== state.flowId || requestToken !== state.syncToken) {
+        return;
+      }
 
       const rows = Array.isArray(data.events) ? data.events : [];
       if (!needPayloadInList) {
@@ -1417,9 +1426,13 @@ async function syncLatestEvents(options = {}) {
       renderEvents();
     }
   } catch (e) {
-    setStatus(`sync error: ${e.message}`);
+    if (requestFlowId === state.flowId && requestToken === state.syncToken) {
+      setStatus(`sync error: ${e.message}`);
+    }
   } finally {
-    state.loading = false;
+    if (requestFlowId === state.flowId && requestToken === state.syncToken) {
+      state.loading = false;
+    }
   }
 }
 
