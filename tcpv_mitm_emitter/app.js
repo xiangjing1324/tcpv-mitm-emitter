@@ -32,6 +32,7 @@ const state = {
   filteredCount: 0,
   dumpScrollLeft: new Map(),
   sidebarHidden: false,
+  gcloud9001PairIndex: null,
 };
 
 const el = {
@@ -1464,6 +1465,7 @@ function renderFlowList() {
 function resetEventStateForFlowChange() {
   state.dumpScrollLeft.clear();
   state.events = [];
+  state.gcloud9001PairIndex = null;
   state.afterId = null;
   state.hasMore = true;
   state.expandedIds.clear();
@@ -4550,6 +4552,15 @@ function readGcloudBe32(bytes, offset) {
   ) >>> 0;
 }
 
+function readGcloudBe48(bytes, offset) {
+  if (!Array.isArray(bytes) || offset + 6 > bytes.length) return null;
+  let value = 0;
+  for (let i = 0; i < 6; i += 1) {
+    value = value * 0x100 + (bytes[offset + i] & 0xff);
+  }
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 function parseGcloudTgcpFrame(bytes) {
   if (!Array.isArray(bytes) || bytes.length < 8 || bytes[0] !== 0x33 || bytes[1] !== 0x66) {
     return null;
@@ -4566,6 +4577,133 @@ function parseGcloudTgcpFrame(bytes) {
     totalLen: bytes.length,
     prefix: bytes.slice(0, Math.min(16, bytes.length)).map(childHexByteText).join(" "),
   };
+}
+
+function normalizeGcloudDirection(ev, meta = null) {
+  const raw = String(meta && meta.direction ? meta.direction : "").trim().toLowerCase();
+  if (raw === "outbound" || raw === "client" || raw === "request" || raw === "req") return "outbound";
+  if (raw === "inbound" || raw === "server" || raw === "response" || raw === "resp") return "inbound";
+  const dir = Number(ev && ev.dir);
+  if (dir === 0) return "outbound";
+  if (dir === 1) return "inbound";
+  return raw || "";
+}
+
+function gcloudEventTsMs(ev) {
+  const raw = Number(ev && ev.ts);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return raw < 10000000000 ? raw * 1000 : raw;
+}
+
+function parseGcloud9001Control(bytes, frame = null) {
+  const tgcp = frame || parseGcloudTgcpFrame(bytes);
+  if (!tgcp || tgcp.command !== 0x9001) return null;
+  const extensionStart = 21;
+  const extensionEnd = 45;
+  if (!Array.isArray(bytes) || bytes.length < extensionEnd) {
+    return {
+      ok: false,
+      complete: false,
+      reason: "当前 raw/prefix 不足 45 字节，暂时看不到 9001 扩展字段。",
+    };
+  }
+  const extension = bytes.slice(extensionStart, extensionEnd);
+  const controlId = readGcloudBe32(bytes, extensionStart);
+  const tickLen = readGcloudBe16(bytes, extensionStart + 4);
+  const tick48 = readGcloudBe48(bytes, extensionStart + 6);
+  const flag = readGcloudBe32(bytes, extensionStart + 12);
+  const reserved = bytes.slice(extensionStart + 16, extensionEnd);
+  const tickHex = tick48 !== null ? `0x${tick48.toString(16).padStart(12, "0")}` : "-";
+  return {
+    ok: true,
+    complete: true,
+    extension,
+    extensionHex: extension.map(childHexByteText).join(""),
+    extensionText: gcloudHexBytes(extension, 32),
+    controlId,
+    tickLen,
+    tick48,
+    tickHex,
+    flag,
+    reserved,
+    reservedHex: gcloudHexBytes(reserved, 16),
+    reservedZero: reserved.every((byte) => (byte & 0xff) === 0),
+    shapeOk: tgcp.headerLen === 45 && tgcp.payloadLen === 0,
+  };
+}
+
+function gcloud9001IndexSignature() {
+  if (!Array.isArray(state.events) || state.events.length <= 0) return "empty";
+  const first = state.events[0];
+  const last = state.events[state.events.length - 1];
+  return `${state.flowId || ""}|${state.events.length}|${getEventId(first)}|${getEventId(last)}`;
+}
+
+function getGcloud9001PairIndex() {
+  const signature = gcloud9001IndexSignature();
+  if (state.gcloud9001PairIndex && state.gcloud9001PairIndex.signature === signature) {
+    return state.gcloud9001PairIndex;
+  }
+  const byExtension = new Map();
+  const events = Array.isArray(state.events) ? state.events : [];
+  events.forEach((candidate, index) => {
+    const summary = String(candidate && candidate.summary ? candidate.summary : "");
+    if (!isGcloud65010Summary(summary)) return;
+    const meta = parseGcloud65010Summary(summary);
+    if (meta.command !== 0x9001) return;
+    const preview = getGcloudPreviewBytes(candidate, 64);
+    const frame = parseGcloudTgcpFrame(preview.bytes);
+    const control = parseGcloud9001Control(preview.bytes, frame);
+    if (!control || !control.ok || !control.extensionHex) return;
+    const direction = normalizeGcloudDirection(candidate, meta);
+    const bucket = byExtension.get(control.extensionHex) || { outbound: [], inbound: [] };
+    const entry = {
+      ev: candidate,
+      index,
+      id: getEventId(candidate),
+      direction,
+      tsMs: gcloudEventTsMs(candidate),
+      seq: frame ? frame.seqByte : null,
+      frame,
+      control,
+    };
+    if (direction === "outbound") bucket.outbound.push(entry);
+    else if (direction === "inbound") bucket.inbound.push(entry);
+    byExtension.set(control.extensionHex, bucket);
+  });
+  state.gcloud9001PairIndex = { signature, byExtension };
+  return state.gcloud9001PairIndex;
+}
+
+function findGcloud9001Pair(ev, control, meta = null) {
+  if (!control || !control.ok || !control.extensionHex) return null;
+  const index = getGcloud9001PairIndex();
+  const bucket = index && index.byExtension ? index.byExtension.get(control.extensionHex) : null;
+  if (!bucket) return null;
+  const direction = normalizeGcloudDirection(ev, meta);
+  const currentId = getEventId(ev);
+  const currentTs = gcloudEventTsMs(ev);
+  const candidates = direction === "outbound" ? bucket.inbound : direction === "inbound" ? bucket.outbound : [];
+  let best = null;
+  for (const candidate of candidates) {
+    if (!candidate || candidate.id === currentId) continue;
+    let signedMs = null;
+    let rttMs = null;
+    if (currentTs !== null && candidate.tsMs !== null) {
+      signedMs = direction === "outbound" ? candidate.tsMs - currentTs : currentTs - candidate.tsMs;
+      rttMs = Math.abs(signedMs);
+    }
+    const score = signedMs === null ? 1000000000 + Math.abs((candidate.index || 0)) : (signedMs < -5 ? 1000000 + Math.abs(signedMs) : Math.abs(signedMs));
+    if (!best || score < best.score) {
+      best = {
+        ...candidate,
+        score,
+        rttMs,
+        signedMs,
+      };
+    }
+  }
+  return best;
 }
 
 function readGcloudVarint(bytes, pos, end) {
@@ -5976,22 +6114,42 @@ function analyzeGcloudEvent(ev, summaryText = "") {
   const command = meta.command !== null ? meta.command : (frame ? frame.command : null);
 
   if (command === 0x9001) {
+    const direction = normalizeGcloudDirection(ev, meta);
+    const control = parseGcloud9001Control(bytes, frame);
+    const pair = control && control.ok ? findGcloud9001Pair(ev, control, meta) : null;
+    const roleText = direction === "outbound"
+      ? "客户端主动探测/保活，等待服务端原样 echo。"
+      : direction === "inbound"
+        ? "服务端 echo 回包，扩展字段与客户端请求相同。"
+        : "9001 控制帧，当前方向未知。";
+    const rttText = pair && Number.isFinite(Number(pair.rttMs))
+      ? `匹配到${pair.direction === "outbound" ? "出站请求" : "入站回包"} index=${pair.index} seq=${pair.seq ?? "-"}，RTT≈${Math.round(Number(pair.rttMs))}ms`
+      : "当前事件窗口未找到另一半；可能未加载到相邻区间。";
+    const controlText = control && control.ok
+      ? `control_id=${control.controlId ?? "-"} tick_len=${control.tickLen ?? "-"} tick48=${control.tickHex} flag=${control.flag ?? "-"} reserved=${control.reservedZero ? "zero" : control.reservedHex}`
+      : control && control.reason ? control.reason : "raw preview 未加载";
     return {
       kind: "control",
       meta,
       bytes,
       frame,
-      title: "TGCP 9001 控制帧",
+      control,
+      pair,
+      title: "TGCP 9001 控制/echo",
       chips: [
-        "TGCP 9001",
+        direction === "outbound" ? "9001 ping" : direction === "inbound" ? "9001 echo" : "TGCP 9001",
         meta.direction ? `dir=${meta.direction}` : "",
         meta.seq ? `seq=${meta.seq}` : "",
-        frame && Number.isFinite(Number(frame.payloadLen)) ? `payload=${Number(frame.payloadLen)}` : "",
+        control && control.ok && control.controlId !== null ? `ctrl=${control.controlId}` : "",
+        pair && Number.isFinite(Number(pair.rttMs)) ? `RTT≈${Math.round(Number(pair.rttMs))}ms` : "",
       ].filter(Boolean),
       rows: [
-        { label: "说明", value: "payload_len=0 的控制旁路帧；不是 4013 业务密文，因此不进入 AES 解密。" },
-        { label: "Header", value: frame ? `header_len=${frame.headerLen ?? "-"} total=${frame.totalLen}` : "raw preview 未加载" },
+        { label: "控制关系", value: roleText },
+        { label: "配对", value: rttText },
+        { label: "控制字段", value: controlText },
+        { label: "Header", value: frame ? `header_len=${frame.headerLen ?? "-"} payload_len=${frame.payloadLen ?? "-"} total=${frame.totalLen}` : "raw preview 未加载" },
         { label: "Magic", value: frame ? `${frame.magic} command=${frame.commandText}` : meta.commandText || "-" },
+        { label: "与4013", value: "常贴着 CSOnlineHeartbeatReq/Res 的节奏出现；4013 是 AES 后的业务 protobuf，9001 是 TGCP 传输层 echo，不进入 4013 解密。" },
       ],
       nodeRows: [],
     };
@@ -6061,13 +6219,23 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
   if (!info) return [];
   const out = [];
   if (info.kind === "control") {
+    const direction = normalizeGcloudDirection(ev, info.meta);
+    const control = info.control || null;
+    const pair = info.pair || null;
     out.push({
       kind: "control",
-      text: "TGCP 9001 控制",
-      title: "payload_len=0；控制旁路帧，不走 4013 AES 解密。",
+      text: `${direction === "inbound" ? "9001 echo" : "9001 ping"}${control && control.ok && control.controlId !== null ? ` #${control.controlId}` : ""}`,
+      title: "payload_len=0；TGCP 传输层 echo/保活，不走 4013 AES 解密。",
     });
     if (info.meta && info.meta.seq) {
       out.push({ kind: "gcloud", text: `seq ${info.meta.seq}`, title: info.meta.raw });
+    }
+    if (pair && Number.isFinite(Number(pair.rttMs))) {
+      out.push({
+        kind: "type",
+        text: `RTT ${Math.round(Number(pair.rttMs))}ms`,
+        title: `当前窗口匹配到另一半 index=${pair.index}`,
+      });
     }
     return out;
   }
@@ -6177,7 +6345,7 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   } else if (info.kind === "control") {
     const note = document.createElement("div");
     note.className = "gcloud-note";
-    note.textContent = "这类 45 字节高频包是 9001 控制帧，不属于“业务明文解不开”的样本。";
+    note.textContent = "9001 是 45 字节 header-only echo/保活帧；当前抓包中由客户端主动发起，服务端用相同 24 字节扩展字段回声。";
     panel.appendChild(note);
   }
 
