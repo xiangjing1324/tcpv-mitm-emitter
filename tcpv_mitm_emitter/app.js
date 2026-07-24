@@ -25,6 +25,7 @@ const state = {
     minLen: "",
     maxLen: "",
     csobOnly: false,
+    aceMode: "all",
   },
   hitEventIds: [],
   hitCursor: -1,
@@ -33,6 +34,8 @@ const state = {
   dumpScrollLeft: new Map(),
   sidebarHidden: false,
   gcloud9001PairIndex: null,
+  gcloudAceStatsCache: null,
+  aceOverviewRefreshTimer: 0,
 };
 
 const el = {
@@ -61,6 +64,7 @@ const el = {
   filterMinLen: document.getElementById("filterMinLen"),
   filterMaxLen: document.getElementById("filterMaxLen"),
   filterCsobOnly: document.getElementById("filterCsobOnly"),
+  filterAceMode: document.getElementById("filterAceMode"),
   filterApply: document.getElementById("filterApplyBtn"),
   filterClear: document.getElementById("filterClearBtn"),
   hideAscii: document.getElementById("hideAscii"),
@@ -100,6 +104,7 @@ const MAX_FULL_SCAN_BYTES = 8192;
 const MAX_EVENTS_IN_MEMORY = cfgNumber("max_events_in_memory", 50000);
 const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 500);
 const INITIAL_DRAIN_PAGES = cfgNumber("initial_drain_pages", 4);
+const GCLOUD_INITIAL_DRAIN_PAGES = Math.max(INITIAL_DRAIN_PAGES, 16);
 const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
@@ -332,6 +337,31 @@ function installPreviewSummaryStyles() {
       --summary-chip-line: rgba(251, 191, 36, 0.34);
       font-weight: 800;
     }
+    .summary-insight-ace {
+      --summary-chip-color: #fda4af;
+      --summary-chip-bg: rgba(244, 63, 94, 0.13);
+      --summary-chip-line: rgba(251, 113, 133, 0.38);
+      font-weight: 850;
+    }
+    .summary-insight-carrier {
+      --summary-chip-color: #fdba74;
+      --summary-chip-bg: rgba(249, 115, 22, 0.12);
+      --summary-chip-line: rgba(251, 146, 60, 0.34);
+      font-weight: 750;
+    }
+    .summary-insights:has(.summary-insight-ace) {
+      overflow: hidden;
+    }
+    .summary-insights:has(.summary-insight-ace) .summary-insight-chip {
+      max-width: 18ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .summary-insights:has(.summary-insight-ace) .summary-insight-ace,
+    .summary-insights:has(.summary-insight-ace) .summary-insight-carrier,
+    .summary-insights:has(.summary-insight-ace) .summary-insight-type {
+      max-width: none;
+    }
     .preview-hex {
       max-width: none;
       overflow: visible;
@@ -493,12 +523,12 @@ function installDumpAsciiRowStyles() {
     }
     .gcloud-brief {
       margin: 8px 0 10px;
-      padding: 10px 12px;
+      padding: 8px 10px;
       border: 1px solid color-mix(in srgb, #38bdf8 30%, var(--line));
       border-radius: 8px;
       background: color-mix(in srgb, var(--panel) 91%, #0ea5e9 9%);
       display: grid;
-      gap: 9px;
+      gap: 7px;
     }
     .gcloud-brief-control {
       border-color: color-mix(in srgb, #f59e0b 34%, var(--line));
@@ -508,15 +538,29 @@ function installDumpAsciiRowStyles() {
       border-color: color-mix(in srgb, #facc15 36%, var(--line));
       background: color-mix(in srgb, var(--panel) 92%, #facc15 8%);
     }
+    .gcloud-brief-ace {
+      border-color: color-mix(in srgb, #fb7185 38%, var(--line));
+      background: color-mix(in srgb, var(--panel) 92%, #e11d48 8%);
+    }
+    .gcloud-brief-kick {
+      border-color: color-mix(in srgb, #ef4444 52%, var(--line));
+      background: color-mix(in srgb, var(--panel) 90%, #b91c1c 10%);
+      box-shadow: inset 3px 0 0 color-mix(in srgb, #ef4444 76%, transparent);
+    }
+    .gcloud-brief-kick .gcloud-kv-value {
+      white-space: pre-wrap;
+    }
     .gcloud-head {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 10px;
       min-width: 0;
+      flex-wrap: wrap;
     }
     .gcloud-title {
       min-width: 0;
+      flex: 1 1 280px;
       color: var(--text);
       font-weight: 850;
       overflow: hidden;
@@ -526,6 +570,7 @@ function installDumpAsciiRowStyles() {
     .gcloud-chip-list {
       display: flex;
       flex-wrap: wrap;
+      justify-content: flex-end;
       gap: 5px;
       min-width: 0;
     }
@@ -546,10 +591,22 @@ function installDumpAsciiRowStyles() {
       border-color: color-mix(in srgb, #84cc16 34%, var(--line));
       background: rgba(132, 204, 22, 0.11);
     }
+    .gcloud-chip-ace {
+      border-color: color-mix(in srgb, #fb7185 42%, var(--line));
+      background: rgba(244, 63, 94, 0.12);
+      color: color-mix(in srgb, #fecdd3 82%, var(--text));
+    }
+    .gcloud-chip-kick {
+      border-color: color-mix(in srgb, #ef4444 58%, var(--line));
+      background: rgba(220, 38, 38, 0.16);
+      color: color-mix(in srgb, #fecaca 88%, var(--text));
+      font-weight: 850;
+    }
     .gcloud-kv-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
       gap: 6px;
+      align-items: start;
     }
     .gcloud-kv {
       min-width: 0;
@@ -568,6 +625,97 @@ function installDumpAsciiRowStyles() {
       color: var(--text);
       overflow-wrap: anywhere;
       line-height: 1.35;
+    }
+    .gcloud-fact-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    }
+    .gcloud-fact {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(74px, max-content) minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 5px 8px;
+    }
+    .gcloud-fact:nth-child(odd) {
+      border-right: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
+    }
+    .gcloud-fact:nth-child(n + 3) {
+      border-top: 1px solid color-mix(in srgb, var(--line) 52%, transparent);
+    }
+    .gcloud-fact-wide {
+      grid-column: 1 / -1;
+      border-right: 0 !important;
+    }
+    .gcloud-fact-label,
+    .gcloud-context-label {
+      color: var(--muted);
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .gcloud-fact-value {
+      min-width: 0;
+      color: var(--text);
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .gcloud-context-rail {
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 14px;
+      padding: 1px 8px;
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .gcloud-context-item {
+      min-width: 0;
+      display: inline-flex;
+      gap: 5px;
+      align-items: baseline;
+      overflow-wrap: anywhere;
+    }
+    .gcloud-context-value {
+      min-width: 0;
+      color: color-mix(in srgb, var(--text) 88%, var(--muted));
+      overflow-wrap: anywhere;
+    }
+    .gcloud-evidence-details {
+      min-width: 0;
+      border-top: 1px dashed color-mix(in srgb, var(--line) 62%, transparent);
+      padding-top: 4px;
+    }
+    .gcloud-evidence-details > summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      list-style: none;
+    }
+    .gcloud-evidence-details > summary::-webkit-details-marker {
+      display: none;
+    }
+    .gcloud-evidence-list {
+      display: grid;
+      gap: 4px;
+      margin-top: 5px;
+      padding: 0 8px 2px;
+    }
+    .gcloud-evidence-row {
+      display: grid;
+      grid-template-columns: minmax(74px, max-content) minmax(0, 1fr);
+      gap: 8px;
+      color: color-mix(in srgb, var(--muted) 82%, var(--text));
+      line-height: 1.35;
+    }
+    .gcloud-evidence-row strong {
+      color: var(--muted);
+      font-weight: 750;
     }
     .gcloud-node-details > summary {
       cursor: pointer;
@@ -803,7 +951,191 @@ function installDumpAsciiRowStyles() {
       color: var(--muted);
       line-height: 1.45;
     }
+    #filterAceMode {
+      min-width: 158px;
+      border-color: color-mix(in srgb, #fb7185 35%, var(--line));
+    }
+    .filterbar {
+      grid-template-columns: minmax(260px, 1fr) 146px 56px 72px 62px 62px 74px 158px 88px 94px 94px 96px 72px 72px;
+    }
+    #filterAceMode[hidden] {
+      display: none;
+    }
+    .right {
+      container-type: inline-size;
+    }
+    @container (max-width: 1500px) {
+      .filterbar {
+        display: flex;
+        flex-wrap: wrap;
+      }
+      #prefixRule {
+        flex: 1 1 260px;
+      }
+      #highlightMode {
+        flex: 0 0 146px;
+      }
+      #ruleColor {
+        flex: 0 0 56px;
+      }
+      #filterAceMode {
+        flex: 1 1 180px;
+      }
+      #filterDir {
+        flex: 0 0 104px;
+      }
+      #filterMinLen,
+      #filterMaxLen {
+        flex: 1 1 94px;
+      }
+      .filter-check {
+        flex: 0 0 96px;
+      }
+      #searchApplyBtn,
+      #filterApplyBtn,
+      #filterClearBtn {
+        flex: 0 0 72px;
+      }
+      #searchPrevBtn,
+      #searchNextBtn {
+        flex: 0 0 62px;
+      }
+      #searchHitStat {
+        flex: 0 0 74px;
+      }
+    }
+    .ace-flow-overview {
+      margin: 0;
+      padding: 10px 14px;
+      border-top: 1px solid color-mix(in srgb, #fb7185 24%, var(--line));
+      border-bottom: 1px solid color-mix(in srgb, #fb7185 24%, var(--line));
+      background: color-mix(in srgb, var(--panel) 95%, #e11d48 5%);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .ace-flow-overview-title {
+      color: var(--text);
+      font-weight: 850;
+    }
+    .ace-flow-overview-chips {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .ace-flow-overview-chip {
+      padding: 3px 7px;
+      border: 1px solid color-mix(in srgb, #fb7185 30%, var(--line));
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--panel) 90%, #e11d48 10%);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .ace-flow-overview-chip-active {
+      border-color: #fb7185;
+      color: #fecdd3;
+      font-weight: 800;
+    }
+    .gcloud-ace-deep {
+      margin: 10px 8px 12px;
+      border-color: color-mix(in srgb, #fb7185 38%, var(--line));
+      background: color-mix(in srgb, var(--panel) 95%, #e11d48 5%);
+    }
+    .gcloud-security-deep-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .gcloud-security-deep-stack > .gcloud-ace-deep,
+    .gcloud-security-deep-stack > .gcloud-tss-decrypted {
+      margin: 10px 8px 0;
+    }
+    .gcloud-security-deep-stack > .gcloud-tss-decrypted {
+      margin-top: 0;
+      margin-bottom: 12px;
+      border-color: color-mix(in srgb, #22c55e 42%, var(--line));
+      background: color-mix(in srgb, var(--panel) 96%, #22c55e 4%);
+    }
+    .tss-crypto-status {
+      padding: 7px 9px;
+      border-bottom: 1px solid var(--line);
+      overflow-wrap: anywhere;
+      font-weight: 750;
+    }
+    .tss-crypto-status-ok {
+      color: color-mix(in srgb, #22c55e 72%, var(--text));
+      background: color-mix(in srgb, var(--dump-bg) 92%, #22c55e 8%);
+    }
+    .tss-crypto-status-error {
+      color: color-mix(in srgb, #f59e0b 78%, var(--text));
+      background: color-mix(in srgb, var(--dump-bg) 92%, #f59e0b 8%);
+    }
+    .ace-deep-lineage {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+      padding: 7px 8px;
+      border-bottom: 1px solid color-mix(in srgb, #fb7185 24%, var(--line));
+      background: color-mix(in srgb, var(--dump-bg) 90%, #e11d48 10%);
+    }
+    .ace-deep-layer {
+      max-width: 100%;
+      padding: 2px 6px;
+      border: 1px solid color-mix(in srgb, #fb7185 32%, var(--line));
+      border-radius: 4px;
+      color: var(--text);
+      background: color-mix(in srgb, var(--panel) 88%, #e11d48 12%);
+      overflow-wrap: anywhere;
+    }
+    .ace-deep-arrow {
+      color: var(--muted);
+      font-weight: 850;
+    }
+    @media (max-width: 980px) {
+      .filterbar {
+        grid-template-columns: 1fr 1fr;
+      }
+      #filterAceMode {
+        min-width: 0;
+      }
+      .gcloud-chip-list {
+        justify-content: flex-start;
+      }
+      .gcloud-fact-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .gcloud-fact:nth-child(odd) {
+        border-right: 0;
+      }
+      .gcloud-fact:nth-child(n + 2) {
+        border-top: 1px solid color-mix(in srgb, var(--line) 52%, transparent);
+      }
+    }
   `;
+}
+
+function installAceFilterControl() {
+  const filterbar = document.querySelector(".filterbar");
+  if (!filterbar) return;
+  let select = document.getElementById("filterAceMode");
+  if (!select) {
+    select = document.createElement("select");
+    select.id = "filterAceMode";
+    select.title = "65010 command 分类；仅在 TGCP/GCloud 65010 flow 上生效。";
+    filterbar.insertBefore(select, el.filterDir || null);
+  }
+  el.filterAceMode = select;
+  select.addEventListener("change", () => {
+    state.filters = {
+      ...state.filters,
+      aceMode: normalizeAceFilterMode(select.value),
+    };
+    saveRules();
+    saveAppliedFilters();
+    renderEvents();
+  });
 }
 
 function normalizeFilterDir(rawDir) {
@@ -822,7 +1154,15 @@ function normalizeFilterLen(rawValue) {
   return String(Math.floor(num));
 }
 
-function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false) {
+function normalizeAceFilterMode(rawMode) {
+  const mode = String(rawMode || "").trim().toLowerCase();
+  if (["ace_all", "ace_antidata", "ace_light", "ace_transfer", "cstss_all", "gcloud_4013", "tgcp_control"].includes(mode)) {
+    return mode;
+  }
+  return "all";
+}
+
+function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false, rawAceMode = "all") {
   let minLen = normalizeFilterLen(rawMinLen);
   let maxLen = normalizeFilterLen(rawMaxLen);
   if (minLen && maxLen && Number(minLen) > Number(maxLen)) {
@@ -835,6 +1175,7 @@ function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false)
     minLen,
     maxLen,
     csobOnly: rawCsobOnly === true || rawCsobOnly === "1",
+    aceMode: normalizeAceFilterMode(rawAceMode),
   };
 }
 
@@ -1059,6 +1400,7 @@ function loadRules() {
   const appliedFilterMinLen = localStorage.getItem("tcpv_applied_filter_min_len") || "";
   const appliedFilterMaxLen = localStorage.getItem("tcpv_applied_filter_max_len") || "";
   const appliedFilterCsobOnly = localStorage.getItem("tcpv_applied_filter_csob_only") === "1";
+  const appliedFilterAceMode = normalizeAceFilterMode(localStorage.getItem("tcpv_applied_filter_ace_mode") || "all");
   const previewOffset = localStorage.getItem("tcpv_preview_offset") || "0";
 
   el.prefix.value = draftSearchText !== null ? draftSearchText : appliedSearchText;
@@ -1078,6 +1420,11 @@ function loadRules() {
   if (el.filterCsobOnly) {
     const draftCsobOnly = localStorage.getItem("tcpv_filter_csob_only_draft");
     el.filterCsobOnly.checked = draftCsobOnly !== null ? draftCsobOnly === "1" : appliedFilterCsobOnly;
+  }
+  if (el.filterAceMode) {
+    el.filterAceMode.value = normalizeAceFilterMode(
+      localStorage.getItem("tcpv_filter_ace_mode_draft") || appliedFilterAceMode
+    );
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   const savedPreviewBytes = String(localStorage.getItem("tcpv_preview_bytes") || "").trim();
@@ -1120,6 +1467,7 @@ function loadRules() {
     appliedFilterMinLen,
     appliedFilterMaxLen,
     appliedFilterCsobOnly,
+    appliedFilterAceMode,
   );
   applyTheme();
   applyBodyTone();
@@ -1149,6 +1497,9 @@ function saveRules() {
   if (el.filterCsobOnly) {
     localStorage.setItem("tcpv_filter_csob_only_draft", el.filterCsobOnly.checked ? "1" : "0");
   }
+  if (el.filterAceMode) {
+    localStorage.setItem("tcpv_filter_ace_mode_draft", normalizeAceFilterMode(el.filterAceMode.value));
+  }
   localStorage.setItem("tcpv_hide_ascii", el.hideAscii.value);
   localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
   localStorage.setItem("tcpv_preview_offset", String(getPreviewOffset()));
@@ -1176,6 +1527,7 @@ function saveAppliedFilters() {
   localStorage.setItem("tcpv_applied_filter_min_len", state.filters.minLen || "");
   localStorage.setItem("tcpv_applied_filter_max_len", state.filters.maxLen || "");
   localStorage.setItem("tcpv_applied_filter_csob_only", state.filters.csobOnly ? "1" : "0");
+  localStorage.setItem("tcpv_applied_filter_ace_mode", state.filters.aceMode || "all");
 }
 
 function getExpandMode() {
@@ -1466,6 +1818,7 @@ function resetEventStateForFlowChange() {
   state.dumpScrollLeft.clear();
   state.events = [];
   state.gcloud9001PairIndex = null;
+  state.gcloudAceStatsCache = null;
   state.afterId = null;
   state.hasMore = true;
   state.expandedIds.clear();
@@ -1517,12 +1870,14 @@ function renderSelectedTitle() {
   updateActionButtons();
   if (!state.flowId) {
     el.selectedTitle.textContent = "No flow selected";
+    updateAceFilterUi();
     return;
   }
 
   const item = state.flows.find((x) => String(x.account || "") === state.flowId);
   if (!item) {
     el.selectedTitle.textContent = "Flow selected";
+    updateAceFilterUi();
     return;
   }
 
@@ -1533,7 +1888,22 @@ function renderSelectedTitle() {
   const text = cid ? `${proxyText} ${cid}`.trim() : proxyText;
   const dateTs = Number(item.first_ts || item.last_ts || 0);
   const dateText = dateTs > 0 ? `[${formatDateOnly(dateTs)}]` : "";
-  el.selectedTitle.textContent = `${dateText} ${text || "Flow selected"}`.trim();
+  if (currentFlowLooksLikeGcloud65010(null, rawCid)) {
+    const accountMatch = rawCid.match(/\[acc:(\d{10,24})\]/i);
+    const totalCount = Number(item.total_count || 0);
+    const countText = totalCount > 0 ? `${totalCount}包` : "";
+    const sizeText = formatSize(item.total_bytes ?? item.total);
+    el.selectedTitle.textContent = [
+      `${dateText} 65010 · TGCP/GCloud`.trim(),
+      text || "Flow selected",
+      accountMatch ? `acc:${accountMatch[1]}` : "",
+      countText,
+      sizeText,
+    ].filter(Boolean).join("  |  ");
+  } else {
+    el.selectedTitle.textContent = `${dateText} ${text || "Flow selected"}`.trim();
+  }
+  updateAceFilterUi();
 }
 
 function getCurrentFlowMeta() {
@@ -1579,7 +1949,8 @@ async function selectFlow(flowId) {
   updateSearchUi();
   renderEvents();
   setStatus("loading selected flow...");
-  await syncLatestEvents({ drain: true, maxPages: INITIAL_DRAIN_PAGES, force: true });
+  const initialPages = currentFlowLooksLikeGcloud65010() ? GCLOUD_INITIAL_DRAIN_PAGES : INITIAL_DRAIN_PAGES;
+  await syncLatestEvents({ drain: true, maxPages: initialPages, force: true });
 }
 
 async function syncLatestEvents(options = {}) {
@@ -2546,6 +2917,7 @@ function getFilterDraftState() {
     el.filterMinLen ? el.filterMinLen.value : "",
     el.filterMaxLen ? el.filterMaxLen.value : "",
     el.filterCsobOnly ? el.filterCsobOnly.checked : false,
+    el.filterAceMode ? el.filterAceMode.value : "all",
   );
 }
 
@@ -4508,6 +4880,25 @@ function parseGcloud65010Summary(summaryText = "") {
   const raw = String(summaryText || "").trim();
   const commandText = readSummaryValue(raw, "command");
   const command = parseFlexibleInt(commandText);
+  const lightFeature = readSummaryValue(raw, "ace_light")
+    ? {
+      evidence: readSummaryValue(raw, "ace_light"),
+      kind: readSummaryValue(raw, "lf_kind"),
+      encoding: readSummaryValue(raw, "lf_encoding"),
+      hexLayers: parseFlexibleInt(readSummaryValue(raw, "lf_hex_layers")),
+      length: parseFlexibleInt(readSummaryValue(raw, "lf_len")),
+      type: parseFlexibleInt(readSummaryValue(raw, "lf_type")),
+      xorKey: parseFlexibleInt(readSummaryValue(raw, "lf_key")),
+      wireMarker: parseFlexibleInt(readSummaryValue(raw, "lf_marker")),
+      rawFeatureId: parseFlexibleInt(readSummaryValue(raw, "lf_feature")),
+      commonProtocolId: parseFlexibleInt(readSummaryValue(raw, "lf_common")),
+      schemaOrVersion: parseFlexibleInt(readSummaryValue(raw, "lf_schema")),
+      payloadLength: parseFlexibleInt(readSummaryValue(raw, "lf_payload_len")),
+      optionalU32: parseFlexibleInt(readSummaryValue(raw, "lf_optional_u32")),
+      prefix: readSummaryValue(raw, "lf_prefix"),
+      fields: readSummaryValue(raw, "lf_fields"),
+    }
+    : null;
   return {
     raw,
     transport: readSummaryValue(raw, "transport") || "tgcp65010",
@@ -4519,6 +4910,7 @@ function parseGcloud65010Summary(summaryText = "") {
     plainLen: readSummaryValue(raw, "plain_len"),
     padding: readSummaryValue(raw, "padding"),
     beforedump: readSummaryValue(raw, "beforedump"),
+    lightFeature,
   };
 }
 
@@ -5103,7 +5495,7 @@ function analyzeGcloudBusinessProto(bytes, completeSource = true) {
 
 function gcloudProtoStatusText(proto) {
   if (!proto) return "payload 未加载";
-  const prefix = proto.compression && proto.compression.kind === "lz4-block" ? "LZ4 -> " : "";
+  const prefix = proto.compression && proto.compression.kind === "lz4-block" ? "LZ4 解压 -> " : "";
   if (proto.ok && Number(proto.start || 0) === 0) return `${prefix}protobuf ok`;
   if (proto.ok && Number(proto.start || 0) > 0) return `${prefix}lead ${Number(proto.start)} + protobuf ok`;
   if (proto.commandDisplay) return `proto fragment${proto.reason ? ` (${proto.reason})` : ""}`;
@@ -5184,6 +5576,7 @@ function gcloudProtoFieldAlias(path, node, proto) {
   const prepareTdmMapBoardRes = /^CSPrepareTDMMapBoardRes/i.test(commandName);
   const switchUnlockInfoRes = /^CSSwitchLoadSystemUnlockInfoRes/i.test(commandName);
   const collectionRes = /^CSCollection/i.test(commandName);
+  const gatewayKick = /^CSGatewayKickPlayerNtf$/i.test(commandName);
   const chatAliases = chatWorldLoad ? {
     "2.2": "items[]",
     "2.2.1": "message",
@@ -5198,6 +5591,11 @@ function gcloudProtoFieldAlias(path, node, proto) {
   } : (/CSAceSendAntiDataNtf/i.test(commandName) ? {
     "2.1": "anti_data_hex_blob",
   } : {});
+  const gatewayKickAliases = gatewayKick ? {
+    "2.1": "kick_code",
+    "2.2": "notice",
+  } : {};
+  if (gatewayKickAliases[key]) return gatewayKickAliases[key];
   if (aceAliases[key]) return aceAliases[key];
   if (chatAliases[key]) return chatAliases[key];
   if (generic[key]) return generic[key];
@@ -5437,13 +5835,13 @@ function gcloudAnalyzeAcePayload(byteValues, meta = {}) {
     return { profile, summary, facts };
   };
 
-  if (signature !== 0x200f || subtype === null) {
+  if (signature === null || subtype === null) {
     add("opaque_block", `${payload.length} bytes · entropy=${gcloudByteEntropy(payload).toFixed(2)} bits/byte · no verified inner format`, "gcloud-tree-fact-warning");
     return profileResult("ACE opaque payload", `opaque ${payload.length}-byte payload`);
   }
 
-  add("signature", `@0x0000 BE16 ${formatHexValue(signature, 4)}`, "gcloud-tree-fact-header");
-  add("subtype", `@0x0002 BE16 ${formatHexValue(subtype, 4)}`, "gcloud-tree-fact-header");
+  add("common_protocol_id", `@0x0000 BE16 ${formatHexValue(signature, 4)} · ACE 静态 getter 来源`, "gcloud-tree-fact-header");
+  add("schema_or_version", `@0x0002 BE16 ${formatHexValue(subtype, 4)} · 精确业务字段名待证`, "gcloud-tree-fact-header");
 
   const word4 = readBe32(payload, 4);
   const word8 = readBe32(payload, 8);
@@ -5512,8 +5910,29 @@ function gcloudAnalyzeAcePayload(byteValues, meta = {}) {
   }
 
   add("payload_shape", `${payload.length} bytes · entropy=${gcloudByteEntropy(payload.slice(4)).toFixed(2)} bits/byte`, "gcloud-tree-fact-data");
-  add("decode_status", `known ACE signature; subtype ${subtype} layout not classified`, "gcloud-tree-fact-warning");
-  return profileResult(`ACE subtype ${subtype} · unclassified`, `subtype ${subtype} unclassified payload`);
+  add("decode_status", `known ACE common header; schema ${subtype} payload layout not classified`, "gcloud-tree-fact-warning");
+  return profileResult(`ACE schema ${subtype} · unclassified`, `schema ${subtype} unclassified payload`);
+}
+
+function gcloudAnalyzeAceFixed64(byteValues) {
+  const payload = Array.isArray(byteValues) ? byteValues : [];
+  if (payload.length !== 64 || readBe16(payload, 0) !== 0x80db) return null;
+  const facts = [];
+  const add = (label, value, className = "") => facts.push({ label, value, className });
+  add("profile", "ACE LightFeature fixed64/state_vector（opaque）", "gcloud-tree-fact-header");
+  add("observed_prefix", `@0x0000 ${gcloudHexSlice(payload, 0, 4)} · 只按观测前缀显示，不命名 magic/version`, "gcloud-tree-fact-header");
+  add("record_length", "64 bytes · 严格定长分类", "gcloud-tree-fact-length");
+  add("+0x00", gcloudHexSlice(payload, 0, 16), "gcloud-tree-fact-data gcloud-tree-fact-raw");
+  add("+0x10", gcloudHexSlice(payload, 16, 16), "gcloud-tree-fact-data gcloud-tree-fact-raw");
+  add("+0x20", gcloudHexSlice(payload, 32, 16), "gcloud-tree-fact-data gcloud-tree-fact-raw");
+  add("+0x30", gcloudHexSlice(payload, 48, 16), "gcloud-tree-fact-data gcloud-tree-fact-raw");
+  add("静态排除", "不是 MRPCS XOR envelope；也不匹配同线程 length-prefixed raw 分支", "gcloud-tree-fact-warning");
+  add("字段边界", "宿主侧 producer 尚未定位；所有 offset 语义、尾部 token/CRC 均保持 unresolved", "gcloud-tree-fact-warning");
+  return {
+    profile: "ACE LightFeature fixed64/state_vector",
+    summary: `fixed64/state_vector · prefix=${gcloudHexSlice(payload, 0, 4)} · fields unresolved`,
+    facts,
+  };
 }
 
 function gcloudAnalyzeHexString(text) {
@@ -5525,22 +5944,70 @@ function gcloudAnalyzeHexString(text) {
     { label: "source", value: `${raw.length} hex chars -> ${layer1.length} bytes`, className: "gcloud-tree-fact-source" },
   ];
 
-  if (layer1.length >= 6 && (layer1[0] === 0x11 || layer1[0] === 0x12) && layer1[4] === 0x00 && layer1[5] === layer1.length - 6) {
+  const bodyLength = layer1.length >= 6 ? readBe16(layer1, 4) : null;
+  const staticXorKey = layer1.length >= 2 ? layer1[1] & 0xff : null;
+  if (
+    layer1.length >= 10
+    && staticXorKey >= 0x10
+    && staticXorKey <= 0xaf
+    && bodyLength === layer1.length - 6
+    && (layer1[0] !== 0x12 || bodyLength >= 8)
+  ) {
     const key = layer1[1] & 0xff;
-    const marker = layer1.slice(2, 4).map(childHexByteText).join("");
+    const wireMarker = readBe16(layer1, 2);
+    const rawFeatureId = (wireMarker ^ 0xb6b6) & 0xffff;
+    const marker = formatHexValue(wireMarker, 4);
     const payload = layer1.slice(6).map((byte) => (byte ^ key) & 0xff);
-    const kindText = `ACE XOR · ver=${formatHexValue(layer1[0], 2)} · key=${formatHexValue(key, 2)} · marker=${marker} · payload=${payload.length} bytes`;
+    const commonProtocolId = readBe16(payload, 0);
+    const schemaOrVersion = readBe16(payload, 2);
+    const optionalU32 = layer1[0] === 0x12 ? readBe32(payload, 4) : null;
+    const innerPayloadOffset = layer1[0] === 0x12 ? 8 : 4;
+    const innerPayloadLength = Math.max(0, payload.length - innerPayloadOffset);
+    const kindText = `ACE XOR · type=${formatHexValue(layer1[0], 2)} · key=${formatHexValue(key, 2)} · marker=${marker} -> feature=${formatHexValue(rawFeatureId, 4)} · body_len=${bodyLength}`;
     facts.push({ label: "envelope", value: kindText, className: "gcloud-tree-fact-envelope" });
-    const inner = gcloudAnalyzeAcePayload(payload, { marker, version: layer1[0], key });
+    const inner = gcloudAnalyzeAcePayload(payload, { marker: marker.replace(/^0x/i, ""), version: layer1[0], key });
     facts.push(...inner.facts);
+    facts.push({
+      label: "point_payload",
+      value: `@${gcloudOffsetText(innerPayloadOffset)} ${innerPayloadLength} bytes · 字段语义由 PointData producer 决定`,
+      className: "gcloud-tree-fact-data",
+    });
+    if (optionalU32 !== null) {
+      facts.push({ label: "optional_u32", value: `@0x0004 BE32 ${formatHexValue(optionalU32, 8)}`, className: "gcloud-tree-fact-number" });
+    }
     const payloadText = gcloudReadableByteText(payload);
     if (payloadText) facts.push({ label: "payload_text", value: `"${shortenText(payloadText, 220)}"`, className: "gcloud-tree-fact-text gcloud-tree-fact-raw" });
     return {
       kind: "ace-xor",
-      summary: `ACE/XOR · ${inner.summary} · ${payload.length} bytes`,
+      summary: `ACE/XOR · type=${formatHexValue(layer1[0], 2)} · feature=${formatHexValue(rawFeatureId, 4)} · common=${formatHexValue(commonProtocolId, 4)} · schema=${schemaOrVersion} · payload=${innerPayloadLength}B`,
       facts,
       payload,
       profile: inner.profile,
+      envelope: {
+        type: layer1[0],
+        xorKey: key,
+        wireMarker,
+        rawFeatureId,
+        bodyLength,
+        commonProtocolId,
+        schemaOrVersion,
+        optionalU32,
+        payloadOffset: innerPayloadOffset,
+        payloadLength: innerPayloadLength,
+      },
+    };
+  }
+
+  const directFixed64 = gcloudAnalyzeAceFixed64(layer1);
+  if (directFixed64) {
+    facts.push(...directFixed64.facts);
+    return {
+      kind: "fixed64",
+      summary: directFixed64.summary,
+      facts,
+      payload: layer1,
+      profile: directFixed64.profile,
+      fixed64: true,
     };
   }
 
@@ -5548,18 +6015,17 @@ function gcloudAnalyzeHexString(text) {
     const innerText = gcloudBytesToAscii(layer1);
     const layer2 = gcloudBytesFromHexText(innerText, 8192);
     facts.push({ label: "envelope", value: `${layer1.length} ASCII-hex bytes -> ${layer2.length} payload bytes`, className: "gcloud-tree-fact-envelope" });
-    if (layer2.length === 64 && readBe32(layer2, 0) === 0x80dba23f) {
-      facts.push({ label: "profile", value: "ACE fixed 64-byte binary block", className: "gcloud-tree-fact-header" });
-      facts.push({ label: "signature", value: "@0x0000 0x80dba23f", className: "gcloud-tree-fact-header" });
-      facts.push({ label: "decode_status", value: `opaque payload · entropy=${gcloudByteEntropy(layer2).toFixed(2)} bits/byte · transform unknown`, className: "gcloud-tree-fact-warning" });
-    }
+    const fixed64 = gcloudAnalyzeAceFixed64(layer2);
+    if (fixed64) facts.push(...fixed64.facts);
     const payloadText = gcloudReadableByteText(layer2);
     if (payloadText) facts.push({ label: "payload_text", value: `"${shortenText(payloadText, 220)}"`, className: "gcloud-tree-fact-text gcloud-tree-fact-raw" });
     return {
       kind: "double-hex",
-      summary: `hex -> hex · ${layer2.length}-byte binary payload`,
+      summary: fixed64 ? `hex -> hex · ${fixed64.summary}` : `hex -> hex · ${layer2.length}-byte binary payload`,
       facts,
       payload: layer2,
+      profile: fixed64 ? fixed64.profile : "",
+      fixed64: Boolean(fixed64),
     };
   }
 
@@ -5832,9 +6298,18 @@ function appendGcloudTreeRaw(rawEl, node, bytes) {
     const valueBytes = gcloudNodeValueBytes(node, bytes);
     const hexInfo = gcloudAnalyzeHexString(node.string);
     if (hexInfo && Array.isArray(hexInfo.payload) && hexInfo.payload.length > 0) {
+      const deepRoot = detectTssReport(hexInfo.payload);
+      const hasAceDeepView = hexInfo.kind === "ace-xor"
+        || Boolean(hexInfo.profile)
+        || (deepRoot && isLikelyTssReportCode(deepRoot.value));
+      const decodedPreviewLen = Math.min(160, hexInfo.payload.length);
       rawEl.classList.add("gcloud-tree-raw-layered");
       appendGcloudRawLayer(rawEl, "gcloud-tree-raw-source", `raw string ${valueBytes.length}B: ${gcloudHexBytes(valueBytes, 96)}`);
-      appendGcloudRawLayer(rawEl, "gcloud-tree-raw-decoded", `decoded ${hexInfo.payload.length}B: ${gcloudHexBytes(hexInfo.payload, 160)}`);
+      appendGcloudRawLayer(
+        rawEl,
+        "gcloud-tree-raw-decoded",
+        `decoded preview ${decodedPreviewLen}/${hexInfo.payload.length}B: ${gcloudHexBytes(hexInfo.payload, decodedPreviewLen)}${hasAceDeepView ? " · 完整字节见下方 ACE carrier 二次深度解析" : ""}`,
+      );
       rawEl.title = `raw string bytes (${valueBytes.length}); decoded payload bytes (${hexInfo.payload.length})`;
       return;
     }
@@ -6105,6 +6580,361 @@ function gcloudProtoTimeRows(proto, maxItems = 6) {
   return parts.length > 0 ? [{ label: "时间字段", value: parts.join("  ") }] : [];
 }
 
+function getGcloudBusinessProtoCached(ev, bytes, completeSource = true) {
+  const signature = [
+    Array.isArray(bytes) ? bytes.length : 0,
+    String(ev && ev.pay ? ev.pay : "").length,
+    String(ev && ev.pfx ? ev.pfx : "").length,
+    completeSource ? 1 : 0,
+  ].join("|");
+  if (ev && ev.__tcpvGcloudProtoCache && ev.__tcpvGcloudProtoCache.signature === signature) {
+    return ev.__tcpvGcloudProtoCache.value;
+  }
+  const value = analyzeGcloudBusinessProto(bytes, completeSource);
+  if (ev && typeof ev === "object") {
+    ev.__tcpvGcloudProtoCache = { signature, value };
+  }
+  return value;
+}
+
+function gcloudAceCommandKind(commandName) {
+  const name = String(commandName || "");
+  if (/^CSAceSendAntiDataNtf/i.test(name)) return "ace_antidata";
+  if (/^CSAceSendLightFeatureDataNtf/i.test(name)) return "ace_light";
+  if (/^CSAceAntiDataTransferNtf/i.test(name)) return "ace_transfer";
+  if (/^CSAce/i.test(name)) return "ace_other";
+  return "";
+}
+
+function gcloudTssCommandKind(commandName) {
+  return /^CSTss/i.test(String(commandName || "")) ? "cstss_all" : "";
+}
+
+function gcloudAceCommandLabel(kind) {
+  if (kind === "ace_antidata") return "ACE AntiData";
+  if (kind === "ace_light") return "ACE LightFeature";
+  if (kind === "ace_transfer") return "ACE Transfer";
+  return "ACE";
+}
+
+function gcloudAceReportMeaning(reportCode) {
+  const report = Number(reportCode);
+  if (!Number.isFinite(report)) return "";
+  if (report === 0x010a0008) return "TSS 内层加密响应封套";
+  if (report === 0x010a0009) return "TSS 内层加密控制封套";
+  if (report === 0x010a0013) return "明文 TLV 文本记录";
+  if (report === 0x010a0021) return "控制/反馈记录";
+  if (report === 0x010a0056) return "同步文件保存请求";
+  if ([0x0112235f, 0x01122362].includes(report)) return "设备型号/系统版本画像";
+  if ((report & 0xffffff00) === 0x01122300) return `动态 metadata/state family · subtype=0x${(report & 0xff).toString(16).padStart(2, "0")}`;
+  return reportBusinessLabel(report);
+}
+
+function gcloudAceReportTokens(payload, maxItems = 6) {
+  const bytes = Array.isArray(payload) ? payload : [];
+  const out = [];
+  const seen = new Set();
+  for (let offset = 0; offset + 4 <= Math.min(bytes.length, 192); offset += 1) {
+    const value = readBe32(bytes, offset);
+    if (!Number.isFinite(value)) continue;
+    const isDynamic = (value & 0xffffff00) === 0x01122300;
+    const isControl = (value & 0xffff0000) === 0x010a0000 || value === 0x0102000a;
+    if (!isDynamic && !isControl) continue;
+    const text = formatHexValue(value, 8);
+    if (seen.has(text)) continue;
+    seen.add(text);
+    out.push({ value, text, offset });
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function gcloudAceReadableSignals(payload, maxItems = 6) {
+  const bytes = Array.isArray(payload) ? payload : [];
+  const candidates = extractPrintableRuns(bytes, 4, 32)
+    .map((item) => normalizeVisibleText(item && item.text ? item.text : ""))
+    .filter((text) => (
+      /(?:model|ver|inc_id|obf_id|state|status|cs|ob|account|hello|config|tersafe)[:=]/i.test(text)
+      || /^\d{15,24}$/.test(text)
+      || /hello, world/i.test(text)
+    ));
+  const out = [];
+  const seen = new Set();
+  for (const text of candidates) {
+    const compact = shortenText(text, 150);
+    if (!compact || seen.has(compact)) continue;
+    seen.add(compact);
+    out.push(compact);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function analyzeGcloudAceCarrier(proto, protoBytes) {
+  const flat = proto && Array.isArray(proto.flat) ? proto.flat : [];
+  const candidates = flat
+    .filter((item) => (
+      item && item.node && item.node.string
+      && Array.isArray(item.path) && Number(item.path[0]) === 2
+      && gcloudAnalyzeHexString(item.node.string)
+    ))
+    .sort((left, right) => String(right.node.string || "").length - String(left.node.string || "").length);
+  let sourceNode = candidates.length > 0 ? candidates[0].node : null;
+  let hexInfo = sourceNode ? gcloudAnalyzeHexString(sourceNode.string) : null;
+  let payload = hexInfo && Array.isArray(hexInfo.payload) ? hexInfo.payload : [];
+
+  if (payload.length <= 0) {
+    const byteCandidates = flat
+      .filter((item) => (
+        item && item.node && Number(item.node.wire) === 2
+        && Array.isArray(item.path) && Number(item.path[0]) === 2
+        && !item.node.string && (!Array.isArray(item.node.children) || item.node.children.length === 0)
+      ))
+      .map((item) => ({ node: item.node, bytes: gcloudNodeValueBytes(item.node, protoBytes) }))
+      .sort((left, right) => right.bytes.length - left.bytes.length);
+    if (byteCandidates.length > 0) {
+      sourceNode = byteCandidates[0].node;
+      payload = byteCandidates[0].bytes;
+    }
+  }
+
+  const carrierMode = proto && proto.compression ? "binary_carrier" : (hexInfo ? "ascii_hex" : "binary_carrier");
+  const total = payload.length >= 6 ? readBe16(payload, 4) : null;
+  const rootReport = payload.length >= 10 && readBe32(payload, 0) === 1
+    && Number.isFinite(total) && Math.abs(Number(total) - payload.length) <= 4
+    ? readBe32(payload, 6)
+    : null;
+  const reportTokens = gcloudAceReportTokens(payload);
+  const readable = gcloudAceReadableSignals(payload);
+  const carrierChain = [
+    proto && proto.compression ? `LZ4 解压 ${proto.compression.inputLength}->${proto.compression.outputLength}B` : "",
+    hexInfo
+      ? `${hexInfo.kind === "double-hex" ? "ASCII hex ×2" : "ASCII hex"} -> ${payload.length}B`
+      : payload.length > 0 ? `${payload.length}B binary` : "payload unavailable",
+  ].filter(Boolean).join(" · ");
+  return {
+    mode: carrierMode,
+    sourceKind: hexInfo ? String(hexInfo.kind || "hex") : "binary",
+    profile: hexInfo && hexInfo.profile ? String(hexInfo.profile) : "",
+    staticEnvelope: hexInfo && hexInfo.envelope ? hexInfo.envelope : null,
+    fixed64StateVector: Boolean(hexInfo && hexInfo.fixed64),
+    chain: carrierChain,
+    payload,
+    rootReport,
+    reportTokens,
+    readable,
+    entropy: payload.length > 0 ? gcloudByteEntropy(payload) : null,
+    prefix: payload.length > 0 ? gcloudHexBytes(payload, 16) : "",
+    confidence: hexInfo && hexInfo.envelope
+      ? "static-verified"
+      : hexInfo && hexInfo.fixed64
+        ? "static-classified/fields-unresolved"
+        : rootReport !== null && carrierMode === "ascii_hex"
+          ? "decoded"
+          : (hexInfo && hexInfo.profile) || reportTokens.length > 0
+            ? "observed"
+            : "inferred",
+  };
+}
+
+function gcloudCommandNameForEvent(ev, summaryText = "") {
+  if (!ev || typeof ev !== "object") return "";
+  const summary = String(summaryText || ev.summary || "");
+  const signature = `${summary.length}|${String(ev.pfx || "").length}|${String(ev.pay || "").length}`;
+  if (ev.__tcpvGcloudCommandCache && ev.__tcpvGcloudCommandCache.signature === signature) {
+    return ev.__tcpvGcloudCommandCache.value;
+  }
+  let value = "";
+  if (isGcloud65010Summary(summary)) {
+    const meta = parseGcloud65010Summary(summary);
+    const preview = getGcloudPreviewBytes(ev);
+    const frame = parseGcloudTgcpFrame(preview.bytes);
+    const command = meta.command !== null ? meta.command : (frame ? frame.command : null);
+    if (command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted") {
+      const proto = getGcloudBusinessProtoCached(ev, preview.bytes, preview.complete);
+      value = String(proto && proto.commandDisplay ? proto.commandDisplay : "");
+    }
+  }
+  ev.__tcpvGcloudCommandCache = { signature, value };
+  return value;
+}
+
+function gcloudEventClass(ev) {
+  if (!ev || typeof ev !== "object") return "other";
+  const summary = String(ev.summary || "");
+  if (!isGcloud65010Summary(summary)) return "other";
+  const name = gcloudCommandNameForEvent(ev, summary);
+  const aceKind = gcloudAceCommandKind(name);
+  if (aceKind) return aceKind;
+  const tssKind = gcloudTssCommandKind(name);
+  if (tssKind) return tssKind;
+  const meta = parseGcloud65010Summary(summary);
+  if (meta.command === 0x4013) return "gcloud_4013";
+  return "tgcp_control";
+}
+
+function gcloudAceNeighbourText(ev, commandName) {
+  const events = Array.isArray(state.events) ? state.events : [];
+  const index = events.indexOf(ev);
+  if (index <= 0) return "当前窗口内无前序同类包";
+  const kind = gcloudAceCommandKind(commandName);
+  const wantedKind = kind === "ace_transfer" ? "ace_antidata" : kind;
+  for (let cursor = index - 1; cursor >= Math.max(0, index - 800); cursor -= 1) {
+    const candidate = events[cursor];
+    if (gcloudEventClass(candidate) !== wantedKind) continue;
+    const deltaMs = Number(gcloudEventTsMs(ev)) - Number(gcloudEventTsMs(candidate));
+    if (!Number.isFinite(deltaMs) || deltaMs < 0) break;
+    if (kind === "ace_transfer") return `紧跟前一 AntiData +${Math.round(deltaMs)}ms · 服务端下行关联候选`;
+    const seconds = deltaMs / 1000;
+    if (kind === "ace_light" && seconds >= 12 && seconds <= 18) return `距上一包 ${seconds.toFixed(1)}s · 约15s周期`;
+    if (kind === "ace_antidata" && seconds <= 7) return `距上一包 ${seconds.toFixed(1)}s · 启动 burst`;
+    if (kind === "ace_antidata" && seconds >= 30) return `距上一包 ${seconds.toFixed(1)}s · 低频/事件型刷新`;
+    return `距上一同类 ${seconds.toFixed(1)}s`;
+  }
+  return kind === "ace_transfer" ? "当前窗口内未找到前序 AntiData" : "当前窗口内无前序同类包";
+}
+
+function analyzeGcloudAceCommand(ev, proto, protoBytes, commandName) {
+  const kind = gcloudAceCommandKind(commandName);
+  if (!kind) return null;
+  const carrier = analyzeGcloudAceCarrier(proto, protoBytes);
+  if (kind === "ace_transfer") {
+    carrier.routeMode = "server_transfer";
+    carrier.chain = ["server -> client", carrier.chain].filter(Boolean).join(" · ");
+    carrier.confidence = carrier.payload.length > 0 ? carrier.confidence : "observed";
+  }
+  const hasRootReport = carrier.rootReport !== null
+    && carrier.rootReport !== undefined
+    && Number.isFinite(Number(carrier.rootReport));
+  const rootText = hasRootReport ? formatHexValue(carrier.rootReport, 8) : "";
+  const tokenText = carrier.reportTokens.map((item) => item.text).join(", ");
+  const staticEnvelope = carrier.staticEnvelope || null;
+  const identity = staticEnvelope
+    ? `feature_id=${formatHexValue(staticEnvelope.rawFeatureId, 4)} · common_protocol_id=${formatHexValue(staticEnvelope.commonProtocolId, 4)} · schema=${staticEnvelope.schemaOrVersion}`
+    : carrier.fixed64StateVector
+      ? `fixed64/state_vector · prefix=${carrier.prefix || "-"} · fields unresolved`
+      : rootText
+        ? `root_report=${rootText}`
+        : carrier.profile
+          ? `profile=${carrier.profile}`
+          : tokenText ? `reportish=${tokenText}` : "report=未识别";
+  const meaning = staticEnvelope
+    ? `静态确认 XOR envelope：type=${formatHexValue(staticEnvelope.type, 2)} key=${formatHexValue(staticEnvelope.xorKey, 2)} marker=${formatHexValue(staticEnvelope.wireMarker, 4)} payload=${staticEnvelope.payloadLength}B`
+    : carrier.fixed64StateVector
+      ? "静态仅排除 XOR envelope 与同线程 raw 分支；宿主 producer 未定位，不命名 offset"
+      : hasRootReport
+        ? gcloudAceReportMeaning(carrier.rootReport)
+        : carrier.reportTokens.length > 0 ? gcloudAceReportMeaning(carrier.reportTokens[0].value) : "";
+  const role = kind === "ace_antidata"
+    ? "客户端主动重型/事件型反作弊上报；启动阶段密集，之后低频刷新。"
+    : kind === "ace_light"
+      ? "客户端轻量周期特征上报；当前样本以约15秒周期持续发送。"
+      : kind === "ace_transfer"
+        ? "服务端下行 transfer/回执/触发候选；只按近邻时序标注，不命名为已确认 ACK。"
+        : "ACE security channel command。";
+  return {
+    kind,
+    label: gcloudAceCommandLabel(kind),
+    commandName,
+    carrier,
+    identity,
+    meaning,
+    role,
+    cadence: gcloudAceNeighbourText(ev, commandName),
+  };
+}
+
+function analyzeGcloudTssCommand(proto, protoBytes, commandName) {
+  if (!gcloudTssCommandKind(commandName)) return null;
+  const carrier = analyzeGcloudAceCarrier(proto, protoBytes);
+  const rootReport = Number(carrier.rootReport);
+  const hasRootReport = carrier.rootReport !== null
+    && carrier.rootReport !== undefined
+    && Number.isFinite(rootReport);
+  const rootText = hasRootReport ? formatHexValue(rootReport, 8) : "";
+  const tokenText = carrier.reportTokens.map((item) => item.text).join(", ");
+  const identity = rootText
+    ? `root_report=${rootText}`
+    : carrier.profile
+      ? `profile=${carrier.profile}`
+      : tokenText ? `report=${tokenText}` : "report=未识别";
+  return {
+    kind: "cstss_all",
+    label: "CSTss",
+    commandName,
+    carrier,
+    identity,
+    meaning: hasRootReport ? gcloudAceReportMeaning(rootReport) : "",
+    role: /^CSTssHeartbeatNtf/i.test(commandName)
+      ? "TSS 心跳/状态通知；按当前会话时序观察，不将字段提升为已确认处罚结论。"
+      : "TSS 安全通道命令；carrier 继续按 TSS record 与加密信封分层解析。",
+  };
+}
+
+function analyzeGcloudGatewayKickCommand(proto, commandName) {
+  if (!/^CSGatewayKickPlayerNtf$/i.test(String(commandName || ""))) return null;
+  const lookup = gcloudProtoPathLookup(proto);
+  const codeItem = lookup.get("2.1");
+  const noticeItem = lookup.get("2.2");
+  const codeNode = codeItem && codeItem.node ? codeItem.node : null;
+  const noticeNode = noticeItem && noticeItem.node ? noticeItem.node : null;
+  const codeText = codeNode && Number(codeNode.wire) === 0
+    ? String(codeNode.valueText ?? codeNode.value ?? "")
+    : "";
+  const codeValue = codeText !== "" && Number.isFinite(Number(codeText)) ? Number(codeText) : null;
+  const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : [];
+  const noticeBytes = noticeNode
+    && Number(noticeNode.wire) === 2
+    && Number.isFinite(Number(noticeNode.valueStart))
+    && Number.isFinite(Number(noticeNode.valueEnd))
+    ? protoBytes.slice(Number(noticeNode.valueStart), Number(noticeNode.valueEnd))
+    : [];
+  const notice = String(
+    noticeNode && noticeNode.string
+      ? noticeNode.string
+      : gcloudBytesToUtf8(noticeBytes)
+  ).trim();
+  const freezeMatch = notice.match(/冻结\s*(\d+)\s*天/);
+  const unlockMatch = notice.match(/解封时间(?:为|[:：]?)\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/);
+  const freezeDays = freezeMatch ? Number(freezeMatch[1]) : null;
+  const unlockTime = unlockMatch ? String(unlockMatch[1]) : "";
+  const serverFreeze = /账号[^。\n]{0,24}冻结/.test(notice);
+  const evidence = [];
+  if (/游戏环境及行为数据异常/.test(notice)) evidence.push("游戏环境及行为数据异常");
+  if (/异常或网络环境/.test(notice)) evidence.push("异常/网络环境");
+  if (/第三方插件|第三方[^。\n]{0,8}应用/.test(notice)) evidence.push("第三方插件或同时运行应用");
+  if (/常用设备/.test(notice)) evidence.push("常用设备");
+  if (/共享账号/.test(notice)) evidence.push("共享账号");
+  const penaltyText = [
+    serverFreeze ? "服务器侧账号冻结" : "网关强制下线",
+    Number.isFinite(freezeDays) ? `${freezeDays}天` : "",
+    unlockTime ? `解封 ${unlockTime}` : "",
+  ].filter(Boolean).join(" · ");
+  const packetResultText = serverFreeze
+    ? "本包 notice 同时明确包含账号冻结结果"
+    : "本包 notice 未出现可确认的账号冻结措辞";
+  const codeMeaning = codeValue === null
+    ? "当前片段未解析到 field[2].field[1] varint"
+    : `${codeValue} (${formatHexValue(codeValue)}) · ${packetResultText}；官方枚举名未知`;
+  return {
+    commandName: String(commandName || ""),
+    codeValue,
+    codeText,
+    codeMeaning,
+    notice,
+    freezeDays,
+    unlockTime,
+    serverFreeze,
+    penaltyText,
+    evidence,
+    fieldShape: `body.field1=varint${codeText ? `(${codeText})` : "(?)"} · body.field2=utf8${noticeNode ? `(len=${Number(noticeNode.len || 0)})` : "(?)"}`,
+    role: serverFreeze
+      ? "服务器主动下发；网关要求客户端立即退出，本包提示文本同时确认服务器侧账号冻结。"
+      : "服务器主动下发的网关强制下线通知；具体处罚结果以本包提示文本为准。",
+    boundary: "kick_code 仅按本包 varint 原值展示，不把任何数值硬编码成官方处罚枚举。冻结期限、解封时间和风险提示均从当前 notice 动态提取；提示文本不足以证明具体由哪条 ACE/TerSafe 上报触发。",
+  };
+}
+
 function analyzeGcloudEvent(ev, summaryText = "") {
   if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return null;
   const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary));
@@ -6118,10 +6948,10 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     const control = parseGcloud9001Control(bytes, frame);
     const pair = control && control.ok ? findGcloud9001Pair(ev, control, meta) : null;
     const roleText = direction === "outbound"
-      ? "客户端主动探测/保活，等待服务端原样 echo。"
+      ? "payload_len=0 的控制旁路帧；客户端主动探测/保活，等待服务端原样 echo。"
       : direction === "inbound"
-        ? "服务端 echo 回包，扩展字段与客户端请求相同。"
-        : "9001 控制帧，当前方向未知。";
+        ? "payload_len=0 的控制旁路帧；服务端 echo 回包，扩展字段与客户端请求相同。"
+        : "payload_len=0 的控制旁路帧；9001 控制帧，当前方向未知。";
     const rttText = pair && Number.isFinite(Number(pair.rttMs))
       ? `匹配到${pair.direction === "outbound" ? "出站请求" : "入站回包"} index=${pair.index} seq=${pair.seq ?? "-"}，RTT≈${Math.round(Number(pair.rttMs))}ms`
       : "当前事件窗口未找到另一半；可能未加载到相邻区间。";
@@ -6135,7 +6965,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       frame,
       control,
       pair,
-      title: "TGCP 9001 控制/echo",
+      title: "TGCP 9001 控制帧 / echo",
       chips: [
         direction === "outbound" ? "9001 ping" : direction === "inbound" ? "9001 echo" : "TGCP 9001",
         meta.direction ? `dir=${meta.direction}` : "",
@@ -6156,7 +6986,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
   }
 
   if (command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted") {
-    const proto = analyzeGcloudBusinessProto(bytes, preview.complete);
+    const proto = getGcloudBusinessProtoCached(ev, bytes, preview.complete);
     const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
     const compression = proto && proto.compression ? proto.compression : null;
     const title = proto && proto.commandDisplay
@@ -6165,6 +6995,118 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     const bodyNode = proto && proto.bodyNode ? proto.bodyNode : null;
     const profileRows = gcloudProtoProfileRows(proto, ev);
     const timeRows = gcloudProtoTimeRows(proto);
+    const gatewayKick = proto && proto.commandDisplay
+      ? analyzeGcloudGatewayKickCommand(proto, proto.commandDisplay)
+      : null;
+    if (gatewayKick) {
+      return {
+        kind: "kick",
+        meta,
+        bytes,
+        protoBytes,
+        proto,
+        kick: gatewayKick,
+        title: `账号冻结 / 网关强制下线 · ${proto.commandDisplay}`,
+        chips: [
+          gatewayKick.serverFreeze ? "账号冻结" : "网关强制下线",
+          normalizeGcloudDirection(ev, meta) === "inbound" ? "server → client" : normalizeGcloudDirection(ev, meta),
+          gatewayKick.codeValue !== null ? `kick_code=${gatewayKick.codeValue}` : "kick_code=?",
+          Number.isFinite(gatewayKick.freezeDays) ? `冻结${gatewayKick.freezeDays}天` : "",
+          gatewayKick.unlockTime ? `解封 ${gatewayKick.unlockTime}` : "",
+          proto ? gcloudProtoStatusText(proto) : "",
+        ].filter(Boolean),
+        rows: [
+          { label: "命令", value: proto.commandDisplay },
+          { label: "业务语义", value: gatewayKick.role },
+          { label: "字段结构", value: gatewayKick.fieldShape },
+          { label: "踢下线代码", value: gatewayKick.codeMeaning },
+          { label: "处罚状态", value: gatewayKick.penaltyText || "当前提示未包含可提取的冻结期限。" },
+          ...(gatewayKick.notice ? [{ label: "服务器提示", value: gatewayKick.notice }] : []),
+          ...(gatewayKick.evidence.length > 0 ? [{ label: "文本线索", value: gatewayKick.evidence.join(" · ") }] : []),
+          { label: "解析边界", value: gatewayKick.boundary },
+          ...profileRows,
+          { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
+        ],
+        nodeRows: gcloudProtoNodeRows(proto),
+      };
+    }
+    const ace = proto && proto.commandDisplay
+      ? analyzeGcloudAceCommand(ev, proto, protoBytes, proto.commandDisplay)
+      : null;
+    if (ace) {
+      const carrier = ace.carrier || {};
+      const staticEnvelope = carrier.staticEnvelope || null;
+      const lightFeatureChip = ace.kind === "ace_light" && staticEnvelope
+        ? `feature=${formatHexValue(staticEnvelope.rawFeatureId, 4)}`
+        : ace.kind === "ace_light" && carrier.fixed64StateVector
+          ? "fixed64/state_vector"
+          : ace.identity;
+      const opaqueText = Array.isArray(carrier.payload) && carrier.payload.length > 0
+        ? `len=${carrier.payload.length} entropy=${Number(carrier.entropy || 0).toFixed(2)} prefix=${carrier.prefix || "-"}`
+        : "当前 command 无可独立解释的 carrier payload";
+      return {
+        kind: "ace",
+        meta,
+        bytes,
+        protoBytes,
+        proto,
+        ace,
+        title: `${ace.label} · ${proto.commandDisplay}`,
+        chips: [
+          ace.label,
+          normalizeGcloudDirection(ev, meta),
+          proto.module ? `channel=${proto.module}` : "",
+          carrier.mode ? `carrier=${carrier.mode}` : "",
+          lightFeatureChip,
+          carrier.confidence ? `confidence=${carrier.confidence}` : "",
+        ].filter(Boolean),
+        rows: [
+          { label: "命令", value: proto.commandDisplay },
+          { label: "反作弊角色", value: ace.role },
+          { label: "承载链", value: carrier.chain || carrier.mode || "-" },
+          { label: ace.kind === "ace_light" ? "LightFeature静态解析" : "报告标识", value: [ace.identity, ace.meaning].filter(Boolean).join(" · ") },
+          ...(carrier.readable && carrier.readable.length > 0 ? [{ label: "可读特征", value: carrier.readable.join("  |  ") }] : []),
+          { label: "节奏/关联", value: ace.cadence },
+          { label: carrier.profile ? "载荷摘要" : "Opaque 摘要", value: opaqueText },
+          { label: "解析边界", value: `confidence=${carrier.confidence || "inferred"}；observed/inferred 字段不提升为封禁码、白名单或确认 ACK。` },
+          ...profileRows,
+          { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
+        ],
+        nodeRows: gcloudProtoNodeRows(proto),
+      };
+    }
+    const tss = proto && proto.commandDisplay
+      ? analyzeGcloudTssCommand(proto, protoBytes, proto.commandDisplay)
+      : null;
+    if (tss) {
+      const carrier = tss.carrier || {};
+      return {
+        kind: "tss",
+        meta,
+        bytes,
+        protoBytes,
+        proto,
+        tss,
+        title: `CSTss · ${proto.commandDisplay}`,
+        chips: [
+          "CSTss*",
+          normalizeGcloudDirection(ev, meta),
+          proto.module ? `channel=${proto.module}` : "",
+          carrier.mode ? `carrier=${carrier.mode}` : "",
+          tss.identity,
+        ].filter(Boolean),
+        rows: [
+          { label: "命令", value: proto.commandDisplay },
+          { label: "TSS 角色", value: tss.role },
+          { label: "承载链", value: carrier.chain || carrier.mode || "-" },
+          { label: "报告标识", value: [tss.identity, tss.meaning].filter(Boolean).join(" · ") },
+          { label: "解析边界", value: "先识别 carrier 与 record framing；加密信封仅在算法支持且 CRC 校验通过后展示内层语义。" },
+          ...profileRows,
+          { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
+        ],
+        nodeRows: gcloudProtoNodeRows(proto),
+      };
+    }
     return {
       kind: proto && proto.ok ? "proto" : "fragment",
       meta,
@@ -6177,7 +7119,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         proto && proto.commandId !== null && proto.commandId !== undefined ? `cmd_id=${formatHexValue(proto.commandId)}` : "",
         proto && proto.module ? `module=${proto.module}` : "",
         proto && proto.language ? proto.language : "",
-        compression && compression.kind === "lz4-block" ? "LZ4" : "",
+        compression && compression.kind === "lz4-block" ? "LZ4已解压" : "",
         proto ? gcloudProtoStatusText(proto) : "",
       ].filter(Boolean),
       rows: [
@@ -6187,7 +7129,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 body (field[2])" },
         ...timeRows,
         ...profileRows,
-        ...(compression ? [{ label: "压缩", value: `LZ4 block ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
+        ...(compression ? [{ label: "压缩", value: `LZ4 raw block 解压 ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
         { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
       ],
       nodeRows: gcloudProtoNodeRows(proto),
@@ -6239,6 +7181,40 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     }
     return out;
   }
+  if (info.kind === "ace" && info.ace) {
+    const ace = info.ace;
+    const carrier = ace.carrier || {};
+    out.push({ kind: "ace", text: ace.label, title: ace.commandName });
+    out.push({ kind: "carrier", text: carrier.mode || "ACE carrier", title: carrier.chain || carrier.mode || "" });
+    if (carrier.staticEnvelope) {
+      out.push({
+        kind: "type",
+        text: `feature ${formatHexValue(carrier.staticEnvelope.rawFeatureId, 4)}`,
+        title: `${ace.identity} · ${ace.meaning}`,
+      });
+    } else if (carrier.fixed64StateVector) {
+      out.push({ kind: "type", text: "fixed64/state_vector", title: ace.meaning || ace.identity });
+    } else if (ace.identity) {
+      out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
+    }
+    return out;
+  }
+  if (info.kind === "kick" && info.kick) {
+    const kick = info.kick;
+    out.push({ kind: "ace", text: kick.serverFreeze ? "账号冻结 / 强制下线" : "网关强制下线", title: kick.commandName });
+    if (kick.codeValue !== null) out.push({ kind: "type", text: `kick_code=${kick.codeValue}`, title: kick.codeMeaning });
+    if (Number.isFinite(kick.freezeDays)) out.push({ kind: "carrier", text: `冻结${kick.freezeDays}天`, title: kick.penaltyText });
+    if (kick.unlockTime) out.push({ kind: "time", text: `解封 ${kick.unlockTime}`, title: kick.notice });
+    return out;
+  }
+  if (info.kind === "tss" && info.tss) {
+    const tss = info.tss;
+    const carrier = tss.carrier || {};
+    out.push({ kind: "ace", text: "CSTss", title: tss.commandName });
+    out.push({ kind: "carrier", text: carrier.mode || "TSS carrier", title: carrier.chain || carrier.mode || "" });
+    if (tss.identity) out.push({ kind: "type", text: tss.identity, title: tss.meaning || tss.identity });
+    return out;
+  }
   const proto = info.proto || null;
   const name = proto && proto.commandDisplay ? proto.commandDisplay : "";
   out.push({
@@ -6273,6 +7249,114 @@ function appendGcloudKv(grid, label, value) {
   grid.appendChild(item);
 }
 
+function appendGcloudFact(grid, row, wide = false) {
+  const text = String(row && row.value ? row.value : "").trim();
+  if (!text) return;
+  const item = document.createElement("div");
+  item.className = `gcloud-fact${wide ? " gcloud-fact-wide" : ""}`;
+  const label = document.createElement("span");
+  label.className = "gcloud-fact-label";
+  label.textContent = String(row && row.label ? row.label : "-");
+  const value = document.createElement("span");
+  value.className = "gcloud-fact-value";
+  value.textContent = text;
+  item.appendChild(label);
+  item.appendChild(value);
+  grid.appendChild(item);
+}
+
+function compactGcloudContextRow(row) {
+  const label = String(row && row.label ? row.label : "");
+  const full = String(row && row.value ? row.value : "").trim();
+  let shortLabel = label;
+  let value = full;
+  if (label === "载荷摘要" || label === "Opaque 摘要") {
+    shortLabel = "payload";
+    const len = full.match(/\blen=(\d+)/i);
+    const entropy = full.match(/\bentropy=([0-9.]+)/i);
+    value = [len ? `${len[1]}B` : "", entropy ? `H=${entropy[1]}` : ""].filter(Boolean).join(" · ") || full;
+  } else if (label === "账号/标识") {
+    shortLabel = "account";
+    value = full.replace(/^account=/i, "");
+  } else if (label === "4013") {
+    value = full.replace(/plain_len=/i, "plain ").replace(/\bpadding=/i, "padding ");
+  } else if (label === "压缩") {
+    shortLabel = "LZ4";
+  }
+  return { label: shortLabel, value, full };
+}
+
+function appendGcloudContext(rail, row) {
+  const compact = compactGcloudContextRow(row);
+  if (!compact.value) return;
+  const item = document.createElement("span");
+  item.className = "gcloud-context-item";
+  item.title = compact.full;
+  const label = document.createElement("strong");
+  label.className = "gcloud-context-label";
+  label.textContent = compact.label;
+  const value = document.createElement("span");
+  value.className = "gcloud-context-value";
+  value.textContent = compact.value;
+  item.appendChild(label);
+  item.appendChild(value);
+  rail.appendChild(item);
+}
+
+function appendGcloudEvidenceDetails(panel, rows) {
+  if (!Array.isArray(rows) || rows.length <= 0) return;
+  const details = document.createElement("details");
+  details.className = "gcloud-evidence-details";
+  const summary = document.createElement("summary");
+  summary.textContent = `证据边界 · ${rows.length}`;
+  details.appendChild(summary);
+  const list = document.createElement("div");
+  list.className = "gcloud-evidence-list";
+  for (const row of rows) {
+    const line = document.createElement("div");
+    line.className = "gcloud-evidence-row";
+    const label = document.createElement("strong");
+    label.textContent = String(row && row.label ? row.label : "-");
+    const value = document.createElement("span");
+    value.textContent = String(row && row.value ? row.value : "-");
+    line.appendChild(label);
+    line.appendChild(value);
+    list.appendChild(line);
+  }
+  details.appendChild(list);
+  panel.appendChild(details);
+}
+
+function appendGcloudSecuritySummary(panel, info) {
+  const rows = Array.isArray(info && info.rows) ? info.rows.filter((row) => String(row && row.value || "").trim()) : [];
+  const primaryLabels = info.kind === "tss"
+    ? ["TSS 角色", "承载链", "报告标识", "可读特征"]
+    : ["反作弊角色", "节奏/关联", "承载链", "LightFeature静态解析", "报告标识", "可读特征"];
+  const contextLabels = new Set(["载荷摘要", "Opaque 摘要", "账号/标识", "4013", "压缩"]);
+  const consumed = new Set(["命令"]);
+  const primary = document.createElement("div");
+  primary.className = "gcloud-fact-grid";
+  for (const label of primaryLabels) {
+    const row = rows.find((candidate) => String(candidate && candidate.label || "") === label);
+    if (!row) continue;
+    consumed.add(label);
+    appendGcloudFact(primary, row, label === "可读特征");
+  }
+  if (primary.childElementCount > 0) panel.appendChild(primary);
+
+  const rail = document.createElement("div");
+  rail.className = "gcloud-context-rail";
+  for (const row of rows) {
+    const label = String(row && row.label || "");
+    if (!contextLabels.has(label)) continue;
+    consumed.add(label);
+    appendGcloudContext(rail, row);
+  }
+  if (rail.childElementCount > 0) panel.appendChild(rail);
+
+  appendGcloudEvidenceDetails(panel, rows.filter((row) => !consumed.has(String(row && row.label || ""))));
+}
+
 function buildGcloudPacketPanel(ev, summaryText = "") {
   const info = analyzeGcloudEvent(ev, summaryText);
   if (!info) return null;
@@ -6289,28 +7373,32 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   chips.className = "gcloud-chip-list";
   for (const text of (Array.isArray(info.chips) ? info.chips : []).slice(0, 7)) {
     const chip = document.createElement("span");
-    chip.className = `gcloud-chip${info.kind === "control" ? " gcloud-chip-control" : ""}${info.kind === "proto" ? " gcloud-chip-proto" : ""}`;
+    chip.className = `gcloud-chip${info.kind === "control" ? " gcloud-chip-control" : ""}${info.kind === "proto" ? " gcloud-chip-proto" : ""}${info.kind === "ace" || info.kind === "tss" ? " gcloud-chip-ace" : ""}${info.kind === "kick" ? " gcloud-chip-kick" : ""}`;
     chip.textContent = text;
     chips.appendChild(chip);
   }
   head.appendChild(chips);
   panel.appendChild(head);
 
-  const grid = document.createElement("div");
-  grid.className = "gcloud-kv-grid";
-  for (const row of Array.isArray(info.rows) ? info.rows : []) {
-    appendGcloudKv(grid, row.label, row.value);
+  if (info.kind === "ace" || info.kind === "tss") {
+    appendGcloudSecuritySummary(panel, info);
+  } else {
+    const grid = document.createElement("div");
+    grid.className = "gcloud-kv-grid";
+    for (const row of Array.isArray(info.rows) ? info.rows : []) {
+      appendGcloudKv(grid, row.label, row.value);
+    }
+    if (grid.childElementCount > 0) panel.appendChild(grid);
   }
-  if (grid.childElementCount > 0) panel.appendChild(grid);
 
   const protoTree = info.proto ? buildGcloudProtoTree(info.proto, info.protoBytes || info.bytes) : null;
   if (protoTree) {
     const details = document.createElement("details");
     details.className = "gcloud-tree-details";
-    details.open = true;
+    details.open = info.kind !== "ace" && info.kind !== "tss" && info.kind !== "kick";
     const summary = document.createElement("summary");
     const count = info.proto && Array.isArray(info.proto.flat) ? info.proto.flat.length : info.nodeRows.length;
-    summary.textContent = `protobuf tree ×${count}`;
+    summary.textContent = `${info.kind === "ace" || info.kind === "tss" ? "protobuf 外层" : "protobuf tree"} ×${count}`;
     details.appendChild(summary);
     details.appendChild(protoTree);
     panel.appendChild(details);
@@ -6321,7 +7409,7 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     details.className = "gcloud-node-details";
     details.open = !protoTree;
     const summary = document.createElement("summary");
-    summary.textContent = `语义路径 ×${info.nodeRows.length}`;
+    summary.textContent = `语义路径 / raw field paths ×${info.nodeRows.length}`;
     details.appendChild(summary);
     const list = document.createElement("div");
     list.className = "gcloud-node-list";
@@ -6862,6 +7950,9 @@ function hydrateSummaryBadges(summaryNode, ev, summaryText = "", eventId = "") {
       if (!applyEventPayloadDetail(ev, detail)) return;
       ev.__tcpvPayloadDetailFetched = true;
       ev.__tcpvSummaryHydrated = true;
+      if (gcloudAceCommandKind(gcloudCommandNameForEvent(ev, summaryText))) {
+        refreshAceOverviewUi();
+      }
       if (summaryNode && summaryNode.isConnected) {
         syncSummaryInsightStrip(summaryNode, ev, summaryText);
         syncSummaryHiBadge(summaryNode, ev);
@@ -7223,9 +8314,479 @@ function detectTssReport(byteValues) {
   return null;
 }
 
+const TSS_CRYPTO_KEY_LABELS = [
+  "CHAGQX",
+  "Q_VA[\\R",
+  "SYSZZ",
+  "]P@XQA",
+  "CE]AQ",
+  "[TK",
+  "QDF\\",
+  "D^GP\\",
+  "CA@Z@P",
+  "WIX_83qpt",
+];
+const TSS_FAMILY1_SBOX = [
+  0x09d0c479, 0x28c8ffe0, 0x84aa6c39, 0x9dad7287, 0x7dff9be3, 0xd4268361, 0xc96da1d4, 0x7974cc93,
+  0x85d0582e, 0x2a4b5705, 0x1ca16a62, 0xc3bd279d, 0x0f1f25e5, 0x5160372f, 0xc695c1fb, 0x4d7ff1e4,
+  0xae5f6bf4, 0x0d72ee46, 0xff23de8a, 0xb1cf8e83, 0xf14902e2, 0x3e981e42, 0x8bf53eb6, 0x7f4bf8ac,
+  0x83631f83, 0x25970205, 0x76afe784, 0x3a7931d4, 0x4f846450, 0x5c64c3f6, 0x210a5f18, 0xc6986a26,
+  0x28f4e826, 0x3a60a81c, 0xd340a664, 0x7ea820c4, 0x526687c5, 0x7eddd12b, 0x32a11d1d, 0x9c9ef086,
+  0x80f6e831, 0xab6f04ad, 0x56fb9b53, 0x8b2e095c, 0xb68556ae, 0xd2250b0d, 0x294a7721, 0xe21fb253,
+  0xae136749, 0xe82aae86, 0x93365104, 0x99404a66, 0x78a784dc, 0xb69ba84b, 0x04046793, 0x23db5c1e,
+  0x46cae1d6, 0x2fe28134, 0x5a223942, 0x1863cd5b, 0xc190c6e3, 0x07dfb846, 0x6eb88816, 0x2d0dcc4a,
+  0xa4ccae59, 0x3798670d, 0xcbfa9493, 0x4f481d45, 0xeafc8ca8, 0xdb1129d6, 0xb0449e20, 0x0f5407fb,
+  0x6167d9a8, 0xd1f45763, 0x4daa96c3, 0x3bec5958, 0xababa014, 0xb6ccd201, 0x38d6279f, 0x02682215,
+  0x8f376cd5, 0x092c237e, 0xbfc56593, 0x32889d2c, 0x854b3e95, 0x05bb9b43, 0x7dcd5dcd, 0xa02e926c,
+  0xfae527e5, 0x36a1c330, 0x3412e1ae, 0xf257f462, 0x3c4f1d71, 0x30a2e809, 0x68e5f551, 0x9c61ba44,
+  0x5ded0ab8, 0x75ce09c8, 0x9654f93e, 0x698c0cca, 0x243cb3e4, 0x2b062b97, 0x0f3b8d9e, 0x00e050df,
+  0xfc5d6166, 0xe35f9288, 0xc079550d, 0x0591aee8, 0x8e531e74, 0x75fe3578, 0x2f6d829a, 0xf60b21ae,
+  0x95e8eb8d, 0x6699486b, 0x901d7d9b, 0xfd6d6e31, 0x1090acef, 0xe0670dd8, 0xdab2e692, 0xcd6d4365,
+  0xe5393514, 0x3af345f0, 0x6241fc4d, 0x460da3a3, 0x7bcf3729, 0x8bf1d1e0, 0x14aac070, 0x1587ed55,
+  0x3afd7d3e, 0xd2f29e01, 0x29a9d1f6, 0xefb10c53, 0xcf3b870f, 0xb414935c, 0x664465ed, 0x024acac7,
+  0x59a744c1, 0x1d2936a7, 0xdc580aa6, 0xcf574ca8, 0x040a7a10, 0x6cd81807, 0x8a98be4c, 0xaccea063,
+  0xc33e92b5, 0xd1e0e03d, 0xb322517e, 0x2092bd13, 0x386b2c4a, 0x52e8dd58, 0x58656dfb, 0x50820371,
+  0x41811896, 0xe337ef7e, 0xd39fb119, 0xc97f0df6, 0x68fea01b, 0xa150a6e5, 0x55258962, 0xeb6ff41b,
+  0xd7c9cd7a, 0xa619cd9e, 0xbcf09576, 0x2672c073, 0xf003fb3c, 0x4ab7a50b, 0x1484126a, 0x487ba9b1,
+  0xa64fc9c6, 0xf6957d49, 0x38b06a75, 0xdd805fcd, 0x63d094cf, 0xf51c999e, 0x1aa4d343, 0xb8495294,
+  0xce9f8e99, 0xbffcd770, 0xc7c275cc, 0x378453a7, 0x7b21be33, 0x397f41bd, 0x4e94d131, 0x92cc1f98,
+  0x5915ea51, 0x99f861b7, 0xc9980a88, 0x1d74fd5f, 0xb0a495f8, 0x614deed0, 0xb5778eea, 0x5941792d,
+  0xfa90c1f8, 0x33f824b4, 0xc4965372, 0x3ff6d550, 0x4ca5fec0, 0x8630e964, 0x5b3fbbd6, 0x7da26a48,
+  0xb203231a, 0x04297514, 0x2d639306, 0x2eb13149, 0x16a45272, 0x532459a0, 0x8e5f4872, 0xf966c7d9,
+  0x07128dc0, 0x0d44db62, 0xafc8d52d, 0x06316131, 0xd838e7ce, 0x1bc41d00, 0x3a2e8c0f, 0xea83837e,
+  0xb984737d, 0x13ba4891, 0xc4f8b949, 0xa6d6acb3, 0xa215cdce, 0x8359838b, 0x6bd1aa31, 0xf579dd52,
+  0x21b93f93, 0xf5176781, 0x187dfdde, 0xe94aeb76, 0x2b38fd54, 0x431de1da, 0xab394825, 0x9ad3048f,
+  0xdfea32aa, 0x659473e3, 0x623f7863, 0xf3346c59, 0xab3ab685, 0x3346a90b, 0x6b56443e, 0xc6de01f8,
+  0x8d421fc0, 0x9b0ed10c, 0x88f1a1e9, 0x54c1f029, 0x7dead57b, 0x8d7ba426, 0x4cf5178a, 0x551a7cca,
+  0x1a9a5f08, 0xfcd651b9, 0x25605182, 0xe11fc6c3, 0xb6fd9676, 0x337b3027, 0xb7c8eb14, 0x9e5fd030,
+  0x6b57e354, 0xad913cf7, 0x7e16688d, 0x58872a69, 0x2c2fc7df, 0xe389ccc6, 0x30738df1, 0x0824a734,
+  0xe1797a8b, 0xa4a8d57b, 0x5b5d193b, 0xc8a8309b, 0x73f9a978, 0x73398d32, 0x0f59573e, 0xe9df2b03,
+  0xe8a5b6c8, 0x848d0704, 0x98df93c2, 0x720a1dc3, 0x684f259a, 0x943ba848, 0xa6370152, 0x863b5ea3,
+  0xd17b978b, 0x6d9b58ef, 0x0a700dd4, 0xa73d36bf, 0x8e6a0829, 0x8695bc14, 0xe35b3447, 0x933ac568,
+  0x8894b022, 0x2f511c27, 0xddfbcc3c, 0x006662b6, 0x117c83fe, 0x4e12b414, 0xc2bca766, 0x3a2fec10,
+  0xf4562420, 0x55792e2a, 0x46f5d857, 0xceda25ce, 0xc3601d3b, 0x6c00ab46, 0xefac9c28, 0xb3c35047,
+  0x611dfee3, 0x257c3207, 0xfdd58482, 0x3b14d84f, 0x23becb64, 0xa075f3a3, 0x088f8ead, 0x07adf158,
+  0x7796943c, 0xfacabf3d, 0xc09730cd, 0xf7679969, 0xda44e9ed, 0x2c854c12, 0x35935fa3, 0x2f057d9f,
+  0x690624f8, 0x1cb0bafd, 0x7b0dbdc6, 0x810f23bb, 0xfa929a1a, 0x6d969a17, 0x6742979b, 0x74ac7d05,
+  0x010e65c4, 0x86a3d963, 0xf907b5a0, 0xd0042bd3, 0x158d7d03, 0x287a8255, 0xbba8366f, 0x096edc33,
+  0x21916a7b, 0x77b56b86, 0x951622f9, 0xa6c5e650, 0x8cea17d1, 0xcd8c62bc, 0xa3d63433, 0x358a68fd,
+  0x0f9b9d3c, 0xd6aa295b, 0xfe33384a, 0xc000738e, 0xcd67eb2f, 0xe2eb6dc2, 0x97338b02, 0x06c9f246,
+  0x419cf1ad, 0x2b83c045, 0x3723f18a, 0xcb5b3089, 0x160bead7, 0x5d494656, 0x35f8a74b, 0x1e4e6c9e,
+  0x000399bd, 0x67466880, 0xb4174831, 0xacf423b2, 0xca815ab3, 0x5a6395e7, 0x302a67c5, 0x8bdb446b,
+  0x108f8fa4, 0x10223eda, 0x92b8b48b, 0x7f38d0ee, 0xab2701d4, 0x0262d415, 0xaf224a30, 0xb3d88aba,
+  0xf8b2c3af, 0xdaf7ef70, 0xcc97d3b7, 0xe9614b6c, 0x2baebff4, 0x70f687cf, 0x386c9156, 0xce092ee5,
+  0x01e87da6, 0x6ce91e6a, 0xbb7bcc84, 0xc7922c20, 0x9d3b71fd, 0x060e41c6, 0xd7590f15, 0x4e03bb47,
+  0x183c198e, 0x63eeb240, 0x2ddbf49a, 0x6d5cba54, 0x923750af, 0xf9e14236, 0x7838162b, 0x59726c72,
+  0x81b66760, 0xbb2926c1, 0x48a0ce0d, 0xa6c0496d, 0xad43507b, 0x718d496a, 0x9df057af, 0x44b1bde6,
+  0x054356dc, 0xde7ced35, 0xd51a138b, 0x62088cc9, 0x35830311, 0xc96efca2, 0x686f86ec, 0x8e77cb68,
+  0x63e1d6b8, 0xc80f9778, 0x79c491fd, 0x1b4c67f2, 0x72698d7d, 0x5e368c31, 0xf7d95e2e, 0xa1d3493f,
+  0xdcd9433e, 0x896f1552, 0x4bc4ca7a, 0xa6d1baf4, 0xa5a96dcc, 0x0bef8b46, 0xa169fda7, 0x74df40b7,
+  0x4e208804, 0x9a756607, 0x038e87c8, 0x20211e44, 0x8b7ad4bf, 0xc6403f35, 0x1848e36d, 0x80bdb038,
+  0x1e62891c, 0x643d2107, 0xbf04d6f8, 0x21092c8c, 0xf644f389, 0x0778404e, 0x7b78adb8, 0xa2c52d53,
+  0x42157abe, 0xa2253e2e, 0x7bf3f4ae, 0x80f594f9, 0x953194e7, 0x77eb92ed, 0xb3816930, 0xda8d9336,
+  0xbf447469, 0xf26d9483, 0xee6faed5, 0x71371235, 0xde425f73, 0xb4e59f43, 0x7dbe2d4e, 0x2d37b185,
+  0x49dc9a63, 0x98c39d98, 0x1301c9a2, 0x389b1bbf, 0x0c18588d, 0xa421c1ba, 0x7aa3865c, 0x71e08558,
+  0x3c5cfcaa, 0x7d239ca4, 0x0297d9dd, 0xd7dc2830, 0x4b37802b, 0x7428ab54, 0xaeee0347, 0x4b3fbb85,
+  0x692f2f08, 0x134e578e, 0x36d9e0bf, 0xae8b5fcf, 0xedb93ecf, 0x2b27248e, 0x170eb1ef, 0x7dc57fd6,
+  0x1e760f16, 0xb1136601, 0x864e1b9b, 0xd7ea7319, 0x3ab871bd, 0xcfa4d76f, 0xe31bd782, 0x0dbeb469,
+  0xabb96061, 0x5370f85d, 0xffb07e37, 0xda30d0fb, 0xebc977b6, 0x0b98b40f, 0x3a4d0fe6, 0xdf4fc26b,
+  0x159cf22a, 0xc298d6e2, 0x2b78ef6a, 0x61a94ac0, 0xab561187, 0x14eea0f0, 0xdf0d4164, 0x19af70ee
+];
+const TSS_FAMILY1_WEAK_KEY_B = [0xa4a8d57b, 0x5b5d193b, 0xc8a8309b, 0x73f9a978];
+const TSS_FAMILY2_TAIL_CONST = [0x37, 0x92, 0x44, 0x68, 0xa5, 0x3d, 0xcc, 0x7f, 0xbb, 0x0f, 0xd9, 0x88, 0xee, 0x9a, 0xe9, 0x5a];
+const TSS_FAMILY0_KEY_XOR = [0x8a, 0xe6, 0x9b, 0xf3, 0xc1, 0x7d, 0x40, 0x25];
+let tssCrc32TableCache = null;
+const tssFamily1ScheduleCache = new Map();
+const tssFamily2ScheduleCache = new Map();
+const tssFamily0TableCache = new Map();
+
+function tssRol32(value, count) {
+  const shift = Number(count) & 31;
+  const word = Number(value) >>> 0;
+  if (shift === 0) return word;
+  return ((word << shift) | (word >>> (32 - shift))) >>> 0;
+}
+
+function tssRor32(value, count) {
+  const shift = Number(count) & 31;
+  const word = Number(value) >>> 0;
+  if (shift === 0) return word;
+  return ((word >>> shift) | (word << (32 - shift))) >>> 0;
+}
+
+function tssSlotRaw(slot, width = 8) {
+  const label = String(TSS_CRYPTO_KEY_LABELS[Number(slot)] || "");
+  const out = [];
+  for (let index = 0; index < width; index += 1) {
+    out.push(index < label.length ? label.charCodeAt(index) & 0xff : 0);
+  }
+  return out;
+}
+
+function tssWriteLe32(out, offset, value) {
+  const word = Number(value) >>> 0;
+  out[offset] = word & 0xff;
+  out[offset + 1] = (word >>> 8) & 0xff;
+  out[offset + 2] = (word >>> 16) & 0xff;
+  out[offset + 3] = (word >>> 24) & 0xff;
+}
+
+function tssFamily1Schedule(slot) {
+  const slotIndex = Number(slot);
+  if (tssFamily1ScheduleCache.has(slotIndex)) return tssFamily1ScheduleCache.get(slotIndex);
+  const raw = tssSlotRaw(slotIndex, 16);
+  const t = [
+    readLe32(raw, 0),
+    readLe32(raw, 4),
+    readLe32(raw, 8),
+    readLe32(raw, 12),
+    4,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  ];
+  const k = new Array(40).fill(0);
+  const prev2 = [13, 14, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+  const prev7 = [8, 9, 10, 11, 12, 13, 14, 0, 1, 2, 3, 4, 5, 6, 7];
+  const stirIdx = [14, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+  const outIdx = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6];
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    for (let index = 0; index < 15; index += 1) {
+      t[index] = (t[index] ^ (pass + 4 * index) ^ tssRor32((t[prev2[index]] ^ t[prev7[index]]) >>> 0, 29)) >>> 0;
+    }
+    for (let round = 0; round < 4; round += 1) {
+      for (let index = 0; index < 15; index += 1) {
+        t[index] = tssRol32((t[index] + TSS_FAMILY1_SBOX[t[stirIdx[index]] & 0x1ff]) >>> 0, 9);
+      }
+    }
+    for (let index = 0; index < outIdx.length; index += 1) {
+      k[pass * 10 + index] = t[outIdx[index]] >>> 0;
+    }
+  }
+
+  for (let index = 5; index < 36; index += 2) {
+    let word = (k[index] | 3) >>> 0;
+    const x = (((k[index] & 0x7ffffffc) ^ (word >>> 1) ^ 0x7ffffffc) >>> 0);
+    const y = (x & (x >>> 1) & (x >>> 2)) >>> 0;
+    const z = (y & (y >>> 3) & (y >>> 6)) >>> 0;
+    if (z) {
+      let mask = ((z << 1) | (z << 2)) >>> 0;
+      mask = (mask | (mask << 2)) >>> 0;
+      mask = ((mask & 0xfffffffc) | ((mask << 4) >>> 0)) >>> 0;
+      const rotated = tssRol32(TSS_FAMILY1_WEAK_KEY_B[k[index] & 3], k[index - 1] & 0x1f);
+      word = (word ^ (rotated & mask)) >>> 0;
+    }
+    k[index] = word >>> 0;
+  }
+
+  tssFamily1ScheduleCache.set(slotIndex, k);
+  return k;
+}
+
+function tssFamily1MarsE(input, k1, k2) {
+  let m = (Number(input) + Number(k1)) >>> 0;
+  let r = Math.imul(tssRol32(input, 13), Number(k2)) >>> 0;
+  let l = TSS_FAMILY1_SBOX[m & 0x1ff] >>> 0;
+  r = tssRol32(r, 5);
+  m = tssRol32(m, r & 0x1f);
+  l = (l ^ r) >>> 0;
+  r = tssRol32(r, 5);
+  l = (l ^ r) >>> 0;
+  l = tssRol32(l, r & 0x1f);
+  return { l, m, r };
+}
+
+function tssFamily1RotWordsLeft(words) {
+  return [words[3], words[0], words[1], words[2]];
+}
+
+function tssFamily1DecryptBlock(block, schedule) {
+  let d = [
+    readLe32(block, 0),
+    readLe32(block, 4),
+    readLe32(block, 8),
+    readLe32(block, 12),
+  ];
+
+  for (let index = 0; index < 4; index += 1) {
+    d[index] = (d[index] + schedule[36 + index]) >>> 0;
+  }
+
+  for (let round = 7; round >= 0; round -= 1) {
+    d = tssFamily1RotWordsLeft(d);
+    d[0] = tssRor32(d[0], 24);
+    d[3] = (d[3] ^ TSS_FAMILY1_SBOX[(d[0] >>> 8) & 0xff]) >>> 0;
+    d[3] = (d[3] + TSS_FAMILY1_SBOX[256 + ((d[0] >>> 16) & 0xff)]) >>> 0;
+    d[2] = (d[2] + TSS_FAMILY1_SBOX[(d[0] >>> 24) & 0xff]) >>> 0;
+    d[1] = (d[1] ^ TSS_FAMILY1_SBOX[256 + (d[0] & 0xff)]) >>> 0;
+    if (round === 2 || round === 6) d[0] = (d[0] + d[3]) >>> 0;
+    if (round === 3 || round === 7) d[0] = (d[0] + d[1]) >>> 0;
+  }
+
+  for (let round = 15; round >= 0; round -= 1) {
+    d = tssFamily1RotWordsLeft(d);
+    d[0] = tssRor32(d[0], 13);
+    const transform = tssFamily1MarsE(d[0], schedule[2 * round + 4], schedule[2 * round + 5]);
+    d[2] = (d[2] - transform.m) >>> 0;
+    if (round < 8) {
+      d[1] = (d[1] - transform.l) >>> 0;
+      d[3] = (d[3] ^ transform.r) >>> 0;
+    } else {
+      d[3] = (d[3] - transform.l) >>> 0;
+      d[1] = (d[1] ^ transform.r) >>> 0;
+    }
+  }
+
+  for (let round = 7; round >= 0; round -= 1) {
+    d = tssFamily1RotWordsLeft(d);
+    if (round === 0 || round === 4) d[0] = (d[0] - d[3]) >>> 0;
+    if (round === 1 || round === 5) d[0] = (d[0] - d[1]) >>> 0;
+    d[0] = tssRol32(d[0], 24);
+    d[3] = (d[3] ^ TSS_FAMILY1_SBOX[256 + ((d[0] >>> 24) & 0xff)]) >>> 0;
+    d[2] = (d[2] - TSS_FAMILY1_SBOX[(d[0] >>> 16) & 0xff]) >>> 0;
+    d[1] = (d[1] - TSS_FAMILY1_SBOX[256 + ((d[0] >>> 8) & 0xff)]) >>> 0;
+    d[1] = (d[1] ^ TSS_FAMILY1_SBOX[d[0] & 0xff]) >>> 0;
+  }
+
+  for (let index = 0; index < 4; index += 1) {
+    d[index] = (d[index] - schedule[index]) >>> 0;
+  }
+
+  const out = new Array(16).fill(0);
+  tssWriteLe32(out, 0, d[0]);
+  tssWriteLe32(out, 4, d[1]);
+  tssWriteLe32(out, 8, d[2]);
+  tssWriteLe32(out, 12, d[3]);
+  return out;
+}
+
+function tssFamily1TailTransform(data, slot) {
+  const input = Array.isArray(data) ? data : [];
+  const key = tssSlotRaw(slot, 8);
+  return input.map((value, index) => {
+    const constant = TSS_FAMILY2_TAIL_CONST[index & 15];
+    const keyByte = key[index & 7];
+    const delta = ((-constant) & 0xff) >>> 0;
+    const mixed = ((((constant ^ Number(value) ^ keyByte) + delta) & 0xff) ^ constant) & 0xff;
+    return mixed ^ keyByte;
+  });
+}
+
+function tssFamily1Decrypt(cipher, slot) {
+  const input = Array.isArray(cipher) ? cipher : [];
+  const schedule = tssFamily1Schedule(slot);
+  const out = [];
+  const fullLength = input.length & ~0x0f;
+  for (let offset = 0; offset < fullLength; offset += 16) {
+    out.push(...tssFamily1DecryptBlock(input.slice(offset, offset + 16), schedule));
+  }
+  if (fullLength < input.length) {
+    out.push(...tssFamily1TailTransform(input.slice(fullLength), slot));
+  }
+  return out;
+}
+
+function tssFamily2Schedule(slot) {
+  const slotIndex = Number(slot);
+  if (tssFamily2ScheduleCache.has(slotIndex)) return tssFamily2ScheduleCache.get(slotIndex);
+  const schedule = new Array(44).fill(0);
+  schedule[0] = 0xb7e15163;
+  for (let index = 1; index < schedule.length; index += 1) {
+    schedule[index] = (schedule[index - 1] + 0x9e3779b9) >>> 0;
+  }
+  const words = tssSlotRaw(slotIndex, 8);
+  let a = 0;
+  let b = 0;
+  for (let round = 0; round < 132; round += 1) {
+    const scheduleIndex = round % 44;
+    a = schedule[scheduleIndex] = tssRol32((schedule[scheduleIndex] + a + b) >>> 0, 3);
+    const wordIndex = round & 7;
+    b = words[wordIndex] = tssRol32((words[wordIndex] + a + b) >>> 0, (a + b) & 31);
+  }
+  tssFamily2ScheduleCache.set(slotIndex, schedule);
+  return schedule;
+}
+
+function tssFamily2Decrypt(cipher, slot) {
+  const input = Array.isArray(cipher) ? cipher : [];
+  const schedule = tssFamily2Schedule(slot);
+  const out = new Array(input.length).fill(0);
+  const fullLength = input.length & ~0x0f;
+  for (let offset = 0; offset < fullLength; offset += 16) {
+    let a = readLe32(input, offset);
+    let b = readLe32(input, offset + 4);
+    let c = readLe32(input, offset + 8);
+    let d = readLe32(input, offset + 12);
+    c = (c - schedule[43]) >>> 0;
+    a = (a - schedule[42]) >>> 0;
+    for (let round = 20; round > 0; round -= 1) {
+      const oldA = a;
+      a = d;
+      d = c;
+      c = b;
+      b = oldA;
+      const u = tssRol32(Math.imul(d, (Math.imul(2, d) + 1) >>> 0), 5);
+      const t = tssRol32(Math.imul(b, (Math.imul(2, b) + 1) >>> 0), 5);
+      c = (tssRor32((c - schedule[2 * round + 1]) >>> 0, t) ^ u) >>> 0;
+      a = (tssRor32((a - schedule[2 * round]) >>> 0, u) ^ t) >>> 0;
+    }
+    d = (d - schedule[1]) >>> 0;
+    b = (b - schedule[0]) >>> 0;
+    tssWriteLe32(out, offset, a);
+    tssWriteLe32(out, offset + 4, b);
+    tssWriteLe32(out, offset + 8, c);
+    tssWriteLe32(out, offset + 12, d);
+  }
+  const key = tssSlotRaw(slot, 8);
+  for (let index = fullLength; index < input.length; index += 1) {
+    const tailIndex = index - fullLength;
+    const constant = TSS_FAMILY2_TAIL_CONST[tailIndex & 15];
+    const keyByte = key[tailIndex & 7];
+    const value = ((((constant ^ input[index] ^ keyByte) + ((-constant) & 0xff)) & 0xff) ^ constant) & 0xff;
+    out[index] = value ^ keyByte;
+  }
+  return out;
+}
+
+function tssFamily0Decrypt(cipher, slot) {
+  const slotIndex = Number(slot);
+  let cached = tssFamily0TableCache.get(slotIndex);
+  if (!cached) {
+    const raw = tssSlotRaw(slotIndex, 8);
+    const key = raw.map((value, index) => (value ^ TSS_FAMILY0_KEY_XOR[index]) & 0xff);
+    const table = Array.from({ length: 256 }, (_value, index) => index);
+    let seed = ((((key[5] << 16) | (key[6] << 8) | key[7]) ^ ((key[1] << 16) | (key[2] << 8) | key[3])) >>> 0);
+    for (let index = 0; index < 256; index += 1) {
+      seed = (Math.imul(214013, seed) + 2531011) >>> 0;
+      const swapIndex = (seed >>> 16) & 0xff;
+      const previous = table[index];
+      table[index] = table[swapIndex];
+      table[swapIndex] = previous;
+    }
+    const inverse = new Array(256).fill(0);
+    table.forEach((value, index) => { inverse[value] = index; });
+    cached = { key, table: inverse };
+    tssFamily0TableCache.set(slotIndex, cached);
+  }
+  return (Array.isArray(cipher) ? cipher : []).map((value, index) => {
+    const keyByte = cached.key[index & 7];
+    return (keyByte ^ (index & 0xff) ^ cached.table[(Number(value) ^ keyByte) & 0xff]) & 0xff;
+  });
+}
+
+function tssCrc32(byteValues) {
+  if (!tssCrc32TableCache) {
+    tssCrc32TableCache = Array.from({ length: 256 }, (_value, index) => {
+      let crc = index;
+      for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+      return crc >>> 0;
+    });
+  }
+  let crc = 0xffffffff;
+  for (const byte of Array.isArray(byteValues) ? byteValues : []) {
+    crc = (tssCrc32TableCache[(crc ^ Number(byte)) & 0xff] ^ (crc >>> 8)) >>> 0;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function parseTssEncryptedEnvelope(record) {
+  if (!Array.isArray(record) || record.length < 28) return null;
+  const report = detectTssReport(record);
+  if (!report || report.offset !== 6 || ![0x010a0008, 0x010a0009].includes(Number(report.value))) return null;
+  const version = readBe32(record, 0);
+  const total = readBe16(record, 4);
+  if (version !== 1 || !Number.isFinite(total) || Math.abs(Number(total) - record.length) > 4) return null;
+  const family = Number(record[20]);
+  const slot = Number(record[21]);
+  const expectedCrc = readBe32(record, 22);
+  const cipherLength = readBe16(record, 26);
+  const availableLength = Math.max(0, record.length - 28);
+  const validFamily = family >= 0 && family <= 2;
+  const validSlot = slot >= 0 && slot < TSS_CRYPTO_KEY_LABELS.length;
+  const validLength = Number.isFinite(cipherLength) && cipherLength >= 0 && cipherLength <= availableLength;
+  return {
+    report: report.value,
+    family,
+    familyName: family === 0 ? "family0_gene" : family === 1 ? "family1_mars" : family === 2 ? "family2_rc6" : `family${family}`,
+    slot,
+    keyLabel: validSlot ? TSS_CRYPTO_KEY_LABELS[slot] : "",
+    expectedCrc,
+    cipherLength,
+    availableLength,
+    cipher: validLength ? record.slice(28, 28 + cipherLength) : [],
+    trailingLength: validLength ? Math.max(0, availableLength - cipherLength) : availableLength,
+    valid: validFamily && validSlot && validLength,
+    reason: !validFamily ? `不支持的 family=${family}` : !validSlot ? `slot=${slot} 越界` : !validLength ? `cipher_len=${cipherLength}，可用=${availableLength}` : "",
+  };
+}
+
+function decryptTssEncryptedEnvelope(record) {
+  const envelope = parseTssEncryptedEnvelope(record);
+  if (!envelope) return null;
+  if (!envelope.valid) return { ...envelope, supported: false, plain: [], reason: envelope.reason || "加密信封头无效" };
+  const plain = envelope.family === 0
+    ? tssFamily0Decrypt(envelope.cipher, envelope.slot)
+    : envelope.family === 1
+      ? tssFamily1Decrypt(envelope.cipher, envelope.slot)
+      : tssFamily2Decrypt(envelope.cipher, envelope.slot);
+  const actualCrc = tssCrc32(plain);
+  const crcMatch = actualCrc === envelope.expectedCrc;
+  const innerRoot = crcMatch ? detectTssReport(plain) : null;
+  return {
+    ...envelope,
+    supported: true,
+    plain,
+    actualCrc,
+    crcMatch,
+    innerRoot,
+    reason: crcMatch ? "" : `CRC mismatch: expected ${formatHexValue(envelope.expectedCrc, 8)} actual ${formatHexValue(actualCrc, 8)}`,
+  };
+}
+
+function parseTssTlvRecord0013(record) {
+  if (!Array.isArray(record) || record.length < 22) return null;
+  const report = detectTssReport(record);
+  if (!report || report.offset !== 6 || Number(report.value) !== 0x010a0013) return null;
+  const version = readBe32(record, 0);
+  const total = readBe16(record, 4);
+  if (version !== 1 || !Number.isFinite(total) || Number(total) !== record.length) return null;
+  const items = [];
+  let offset = 20;
+  while (offset < record.length) {
+    if (offset + 2 > record.length) return { valid: false, reason: `TLV header truncated @${hexOffsetText(offset)}`, items };
+    const type = Number(record[offset]);
+    const length = Number(record[offset + 1]);
+    const valueOffset = offset + 2;
+    const end = valueOffset + length;
+    if (end > record.length) return { valid: false, reason: `TLV len=${length} exceeds record @${hexOffsetText(offset)}`, items };
+    const value = record.slice(valueOffset, end);
+    const printable = value.every((byte) => Number(byte) >= 32 && Number(byte) < 127);
+    items.push({ index: items.length, offset, type, length, valueOffset, end, value, text: printable ? String.fromCharCode(...value) : "" });
+    offset = end;
+  }
+  return {
+    valid: offset === record.length,
+    reason: offset === record.length ? "" : `record tail ${record.length - offset}B`,
+    version,
+    total,
+    headerIdHex: `0x${formatHexBytesCompact(record.slice(10, 18))}`,
+    flags: readBe16(record, 18),
+    items,
+  };
+}
+
+function tssRecordIdentity(record, report) {
+  if (report && Number(report.value) === 0x010a0013 && Array.isArray(record) && record.length >= 18) {
+    return { idValue: null, idText: `0x${formatHexBytesCompact(record.slice(10, 18))}` };
+  }
+  return { idValue: readBe32(record, childRecordIdOffset(record, report)), idText: "" };
+}
+
 function reportName(reportCode) {
   const value = Number(reportCode);
   const names = {
+    0x010a0008: "nested-encrypted-response-envelope",
+    0x010a0009: "nested-encrypted-control-envelope",
+    0x010a0013: "plaintext-tlv-record",
     0x010a001b: "container",
     0x010a0011: "server-acknowledged-request",
     0x010a0010: "0011-ack",
@@ -7254,6 +8815,16 @@ function classifyRecordBytes(byteValues, reportCode) {
 
 function formatRecordValuePreview(byteValues, reportCode) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const encrypted = parseTssEncryptedEnvelope(byteValues);
+  if (encrypted) {
+    return `${encrypted.familyName} · slot[${encrypted.slot}]${encrypted.keyLabel ? `=${encrypted.keyLabel}` : ""} · cipher ${encrypted.cipherLength}B · CRC32 ${formatHexValue(encrypted.expectedCrc, 8)}`;
+  }
+  const tlvRecord = parseTssTlvRecord0013(byteValues);
+  if (tlvRecord && tlvRecord.valid) {
+    return tlvRecord.items.map((item) => (
+      `TLV[${item.index}] type=${item.type} len=${item.length}${item.text ? ` text="${item.text}"` : ""}`
+    )).join(" · ");
+  }
   if (Number(reportCode) === 0x0102000a) {
     const report = detectTssReport(byteValues);
     const layout = read0102000aLayout(byteValues, report);
@@ -7304,6 +8875,15 @@ function semanticAsciiView(byteValues) {
 function localChildSemanticProfile(record, reportCode) {
   const report = Number(reportCode);
   const rawLower = semanticAsciiView(record).toLowerCase();
+  if (parseTssEncryptedEnvelope(record)) {
+    return report === 0x010a0008
+      ? semanticProfileValue("nested_encrypted_tss_response", "response.crypto_envelope", "TSS 内层加密响应封套", "observed", ["report_010a0008", "family_slot_crc_cipher_len"])
+      : semanticProfileValue("nested_encrypted_tss_control", "control.crypto_envelope", "TSS 内层加密控制封套", "observed", ["report_010a0009", "family_slot_crc_cipher_len"]);
+  }
+  const tlvRecord = parseTssTlvRecord0013(record);
+  if (tlvRecord && tlvRecord.valid) {
+    return semanticProfileValue("plaintext_tlv_text_record", "control.tlv_text", "明文 TLV 文本记录", "observed", ["report_010a0013", "20_byte_header", "u8_type_u8_length", "length_closes_record"]);
+  }
   if (report === 0x010a001b) return semanticProfileValue("parent_container", "report.container", "批量上报父容器", "confirmed", ["report_code"]);
   if (report === 0x010a0011) return semanticProfileValue("server_acknowledged_child_request", "control.acknowledged_child_request", "服务器确认型子请求（保活/握手候选）", "confirmed", ["paired_leaf_id", "010a0010_ack"]);
   if (report === 0x010a0010) return semanticProfileValue("010a0011_ack_response", "response.ack", "010a0011 子请求回执（leaf_id 回显）", "confirmed", ["paired_leaf_id", "status_0324"]);
@@ -7498,7 +9078,7 @@ function parseTssChildrenAt(byteValues, startOffset, maxChildren = 256) {
       break;
     }
     const reportCode = report.value;
-    const idValue = readBe32(record, childRecordIdOffset(record, report));
+    const identity = tssRecordIdentity(record, report);
     const valuePreview = formatRecordValuePreview(record, reportCode);
     const className = classifyRecordBytes(record, reportCode);
     const timestampCandidates = extractTimestampCandidatesFromRecord(record);
@@ -7509,7 +9089,8 @@ function parseTssChildrenAt(byteValues, startOffset, maxChildren = 256) {
       lengthEndian,
       reportCode,
       reportOffset: report ? report.offset : -1,
-      idValue,
+      idValue: identity.idValue,
+      idText: identity.idText,
       className,
       valuePreview,
       timestampCandidates,
@@ -7629,7 +9210,7 @@ function parseTssChildRecords(byteValues) {
     const record = byteValues.slice(offset + 4, offset + 4 + childLen);
     const report = detectTssReport(record);
     const reportCode = report ? report.value : null;
-    const idValue = readBe32(record, childRecordIdOffset(record, report));
+    const identity = tssRecordIdentity(record, report);
     const valuePreview = formatRecordValuePreview(record, reportCode);
     const className = classifyRecordBytes(record, reportCode);
     const timestampCandidates = extractTimestampCandidatesFromRecord(record);
@@ -7640,7 +9221,8 @@ function parseTssChildRecords(byteValues) {
       lengthEndian,
       reportCode,
       reportOffset: report ? report.offset : -1,
-      idValue,
+      idValue: identity.idValue,
+      idText: identity.idText,
       className,
       valuePreview,
       timestampCandidates,
@@ -7675,6 +9257,7 @@ function makeRootComparableNode(byteValues) {
   const className = classifyRecordBytes(byteValues, reportCode);
   const valuePreview = formatRecordValuePreview(byteValues, reportCode);
   const timestampCandidates = extractTimestampCandidatesFromRecord(byteValues);
+  const identity = tssRecordIdentity(byteValues, root);
   return attachLocalChildSemantic({
     index: 0,
     nodeLabel: "node[0]",
@@ -7685,7 +9268,8 @@ function makeRootComparableNode(byteValues) {
     lengthEndian: "",
     reportCode,
     reportOffset: root.offset,
-    idValue: readBe32(byteValues, childRecordIdOffset(byteValues, root)),
+    idValue: identity.idValue,
+    idText: identity.idText,
     className,
     valuePreview,
     timestampCandidates,
@@ -7725,12 +9309,12 @@ function buildTssTreeText(base64Text, options = {}) {
   const lines = [];
   lines.push(`root report=${formatHexValue(root.value, 8)} type=${reportName(root.value)} len=${byteValues.length}`);
   if (root.value !== 0x010a001b) {
-    const idValue = readBe32(byteValues, childRecordIdOffset(byteValues, root));
+    const identity = tssRecordIdentity(byteValues, root);
     const preview = formatRecordValuePreview(byteValues, root.value);
     const timestampCandidates = extractTimestampCandidatesFromRecord(byteValues);
     lines.push(
       `  node[0] report=${formatHexValue(root.value, 8)} type=${localChildSemanticProfile(byteValues, root.value).label.replace(/\s+/g, "_")} len=${byteValues.length}` +
-        (Number.isFinite(idValue) ? ` id=${formatHexValue(idValue, 4)}` : "") +
+        (identity.idText ? ` id=${identity.idText}` : Number.isFinite(identity.idValue) ? ` id=${formatHexValue(identity.idValue, 4)}` : "") +
         (timestampCandidates.length > 0 ? ` timestamps=${timestampCandidates.join(",")}` : "")
     );
     if (preview) lines.push(`    value=${preview}`);
@@ -7757,7 +9341,8 @@ function buildTssTreeText(base64Text, options = {}) {
       continue;
     }
     const reportText = child.reportCode !== null ? formatHexValue(child.reportCode, 8) : "-";
-    const idText = Number.isFinite(child.idValue) ? ` id=${formatHexValue(child.idValue, 4)}` : "";
+    const childIdentityText = childIdText(child);
+    const idText = childIdentityText !== "-" ? ` id=${childIdentityText}` : "";
     const keepText = child.reportCode === 0x010a0011 ? " keep=required ack=010a0010" : "";
     const tsText = Array.isArray(child.timestampCandidates) && child.timestampCandidates.length > 0
       ? ` timestamps=${child.timestampCandidates.join(",")}`
@@ -8675,6 +10260,43 @@ function ensureChildCommonStyles() {
 	    .child-preview-row-single {
 	      grid-template-columns: minmax(0, 1fr);
 	    }
+    .ace-compare-status {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 6px 8px;
+      align-items: baseline;
+      padding: 7px 8px;
+      border-bottom: 1px solid color-mix(in srgb, #fb7185 24%, var(--line));
+      background: color-mix(in srgb, var(--dump-bg) 90%, #e11d48 10%);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .ace-compare-status strong {
+      color: var(--text);
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .ace-compare-status span {
+      min-width: 0;
+      color: color-mix(in srgb, var(--text) 86%, var(--muted));
+      overflow-wrap: anywhere;
+    }
+    .ace-compare-status-missing {
+      border-color: color-mix(in srgb, #f59e0b 42%, var(--line));
+      background: color-mix(in srgb, #f59e0b 8%, var(--dump-bg));
+    }
+    .ace-compare-status-changed {
+      border-color: color-mix(in srgb, #22c55e 42%, var(--line));
+      background: color-mix(in srgb, #22c55e 7%, var(--dump-bg));
+    }
+    .ace-compare-status-same {
+      border-color: color-mix(in srgb, #38bdf8 38%, var(--line));
+      background: color-mix(in srgb, #38bdf8 6%, var(--dump-bg));
+    }
+    .ace-compare-status-unparsed {
+      border-color: color-mix(in srgb, #f97316 42%, var(--line));
+      background: color-mix(in srgb, #f97316 7%, var(--dump-bg));
+    }
     .child-preview-box {
       min-width: 0;
 	      border: 0;
@@ -8918,37 +10540,25 @@ function ensureChildCommonStyles() {
     }
 	    .child-hex-row {
 	      display: grid;
-	      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
+	      grid-template-columns: 54px minmax(104px, max-content) minmax(80px, 16ch) minmax(0, 1fr);
       gap: 8px;
       align-items: baseline;
       padding: 2px 7px;
       font-size: 12px;
       line-height: 1.38;
     }
-    .child-hex-row-marked {
-      background: color-mix(in srgb, var(--accent) 4%, transparent);
-    }
-    .child-hex-row-report,
-    .child-hex-row-id {
-      background: color-mix(in srgb, #38bdf8 8%, transparent);
-    }
-    .child-hex-row-len,
-    .child-hex-row-innerLen,
-    .child-hex-row-innerType,
-    .child-hex-row-selector,
-    .child-hex-row-innerField {
-      background: color-mix(in srgb, #a78bfa 8%, transparent);
+    .child-hex-row-tlvType,
+    .child-hex-row-tlvLen,
+    .child-hex-row-tlvValue {
+      border-left: 2px solid color-mix(in srgb, #38bdf8 38%, transparent);
     }
     .child-hex-row-bodyHeader {
-      background: color-mix(in srgb, #f59e0b 11%, transparent);
       border-left: 2px solid color-mix(in srgb, #f59e0b 64%, transparent);
     }
     .child-hex-row-probeEntry {
-      background: color-mix(in srgb, #22c55e 5%, transparent);
       border-left: 2px solid color-mix(in srgb, #22c55e 34%, transparent);
     }
     .child-hex-row-bodyWord {
-      background: color-mix(in srgb, #38bdf8 6%, transparent);
       border-left: 2px solid color-mix(in srgb, #38bdf8 42%, transparent);
     }
     .child-hex-row-report .child-hex-note,
@@ -8956,12 +10566,22 @@ function ensureChildCommonStyles() {
       color: color-mix(in srgb, #38bdf8 84%, var(--text));
       font-weight: 800;
     }
+    .child-hex-row-version .child-hex-note,
+    .child-hex-row-total .child-hex-note,
     .child-hex-row-len .child-hex-note,
     .child-hex-row-innerLen .child-hex-note,
     .child-hex-row-innerType .child-hex-note,
     .child-hex-row-selector .child-hex-note,
-    .child-hex-row-innerField .child-hex-note {
+    .child-hex-row-innerField .child-hex-note,
+    .child-hex-row-headerId .child-hex-note,
+    .child-hex-row-flags .child-hex-note {
       color: color-mix(in srgb, #c4b5fd 80%, var(--text));
+      font-weight: 800;
+    }
+    .child-hex-row-tlvType .child-hex-note,
+    .child-hex-row-tlvLen .child-hex-note,
+    .child-hex-row-tlvValue .child-hex-note {
+      color: color-mix(in srgb, #7dd3fc 84%, var(--text));
       font-weight: 800;
     }
     .child-hex-row-bodyHeader .child-hex-note {
@@ -8976,8 +10596,7 @@ function ensureChildCommonStyles() {
     }
     .child-hex-offset,
     .child-hex-bytes,
-    .child-hex-string-label,
-    .child-hex-string-cells {
+    .child-hex-ascii {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       white-space: pre;
     }
@@ -8999,7 +10618,7 @@ function ensureChildCommonStyles() {
       white-space: pre;
     }
 	    .child-hex-byte-cell,
-	    .child-hex-char-cell {
+	    .child-hex-ascii-cell {
 	      text-align: center;
 	    }
 	    .child-hex-byte-cell-changed {
@@ -9014,21 +10633,25 @@ function ensureChildCommonStyles() {
 	      border-radius: 3px;
 	      box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12);
 	    }
-	    .child-hex-string-row {
-	      display: grid;
-	      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
-	      gap: 8px;
-	      align-items: baseline;
-	      padding: 0 7px 2px;
-	      font-size: 12px;
-	      line-height: 1.22;
-	      background: color-mix(in srgb, #22c55e 3%, transparent);
-	      border-left: 2px solid color-mix(in srgb, #22c55e 42%, transparent);
-    }
-    .child-hex-string-label,
-    .child-hex-string-cells {
-      color: color-mix(in srgb, #67e8f9 82%, var(--text));
-    }
+	    .child-hex-ascii {
+	      display: inline-grid;
+	      grid-auto-flow: column;
+	      grid-auto-columns: 1ch;
+	      color: color-mix(in srgb, var(--muted) 80%, var(--text));
+	      opacity: 0.84;
+	    }
+	    .child-hex-ascii-cell-string {
+	      color: color-mix(in srgb, #4ade80 82%, var(--text));
+	      background: rgba(34, 197, 94, 0.10);
+	      border-radius: 2px;
+	      font-weight: 800;
+	    }
+	    .child-hex-ascii-cell-changed {
+	      color: #ffd36a;
+	      background: rgba(255, 179, 46, 0.18);
+	      border-radius: 2px;
+	      font-weight: 850;
+	    }
 	    .child-hex-time-row {
 	      display: grid;
 	      grid-template-columns: 54px minmax(104px, max-content) minmax(0, 1fr);
@@ -9048,13 +10671,6 @@ function ensureChildCommonStyles() {
 	    }
 	    .child-hex-time-note {
 	      color: color-mix(in srgb, #f59e0b 74%, var(--muted));
-	      white-space: normal;
-	      overflow: visible;
-	      text-overflow: clip;
-	      overflow-wrap: anywhere;
-	    }
-	    .child-hex-string-note {
-	      color: color-mix(in srgb, #67e8f9 72%, var(--muted));
 	      white-space: normal;
 	      overflow: visible;
 	      text-overflow: clip;
@@ -9081,9 +10697,7 @@ function ensureChildCommonStyles() {
 	    }
 	    .child-hex-byte-cell-string {
 	      color: color-mix(in srgb, #22c55e 72%, var(--text));
-	      background: rgba(34, 197, 94, 0.07);
-	      border-radius: 3px;
-	      box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.08);
+	      font-weight: 750;
 	    }
     .child-hex-row-time .child-hex-note {
       color: color-mix(in srgb, #f59e0b 82%, var(--text));
@@ -9128,11 +10742,35 @@ function ensureChildCommonStyles() {
       font-size: 12px;
     }
     @media (max-width: 900px) {
+      .dump-grid,
+      .dump-grid-request.dump-grid-decrypted {
+        grid-template-columns: minmax(0, 1fr) !important;
+        overflow-x: hidden;
+      }
+      .dump-grid > * {
+        min-width: 0;
+      }
+      .dump-grid > .child-compare-inline {
+        grid-column: 1 / -1;
+        width: 100%;
+      }
       .child-compare-grid {
         grid-template-columns: minmax(0, 1fr);
       }
       .parent-structure-grid {
         grid-template-columns: 1fr;
+      }
+      .child-preview-row {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto;
+        overflow-x: hidden;
+      }
+      .child-preview-row > .child-preview-box {
+        grid-row: auto;
+      }
+      .child-preview-row > .child-preview-before {
+        border-right: 0;
+        border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
       }
     }
 	    @media (max-width: 520px) {
@@ -9414,6 +11052,7 @@ function shouldPreferPlainDecodedOverlay(byteValues, reportCode, plainOverlay) {
 
 function childBestDecodedOverlay(childBytes) {
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return null;
+  if (parseTssEncryptedEnvelope(childBytes)) return null;
   const detected = detectTssReport(childBytes);
   const plainOverlay = buildPlainDecodedOverlay(childBytes);
   if (shouldPreferPlainDecodedOverlay(childBytes, detected ? Number(detected.value) : NaN, plainOverlay)) {
@@ -9620,15 +11259,30 @@ function childHexStructure(child, childBytes, options = {}) {
 
   if (report && Number.isFinite(Number(report.offset))) {
     const reportOffset = Number(report.offset);
+    const framedVersion = childBytes.length >= 10 ? readBe32(childBytes, 0) : null;
+    const framedTotal = childBytes.length >= 10 ? readBe16(childBytes, 4) : null;
+    const hasTssLikeFrame = reportOffset === 6
+      && framedVersion === 1
+      && Number.isFinite(framedTotal)
+      && Math.abs(Number(framedTotal) - childBytes.length) <= 4;
+    if (hasTssLikeFrame) {
+      addChildHexField(fields, 0, 4, `record version ${framedVersion} · TSS-like framing observed`, "version");
+      addChildHexField(fields, 4, 2, `record total ${framedTotal} byte · actual ${childBytes.length}`, "total");
+      valueStart = 14;
+    }
     addChildHexField(
       fields,
       reportOffset,
       4,
-      `${childUiTerm("report")} @${hexOffsetText(reportOffset)} ${formatHexValue(report.value, 8)}`,
+      `${childUiTerm("report")} @${hexOffsetText(reportOffset)} ${formatHexValue(report.value, 8)}${Number(report.value) === 0x010a0013 ? " · byte split candidate 01 | 0a | 0013(19)" : ""}`,
       "report",
     );
     const idOffset = childRecordIdOffset(childBytes, report);
-    if (Number.isFinite(idOffset) && idOffset >= 0 && idOffset + 3 < childBytes.length) {
+    if (Number(report.value) === 0x010a0013 && childBytes.length >= 20) {
+      const tlvHeader = parseTssTlvRecord0013(childBytes);
+      addChildHexField(fields, 10, 8, `header ID/sequence candidate · BE64 raw ${tlvHeader ? tlvHeader.headerIdHex : `0x${formatHexBytesCompact(childBytes.slice(10, 18))}`}`, "headerId");
+      addChildHexField(fields, 18, 2, `flags/reserved candidate ${formatHexValue(readBe16(childBytes, 18), 4)}`, "flags");
+    } else if (Number.isFinite(idOffset) && idOffset >= 0 && idOffset + 3 < childBytes.length) {
       addChildHexField(
         fields,
         idOffset,
@@ -9636,6 +11290,32 @@ function childHexStructure(child, childBytes, options = {}) {
         `${childUiTerm("ID")} @${hexOffsetText(idOffset)} ${formatHexValue(readBe32(childBytes, idOffset), 4)}`,
         "id",
       );
+    }
+
+    const encrypted = parseTssEncryptedEnvelope(childBytes);
+    if (encrypted) {
+      valueStart = 28;
+      addChildHexField(fields, 20, 1, `crypto family ${encrypted.family} · ${encrypted.familyName}`, "cryptoFamily");
+      addChildHexField(fields, 21, 1, `key slot[${encrypted.slot}]${encrypted.keyLabel ? ` · ${encrypted.keyLabel}` : ""}`, "cryptoSlot");
+      addChildHexField(fields, 22, 4, `plaintext CRC32 ${formatHexValue(encrypted.expectedCrc, 8)}`, "crc");
+      addChildHexField(fields, 26, 2, `cipher len ${encrypted.cipherLength} byte · available ${encrypted.availableLength}`, "cipherLen");
+      addChildHexAnnotation(annotations, 28, `ciphertext start · ${encrypted.cipherLength} byte；此区不做 ASCII/XOR 语义猜测`);
+    }
+
+    const tlvRecord = parseTssTlvRecord0013(childBytes);
+    if (tlvRecord && tlvRecord.valid) {
+      valueStart = 20;
+      for (const item of tlvRecord.items) {
+        addChildHexField(fields, item.offset, 1, `TLV[${item.index}] type ${item.type}`, "tlvType");
+        addChildHexField(fields, item.offset + 1, 1, `TLV[${item.index}] len ${item.length} byte`, "tlvLen");
+        addChildHexField(
+          fields,
+          item.valueOffset,
+          item.length,
+          `TLV[${item.index}] value${item.text ? ` · text "${item.text}"` : ""} · ${hexOffsetText(item.valueOffset)} + ${item.length} = ${hexOffsetText(item.end)} (record end)`,
+          "tlvValue",
+        );
+      }
     }
 
     if (Number(report.value) === 0x0102000a) {
@@ -9797,7 +11477,7 @@ function buildChildHexModel(child, childBytes, options = {}) {
 function childHexRowKindClass(kind) {
   const value = String(kind || "").trim();
   if (!value) return "";
-  if (!["report", "id", "len", "innerLen", "innerType", "selector", "innerField", "bodyHeader", "probeEntry", "bodyWord", "timestamp"].includes(value)) return "";
+  if (!["version", "total", "report", "id", "headerId", "flags", "tlvType", "tlvLen", "tlvValue", "len", "innerLen", "innerType", "selector", "innerField", "bodyHeader", "probeEntry", "bodyWord", "timestamp", "cryptoFamily", "cryptoSlot", "crc", "cipherLen"].includes(value)) return "";
   return ` child-hex-row-${value}`;
 }
 
@@ -9868,6 +11548,7 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
   const model = buildChildHexModel(child, childBytes, options);
   const rows = model.rows;
   if (!rows.length) return;
+  const encryptedEnvelope = parseTssEncryptedEnvelope(childBytes);
 
 	  const wrap = document.createElement("div");
 	  wrap.className = "child-hex-table";
@@ -9909,39 +11590,34 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 
     const note = document.createElement("span");
     note.className = "child-hex-note";
-    note.textContent = isTimestamp ? "时间戳" : (row.note || "");
+    const noteParts = [isTimestamp ? "时间戳" : (row.note || "")];
+    if (decoded && decoded.note) noteParts.push(decoded.note);
+    note.textContent = noteParts.filter(Boolean).join("；");
+
+    const ascii = document.createElement("code");
+    ascii.className = "child-hex-ascii";
+    for (let index = 0; index < byteValues.length; index += 1) {
+      const decodedChar = decoded && decoded.cells[index] && String(decoded.cells[index]).trim()
+        ? String(decoded.cells[index])
+        : "";
+      const rawByte = Number(byteValues[index]);
+      const absoluteOffset = Number(row.offset) + index;
+      const encryptedCipherByte = encryptedEnvelope
+        && absoluteOffset >= 28
+        && absoluteOffset < 28 + Number(encryptedEnvelope.cipherLength || 0);
+      const rawChar = !encryptedCipherByte && rawByte >= 32 && rawByte < 127 ? String.fromCharCode(rawByte) : ".";
+      const span = document.createElement("span");
+      span.className = `child-hex-ascii-cell${decodedChar ? " child-hex-ascii-cell-string" : ""}${changedIndexes[index] ? " child-hex-ascii-cell-changed" : ""}`;
+      span.textContent = decodedChar || rawChar;
+      if (decodedChar) span.title = `${decoded.note || "decoded string"} · ${hexOffsetText(Number(row.offset) + index)}`;
+      ascii.appendChild(span);
+    }
 
     line.appendChild(offset);
     line.appendChild(bytes);
+    line.appendChild(ascii);
     line.appendChild(note);
 	    body.appendChild(line);
-
-	    if (decoded) {
-	      const stringLine = document.createElement("div");
-	      stringLine.className = "child-hex-string-row";
-
-	      const stringLabel = document.createElement("code");
-	      stringLabel.className = "child-hex-string-label";
-	      stringLabel.textContent = "string";
-
-	      const stringCells = document.createElement("code");
-	      stringCells.className = "child-hex-string-cells child-hex-char-grid";
-	      for (const value of decoded.cells) {
-	        const span = document.createElement("span");
-	        span.className = "child-hex-char-cell";
-	        span.textContent = value || " ";
-	        stringCells.appendChild(span);
-	      }
-
-	      const stringNote = document.createElement("span");
-	      stringNote.className = "child-hex-string-note";
-	      stringNote.textContent = decoded.note || "";
-
-	      stringLine.appendChild(stringLabel);
-	      stringLine.appendChild(stringCells);
-	      stringLine.appendChild(stringNote);
-	      body.appendChild(stringLine);
-	    }
 
 	    if (isTimestamp) {
 	      const time = childTimestampDisplayFromNote(row.note);
@@ -10432,13 +12108,14 @@ function normalizeChildTimestampHints(child, childBytes, timestampHintMap) {
   return out;
 }
 
-function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", beforeBytes = [], afterBytes = [], result = null, action = null, ruleCompact = "", risk = null, timestampHintMap = null) {
+function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", beforeBytes = [], afterBytes = [], result = null, action = null, ruleCompact = "", risk = null, timestampHintMap = null, rowOptions = {}) {
   const row = document.createElement("div");
   row.className = "child-preview-row";
   const changedOffsets = buildChangedIndexSet(beforeBytes, afterBytes);
   const beforeTimestampHints = normalizeChildTimestampHints(beforeChild, beforeBytes, timestampHintMap);
   const afterTimestampHints = normalizeChildTimestampHints(afterChild, afterBytes, timestampHintMap);
-  if (result && result.kind === "same") {
+  const forceSideBySideSame = Boolean(rowOptions && rowOptions.forceSideBySideSame);
+  if (result && result.kind === "same" && !forceSideBySideSame) {
     row.classList.add("child-preview-row-single");
     const singleLabel = result.originalOnly
       ? `${labelBase} 原包 / 当前`
@@ -10584,7 +12261,9 @@ function childReportText(child) {
 }
 
 function childIdText(child) {
-  if (!child || child.truncated || !Number.isFinite(child.idValue)) return "-";
+  if (!child || child.truncated) return "-";
+  if (child.idText) return String(child.idText);
+  if (!Number.isFinite(child.idValue)) return "-";
   return formatHexValue(child.idValue, 4);
 }
 
@@ -10665,7 +12344,9 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
 
   const card = document.createElement("div");
   card.className = `child-pair-card child-card-result-${result.kind}`;
-  if (result.kind === "same") card.classList.add("child-card-same-merged");
+  if (result.kind === "same" && !(options && options.forceSideBySideSame)) {
+    card.classList.add("child-card-same-merged");
+  }
 
   const title = document.createElement("div");
   title.className = "child-pair-title";
@@ -10746,7 +12427,9 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   if (meta.childNodes.length) title.appendChild(meta);
 
   card.appendChild(title);
-  card.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk, timestampHintMap));
+  card.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk, timestampHintMap, {
+    forceSideBySideSame: Boolean(options && options.forceSideBySideSame),
+  }));
 
   return card;
 }
@@ -10873,12 +12556,19 @@ function buildEventTimestampStrip(summaryText, beforeBase64, decodedBase64) {
   return strip;
 }
 
-function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
+function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", panelOptions = {}) {
   if (!beforeBase64 && !decodedBase64) return null;
   if (isOpaqueUndecryptedSummary(summaryText)) return null;
-  const originalOnly = !beforeBase64 && Boolean(decodedBase64);
+  const forceCurrentOnly = Boolean(panelOptions && panelOptions.forceCurrentOnly);
+  const originalOnly = !forceCurrentOnly && !beforeBase64 && Boolean(decodedBase64);
   const beforeBytes = b64ToBytes(beforeBase64);
   const afterBytes = b64ToBytes(decodedBase64);
+  const forceSideBySideSame = Boolean(
+    panelOptions
+    && panelOptions.forceSideBySideSame
+    && beforeBytes.length > 0
+    && afterBytes.length > 0
+  );
   const beforeParsed = parseTssChildRecords(beforeBytes);
   const afterParsed = parseTssChildRecords(afterBytes);
   const parsedBeforeChildren = Array.isArray(beforeParsed.children) ? beforeParsed.children : [];
@@ -10889,10 +12579,18 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   const beforeChildren = parsedBeforeChildren.length > 0 ? parsedBeforeChildren : (beforeRootNode ? [beforeRootNode] : []);
   const afterChildren = parsedAfterChildren.length > 0 ? parsedAfterChildren : (afterRootNode ? [afterRootNode] : []);
   const actionMap = parseChildActionDetails(summaryText);
-  const currentOnly = !originalOnly
-    && beforeChildren.length === 0
-    && afterChildren.length > 0
-    && (!(actionMap instanceof Map) || actionMap.size === 0);
+  const currentOnly = forceCurrentOnly
+    ? beforeChildren.length === 0 && afterChildren.length > 0
+    : !originalOnly
+      && beforeChildren.length === 0
+      && afterChildren.length > 0
+      && (!(actionMap instanceof Map) || actionMap.size === 0);
+  const semanticTierOverride = String(panelOptions && panelOptions.semanticTierOverride || "").trim();
+  if (semanticTierOverride && currentOnly) {
+    for (const child of afterChildren) {
+      if (child && !child.truncated) child.semanticTier = semanticTierOverride;
+    }
+  }
   const actionMaxIndex = actionMap instanceof Map
     ? Math.max(-1, ...Array.from(actionMap.keys()).filter((value) => Number.isFinite(Number(value))).map(Number))
     : -1;
@@ -10922,11 +12620,11 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   const head = document.createElement("div");
   head.className = "child-compare-head";
   const title = document.createElement("span");
-  title.textContent = originalOnly
+  title.textContent = String(panelOptions && panelOptions.title || "").trim() || (originalOnly
     ? (hasChildRecords ? "子节点结构观察（原包）" : "叶子节点结构观察（原包）")
     : currentOnly
       ? (hasChildRecords ? "当前子节点结构（before 无可解析 child）" : "当前叶子结构（before 无可解析节点）")
-      : (hasChildRecords ? "子节点替换观察" : "叶子节点替换观察");
+      : (hasChildRecords ? "子节点替换观察" : "叶子节点替换观察"));
   const meta = document.createElement("small");
   const countBits = [];
   const addCount = (label, value, always = false) => {
@@ -10943,13 +12641,13 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   addCount("保留", counts.kept);
   addCount("未动", counts.noop);
   addCount("清理", counts.clean);
-  meta.textContent = originalOnly
+  meta.textContent = String(panelOptions && panelOptions.meta || "").trim() || (originalOnly
     ? `当前事件没有 before_pay，按原包/当前结构展示；显示 ${visible}/${total}`
     : currentOnly
       ? `before_pay 存在但未解析出可对应 child；不误标新增/删除，当前结构单栏展示；显示 ${visible}/${total}`
       : (countBits.length > 0
         ? `${countBits.join("，")}；显示 ${visible}/${total}`
-        : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`);
+        : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`));
   head.appendChild(title);
   head.appendChild(meta);
   panel.appendChild(head);
@@ -10969,7 +12667,7 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
       actionMap,
       summaryKv,
       timestampHintMap,
-      { originalOnly, currentOnly },
+      { originalOnly, currentOnly, forceSideBySideSame },
     ));
   }
   panel.appendChild(grid);
@@ -10982,6 +12680,394 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "") {
   }
 
   return panel;
+}
+
+function gcloudAceCarrierTransformLabel(carrier) {
+  const kind = String(carrier && carrier.sourceKind || "");
+  if (kind === "ace-xor") return "ACE XOR decode";
+  if (kind === "double-hex") return "double hex decode";
+  if (kind === "hex-bytes") return "ASCII hex decode";
+  return "binary carrier";
+}
+
+function gcloudBytesEqual(left, right) {
+  const first = Array.isArray(left) ? left : [];
+  const second = Array.isArray(right) ? right : [];
+  if (first.length !== second.length) return false;
+  for (let index = 0; index < first.length; index += 1) {
+    if ((first[index] & 0xff) !== (second[index] & 0xff)) return false;
+  }
+  return true;
+}
+
+function gcloudBytesBase64(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0 || typeof btoa !== "function") return "";
+  try {
+    return btoa(gcloudBytesToBinaryString(byteValues));
+  } catch (_e) {
+    return "";
+  }
+}
+
+function gcloudFindByteSequence(byteValues, needle) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const pattern = Array.isArray(needle) ? needle : [];
+  if (!bytes.length || !pattern.length || pattern.length > bytes.length) return -1;
+  outer:
+  for (let offset = 0; offset <= bytes.length - pattern.length; offset += 1) {
+    for (let index = 0; index < pattern.length; index += 1) {
+      if ((bytes[offset + index] & 0xff) !== (pattern[index] & 0xff)) continue outer;
+    }
+    return offset;
+  }
+  return -1;
+}
+
+function gcloudAceMarkerOffsetText(offset) {
+  return Number.isFinite(offset) && offset >= 0 ? `+${formatHexValue(offset)}` : "";
+}
+
+function gcloudAceCsobMarkerRewritePreview(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues.slice() : [];
+  const beforeSeq = [0x01, 0x00, 0x00, 0x0a, 0x92, 0x00, 0x00];
+  const afterSeq = [0x01, 0x00, 0x00, 0x27, 0x0f, 0x00, 0x00];
+  let changed = 0;
+  const offsets = [];
+  for (let offset = 0; offset <= bytes.length - beforeSeq.length; offset += 1) {
+    let matched = true;
+    for (let index = 0; index < beforeSeq.length; index += 1) {
+      if ((bytes[offset + index] & 0xff) !== beforeSeq[index]) {
+        matched = false;
+        break;
+      }
+    }
+    if (!matched) continue;
+    offsets.push(offset);
+    for (let index = 0; index < afterSeq.length; index += 1) {
+      bytes[offset + index] = afterSeq[index];
+    }
+    changed += 1;
+    offset += beforeSeq.length - 1;
+  }
+  return changed > 0 ? { payload: bytes, offsets, changed } : null;
+}
+
+function gcloudSummaryHasBackendRebuild(summaryText) {
+  return /payload_modified=1|wire_rebuilt=1|send_chain=replace_4013_plaintext|raw_pay=raw_after_4013|raw_pay_is_sent_wire=1|tcpview_after_source=raw_pay_sent_wire|rewrite_4013_samekey_ace_csob_dfm_patch|relay_4013_ace_csob_dfm_patch/i.test(String(summaryText || ""));
+}
+
+function makeGcloudAceCompareStatus(ev, summaryText, beforePayload, payload, beforeVariant, statusOptions = {}) {
+  const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
+  const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
+  const rawPay = String(ev && ev.raw_pay ? ev.raw_pay : "");
+  const summary = String(summaryText || "");
+  const beforeBytes = Array.isArray(beforePayload) ? beforePayload : [];
+  const afterBytes = Array.isArray(payload) ? payload : [];
+  const syntheticAfter = Boolean(statusOptions && statusOptions.syntheticAfter);
+  const beforeOk = beforeBytes.length > 0 && (beforeVariant || syntheticAfter);
+  const afterOk = afterBytes.length > 0;
+  const before0a92 = beforeOk ? gcloudFindByteSequence(beforeBytes, [0x01, 0x00, 0x00, 0x0a, 0x92, 0x00, 0x00]) : -1;
+  const after0a92 = afterOk ? gcloudFindByteSequence(afterBytes, [0x01, 0x00, 0x00, 0x0a, 0x92, 0x00, 0x00]) : -1;
+  const after270f = afterOk ? gcloudFindByteSequence(afterBytes, [0x01, 0x00, 0x00, 0x27, 0x0f, 0x00, 0x00]) : -1;
+  const diff = beforeOk ? countChangedBytes(beforeBytes, afterBytes) : null;
+  const backendRebuilt = !syntheticAfter && gcloudSummaryHasBackendRebuild(summary);
+  const declaredModified = backendRebuilt || /payload_modified=1/i.test(summary);
+  const fullBytes = fullPay ? b64ToBytes(fullPay) : [];
+  const rawBytes = rawPay ? b64ToBytes(rawPay) : [];
+  const wireDiff = fullBytes.length > 0 && rawBytes.length > 0 ? countChangedBytes(fullBytes, rawBytes) : null;
+
+  const status = document.createElement("div");
+  status.className = "ace-compare-status";
+  const label = document.createElement("strong");
+  const text = document.createElement("span");
+
+  if (syntheticAfter) {
+    status.classList.add("ace-compare-status-missing");
+    label.textContent = "未发送证据";
+    const markerText = before0a92 >= 0 && after270f >= 0
+      ? `marker ${gcloudAceMarkerOffsetText(before0a92)} 0a92 -> ${gcloudAceMarkerOffsetText(after270f)} 270f`
+      : "按 tersafe 结构 marker 预览替换";
+    text.textContent = `算法预览已禁用，不展示模拟 after；只有 before_pay/pay/raw_pay 后端证据齐全时才显示修改前/修改后。${markerText} 仅作为未发送参考。`;
+  } else if (!beforePay) {
+    status.classList.add("ace-compare-status-missing");
+    label.textContent = "未发送证据";
+    text.textContent = after0a92 >= 0
+      ? `当前事件没有 before_pay/raw_pay，当前 child 仍含 0a92${gcloudAceMarkerOffsetText(after0a92)}；只显示已捕获原包，不展示前端模拟 after。真实命中后 summary 必须出现 payload_modified=1 / wire_rebuilt=1 / raw_pay=raw_after_4013。`
+      : "当前事件没有 before_pay/raw_pay，只能按当前解密结构观察；真实命中后才显示修改前/修改后双列。";
+  } else if (!beforeOk) {
+    status.classList.add("ace-compare-status-unparsed");
+    label.textContent = "before 无法解析";
+    text.textContent = "事件带有 before_pay，但前端没能解析出同 command 的 ACE carrier；先按当前结构显示，避免误标新增/删除。";
+  } else if (diff && Number(diff.changed || 0) > 0) {
+    status.classList.add("ace-compare-status-changed");
+    label.textContent = backendRebuilt ? "后端确认 rebuild/send" : (declaredModified || after270f >= 0 ? "已形成修改对比" : "已形成差异对比");
+    const markerText = before0a92 >= 0 && after270f >= 0
+      ? `；marker ${gcloudAceMarkerOffsetText(before0a92)} 0a92 -> ${gcloudAceMarkerOffsetText(after270f)} 270f`
+      : after0a92 >= 0
+        ? `；修改后仍含 0a92${gcloudAceMarkerOffsetText(after0a92)}`
+        : "";
+    const wireText = wireDiff
+      ? `；完整4013 full_pay(raw before) -> raw_pay(raw after/sent) 变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? ` lenΔ=${wireDiff.lenDelta}` : ""}`
+      : rawPay
+        ? "；有 raw_pay 转发后完整包"
+        : backendRebuilt
+          ? "；旧事件未展开 raw_pay，需刷新/重新选中拉取完整 payload"
+          : "";
+    const proofText = /raw_pay_is_sent_wire=1|tcpview_after_source=raw_pay_sent_wire/i.test(summary)
+      ? "；证据 raw_pay_is_sent_wire=1，after 来自后端 sent wire"
+      : "";
+    const fieldText = backendRebuilt
+      ? `；before_pay=原始解密，pay=修改后解密，raw_pay=重建后转发包${proofText}`
+      : "";
+    text.textContent = `before ${beforeBytes.length}B / after ${afterBytes.length}B，变化 ${diff.changed}/${diff.commonLen}${markerText}${fieldText}${wireText}`;
+  } else {
+    status.classList.add("ace-compare-status-same");
+    label.textContent = "before/after 一致";
+    text.textContent = after0a92 >= 0
+      ? `事件带有 before_pay，但修改前后字节一致；当前仍含 0a92${gcloudAceMarkerOffsetText(after0a92)}，说明这条没有触发替换。`
+      : "事件带有 before_pay，修改前后解析一致；仍按双列展示便于确认。";
+  }
+
+  status.appendChild(label);
+  status.appendChild(text);
+  return status;
+}
+
+function gcloudSecurityCommandFromInfo(info) {
+  if (info && info.kind === "ace") return info.ace || null;
+  if (info && info.kind === "tss") return info.tss || null;
+  return null;
+}
+
+function analyzeGcloudBeforeSecurityVariant(ev, summaryText, currentCommandName) {
+  const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
+  if (!beforePay) return null;
+  const variant = { ...ev, pay: beforePay, pfx: "", before_pfx: "", full_pfx: "", raw_pfx: "" };
+  for (const key of Object.keys(variant)) {
+    if (String(key).startsWith("__tcpvGcloud")) delete variant[key];
+  }
+  const info = analyzeGcloudEvent(variant, summaryText);
+  const command = gcloudSecurityCommandFromInfo(info);
+  if (!command || !command.carrier) return null;
+  if (String(command.commandName || "") !== String(currentCommandName || "")) return null;
+  return { info, command, carrier: command.carrier };
+}
+
+function makeGcloudOpaqueCarrierNode(carrier, payload, channelLabel) {
+  const readable = Array.isArray(carrier && carrier.readable) && carrier.readable.length > 0
+    ? carrier.readable.join(" | ")
+    : `entropy=${Number(carrier && carrier.entropy || 0).toFixed(2)} prefix=${carrier && carrier.prefix || "-"}`;
+  return {
+    index: 0,
+    nodeLabel: String(carrier && carrier.sourceKind || "").toLowerCase() === "ace-xor" ? "xor_payload[0]" : "carrier_payload[0]",
+    offset: 0,
+    recordStart: 0,
+    recordEnd: payload.length,
+    len: payload.length,
+    lengthEndian: "",
+    reportCode: null,
+    reportOffset: -1,
+    idValue: null,
+    className: "binary-like",
+    valuePreview: readable,
+    timestampCandidates: extractTimestampCandidatesFromRecord(payload),
+    hexSignature: formatHexSignature(payload),
+    xorCommonPreview: "",
+    semanticRole: `${channelLabel.toLowerCase()}_second_layer_payload`,
+    semanticCategory: channelLabel === "TSS" ? "security.tss.carrier" : "security.ace.carrier",
+    semanticLabel: carrier && carrier.profile ? carrier.profile : `${channelLabel} 二次解码载荷（字段待证）`,
+    semanticTier: "observed",
+    semanticEvidence: [String(carrier && carrier.sourceKind || "binary"), "second_layer_decode", "full_byte_view"],
+  };
+}
+
+function buildGcloudAceOpaqueCarrierPanel(securityCommand, carrier, payload, identityText, channelLabel = "ACE", beforeCarrier = null, beforePayload = []) {
+  ensureChildCommonStyles();
+  const hasBefore = Array.isArray(beforePayload) && beforePayload.length > 0;
+  const beforeChanged = hasBefore && !gcloudBytesEqual(beforePayload, payload);
+  const panel = document.createElement("section");
+  panel.className = `child-compare${hasBefore ? "" : " child-compare-current-only"}`;
+  const head = document.createElement("div");
+  head.className = "child-compare-head";
+  const title = document.createElement("span");
+  title.textContent = `${channelLabel} carrier 二次深度解析`;
+  const meta = document.createElement("small");
+  meta.textContent = hasBefore
+    ? `${securityCommand.commandName} · ${carrier.mode || "carrier"} · before ${beforePayload.length}B / after ${payload.length}B · ${beforeChanged ? "binary diff" : "same bytes"}`
+    : `${securityCommand.commandName} · ${carrier.mode || "carrier"} · decoded ${payload.length}B · ${identityText} · observe-only`;
+  head.appendChild(title);
+  head.appendChild(meta);
+  panel.appendChild(head);
+
+  const synthetic = makeGcloudOpaqueCarrierNode(carrier, payload, channelLabel);
+  const beforeSynthetic = hasBefore
+    ? makeGcloudOpaqueCarrierNode(beforeCarrier || carrier, beforePayload, channelLabel)
+    : null;
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  grid.appendChild(makeChildCard(
+    beforeSynthetic ? [beforeSynthetic] : [],
+    [synthetic],
+    hasBefore ? beforePayload : [],
+    payload,
+    0,
+    new Map(),
+    {},
+    new Map(),
+    { currentOnly: !hasBefore, forceSideBySideSame: hasBefore },
+  ));
+  panel.appendChild(grid);
+  return panel;
+}
+
+function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
+  const info = analyzeGcloudEvent(ev, summaryText);
+  const securityCommand = gcloudSecurityCommandFromInfo(info);
+  if (!securityCommand || !securityCommand.carrier) return null;
+  const carrier = securityCommand.carrier;
+  const channelLabel = info.kind === "tss" ? "TSS" : "ACE";
+  const payload = Array.isArray(carrier.payload) ? carrier.payload : [];
+  if (payload.length <= 0) return null;
+
+  const beforeVariant = analyzeGcloudBeforeSecurityVariant(ev, summaryText, securityCommand.commandName);
+  const beforeCarrier = beforeVariant && beforeVariant.carrier ? beforeVariant.carrier : null;
+  const beforePayloadCandidate = beforeCarrier && Array.isArray(beforeCarrier.payload) ? beforeCarrier.payload : [];
+  // Do not render a synthetic "after" as if it were sent.  Before/after is
+  // reserved for backend evidence: before_pay/pay/raw_pay emitted by mitm.
+  const simulatedAfter = null;
+  const beforePayload = beforePayloadCandidate.length > 0
+    ? beforePayloadCandidate
+    : (simulatedAfter ? payload : []);
+  const displayPayload = simulatedAfter ? simulatedAfter.payload : payload;
+  const syntheticAfter = Boolean(simulatedAfter);
+  const beforePayloadChanged = beforePayload.length > 0 && !gcloudBytesEqual(beforePayload, displayPayload);
+  const backendRebuilt = !syntheticAfter && gcloudSummaryHasBackendRebuild(summaryText);
+
+  const detectedRoot = detectTssReport(displayPayload);
+  const root = detectedRoot && isLikelyTssReportCode(detectedRoot.value) ? detectedRoot : null;
+  const beforeDetectedRoot = beforePayload.length > 0 ? detectTssReport(beforePayload) : null;
+  const beforeRoot = beforeDetectedRoot && isLikelyTssReportCode(beforeDetectedRoot.value) ? beforeDetectedRoot : null;
+
+  const payloadBase64 = gcloudBytesBase64(displayPayload);
+  if (!payloadBase64) return null;
+  const beforePayloadBase64 = beforeRoot ? gcloudBytesBase64(beforePayload) : "";
+  const compareRoot = Boolean(root && beforeRoot && beforePayloadBase64);
+  const reportKey = Number(carrier.rootReport) === Number(root && root.value) ? "root_report" : "reportish";
+  const reportText = root
+    ? `${reportKey}=${formatHexValue(root.value, 8)}`
+    : `profile=${carrier.profile || "unclassified"}`;
+  const beforeReportText = beforeRoot ? formatHexValue(beforeRoot.value, 8) : "";
+  const encrypted = root ? decryptTssEncryptedEnvelope(displayPayload) : null;
+  const beforeEncrypted = beforeRoot ? decryptTssEncryptedEnvelope(beforePayload) : null;
+  const panelTitle = `${channelLabel} carrier 二次深度解析`;
+  const panel = root
+    ? buildChildComparePanel(compareRoot ? beforePayloadBase64 : "", payloadBase64, "", {
+      forceCurrentOnly: !compareRoot,
+      semanticTierOverride: carrier.mode === "binary_carrier" ? "observed" : "",
+      title: panelTitle,
+      meta: compareRoot
+        ? `${securityCommand.commandName} · ${carrier.mode || "carrier"} · ${syntheticAfter ? "local preview" : backendRebuilt ? "backend rebuilt" : "before"} ${beforePayload.length}B / after ${displayPayload.length}B · ${beforeReportText} -> ${formatHexValue(root.value, 8)} · ${beforePayloadChanged ? "diff" : "same"}`
+        : `${securityCommand.commandName} · ${carrier.mode || "carrier"} · decoded ${displayPayload.length}B · ${reportText} · observe-only`,
+      forceSideBySideSame: compareRoot,
+    })
+    : buildGcloudAceOpaqueCarrierPanel(
+      securityCommand,
+      carrier,
+      displayPayload,
+      reportText,
+      channelLabel,
+      beforeCarrier,
+      beforePayload,
+    );
+  if (!panel) return null;
+
+  panel.classList.add("gcloud-ace-deep", "child-compare-inline");
+  const lineage = document.createElement("div");
+  lineage.className = "ace-deep-lineage";
+  const layers = [
+    "65010",
+    "0x4013 decrypted",
+    info.proto && info.proto.compression
+      ? `LZ4 解压 ${info.proto.compression.inputLength}->${info.proto.compression.outputLength}B`
+      : "protobuf",
+    gcloudAceCarrierTransformLabel(carrier),
+    root ? `TSS record ${displayPayload.length}B` : `decoded payload ${displayPayload.length}B`,
+    reportText,
+  ];
+  if (beforePayload.length > 0) {
+    layers.push(`${syntheticAfter ? "local preview " : backendRebuilt ? "backend rebuilt " : ""}before/after ${beforePayload.length}/${displayPayload.length}B`);
+  }
+  if (backendRebuilt) {
+    layers.push("raw_pay sent/rebuilt 4013");
+  }
+  if (encrypted) {
+    layers.push(`${encrypted.familyName} slot[${encrypted.slot}] decrypt`);
+    if (encrypted.supported) layers.push(encrypted.crcMatch ? "CRC32 ok" : "CRC32 failed");
+    if (encrypted.crcMatch && encrypted.innerRoot) {
+      layers.push(`inner ${formatHexValue(encrypted.innerRoot.value, 8)} ${encrypted.plain.length}B`);
+    }
+  }
+  layers.forEach((text, index) => {
+    if (index > 0) {
+      const arrow = document.createElement("span");
+      arrow.className = "ace-deep-arrow";
+      arrow.textContent = ">";
+      lineage.appendChild(arrow);
+    }
+    const chip = document.createElement("span");
+    chip.className = "ace-deep-layer";
+    chip.textContent = text;
+    lineage.appendChild(chip);
+  });
+  panel.insertBefore(lineage, panel.children[1] || null);
+  const compareStatus = makeGcloudAceCompareStatus(ev, summaryText, beforePayload, displayPayload, beforeVariant, {
+    syntheticAfter,
+  });
+  panel.insertBefore(compareStatus, panel.children[2] || null);
+
+  const stack = document.createElement("div");
+  stack.className = "gcloud-security-deep-stack";
+  stack.appendChild(panel);
+  if (encrypted) {
+    const status = document.createElement("div");
+    status.className = `tss-crypto-status${encrypted.crcMatch ? " tss-crypto-status-ok" : " tss-crypto-status-error"}`;
+    const expected = formatHexValue(encrypted.expectedCrc, 8);
+    const actual = encrypted.supported ? formatHexValue(encrypted.actualCrc, 8) : "-";
+    const beforeVerified = beforeEncrypted && beforeEncrypted.supported && beforeEncrypted.crcMatch;
+    status.textContent = beforeVerified && encrypted.supported
+      ? `修改前 ${beforeEncrypted.familyName} slot[${beforeEncrypted.slot}] ${beforeEncrypted.cipherLength}B -> ${beforeEncrypted.plain.length}B CRC32通过 · 修改后 ${encrypted.familyName} slot[${encrypted.slot}] ${encrypted.cipherLength}B -> ${encrypted.plain.length}B CRC32${encrypted.crcMatch ? "通过" : "失败"}`
+      : encrypted.supported
+        ? `${encrypted.familyName} · slot[${encrypted.slot}]${encrypted.keyLabel ? `=${encrypted.keyLabel}` : ""} · cipher ${encrypted.cipherLength}B -> plain ${encrypted.plain.length}B · CRC32 ${encrypted.crcMatch ? "通过" : "失败"} (${expected} / ${actual})`
+        : `${encrypted.familyName} · slot[${encrypted.slot}] · cipher ${encrypted.cipherLength}B · 未解密：${encrypted.reason || "前端算法不支持"}`;
+    panel.insertBefore(status, panel.children[3] || null);
+  }
+
+  if (encrypted && encrypted.supported && encrypted.crcMatch && encrypted.plain.length > 0) {
+    const plainBase64 = gcloudBytesBase64(encrypted.plain);
+    const beforePlain = beforeEncrypted && beforeEncrypted.supported && beforeEncrypted.crcMatch
+      ? beforeEncrypted.plain
+      : [];
+    const beforePlainBase64 = beforePlain.length > 0 ? gcloudBytesBase64(beforePlain) : "";
+    const beforePlainChanged = beforePlain.length > 0 && !gcloudBytesEqual(beforePlain, encrypted.plain);
+    if (plainBase64) {
+      const innerReport = encrypted.innerRoot
+        ? formatHexValue(encrypted.innerRoot.value, 8)
+        : "未识别 record root";
+      const innerPanel = buildChildComparePanel(beforePlainBase64, plainBase64, "", {
+        forceCurrentOnly: !beforePlainBase64,
+        title: "TSS 第三层解密结果",
+        meta: beforePlainBase64
+          ? `${securityCommand.commandName} · ${encrypted.familyName} slot[${encrypted.slot}] · CRC32 verified · before ${beforePlain.length}B / after ${encrypted.plain.length}B · ${innerReport} · ${beforePlainChanged ? "diff" : "same"}`
+          : `${securityCommand.commandName} · ${encrypted.familyName} · slot[${encrypted.slot}] · CRC32 verified · ${innerReport} · ${encrypted.plain.length}B`,
+        forceSideBySideSame: Boolean(beforePlainBase64),
+      });
+      if (innerPanel) {
+        innerPanel.classList.add("gcloud-tss-decrypted", "child-compare-inline");
+        stack.appendChild(innerPanel);
+      }
+    }
+  }
+  return stack;
 }
 
 function comparableNodesFromBytes(byteValues) {
@@ -11662,6 +13748,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   if (gcloudPanel) {
     body.appendChild(gcloudPanel);
   }
+  const aceCarrierDeepPanel = isGcloudEvent ? buildGcloudAceCarrierDeepPanel(ev, summaryText) : null;
+  if (aceCarrierDeepPanel) {
+    body.appendChild(aceCarrierDeepPanel);
+  }
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
@@ -11675,12 +13765,14 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
   const isRequest = Number(ev && ev.dir) === 0;
   const isDecodedRequest = isRequest && isDecodedFlowEvent(ev, summaryText) && (hasFullDump || hasBeforeDump || hasDecodedDump);
+  const gcloudWireRebuilt = isGcloudEvent && gcloudSummaryHasBackendRebuild(summaryText);
+  const gcloudWireCompare = gcloudWireRebuilt && hasFullDump && hasRawAfterDump && fullPay !== rawAfterPay;
   const showRawCompare =
     isDecodedRequest
-    && currentFlowLooksLikePort8092(ev, summaryText)
     && hasFullDump
     && hasRawAfterDump
-    && fullPay !== rawAfterPay;
+    && fullPay !== rawAfterPay
+    && (currentFlowLooksLikePort8092(ev, summaryText) || gcloudWireRebuilt);
   const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
@@ -11837,7 +13929,9 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     if (hasFullDump) {
       appendDumpSection(
         showRawCompare
-          ? (opaqueUndecrypted ? "修改前原始封包 [raw before]" : "修改前加密 [raw before]")
+          ? (gcloudWireCompare
+            ? "收到的原始4013 [raw before/full_pay]"
+            : (opaqueUndecrypted ? "修改前原始封包 [raw before]" : "修改前加密 [raw before]"))
           : "原始封包 [raw]",
         fullPay,
         ev.full_len,
@@ -11845,7 +13939,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         "full",
         {
           collapsed: isDecodedRequest,
-          foldNote: showRawCompare ? "修改前" : "raw 参考",
+          foldNote: showRawCompare ? (gcloudWireCompare ? "收到原包" : "修改前") : "raw 参考",
         }
       );
     } else {
@@ -11853,19 +13947,21 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     }
     if (showRawCompare) {
       appendDumpSection(
-        opaqueUndecrypted ? "修改后原始封包 [raw after]" : "修改后加密 [raw after]",
+        gcloudWireCompare
+          ? "修改后重建4013 [raw after/sent]"
+          : (opaqueUndecrypted ? "修改后原始封包 [raw after]" : "修改后加密 [raw after]"),
         rawAfterPay,
         ev.raw_len,
         "dump-panel-raw-after",
         "raw_after",
         {
           collapsed: true,
-          foldNote: "8092 after",
+          foldNote: gcloudWireCompare ? "已转发" : "8092 after",
         }
       );
     }
     if (hasBeforeDump) {
-      appendDumpSection(opaqueUndecrypted ? "修改前原始封包 [before/raw]" : "修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
+      appendDumpSection(gcloudWireRebuilt ? "原始解密 [before/received]" : (opaqueUndecrypted ? "修改前原始封包 [before/raw]" : "修改前解密 [before]"), beforePay, ev.before_len, "dump-panel-before", "before", {
         changedOffsets: decodedChangedOffsets,
       });
     } else if (hasDecodedDump) {
@@ -11885,7 +13981,9 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           ? (beforeDumpSameAsDecoded ? "修改后原始封包 [after/raw same]" : "修改后原始封包 [after/raw]")
           : "当前原始封包 [current/raw]")
         : (hasBeforeDump
-          ? beforeDumpSameAsDecoded
+          ? gcloudWireRebuilt
+            ? "修改后解密 [after/rebuilt]"
+            : beforeDumpSameAsDecoded
             ? "修改后解密 [after same]"
             : "修改后解密 [after]"
           : "当前解密 [current]");
@@ -12043,7 +14141,133 @@ async function ensureEventPayload(ev, account, eventId) {
   }
   writePayloadCache(accountText, idText, detail);
   ev.__tcpvPayloadDetailFetched = true;
+  const securityCommand = gcloudCommandNameForEvent(ev);
+  if (gcloudAceCommandKind(securityCommand) || gcloudTssCommandKind(securityCommand)) {
+    refreshAceOverviewUi();
+  }
   return ev;
+}
+
+function collectGcloudAceStats(events = state.events) {
+  const list = Array.isArray(events) ? events : [];
+  const cacheable = list === state.events;
+  const signature = cacheable
+    ? `${state.flowId}|${list.length}|${list.length > 0 ? getEventId(list[0]) : "-"}|${list.length > 0 ? getEventId(list[list.length - 1]) : "-"}`
+    : "";
+  if (cacheable && state.gcloudAceStatsCache && state.gcloudAceStatsCache.signature === signature) {
+    return state.gcloudAceStatsCache.value;
+  }
+  const stats = {
+    total: list.length,
+    aceAll: 0,
+    antiData: 0,
+    lightFeature: 0,
+    transfer: 0,
+    aceOther: 0,
+    cstssAll: 0,
+    gcloud4013: 0,
+    tgcpControl: 0,
+    antiAsciiHex: 0,
+    antiBinary: 0,
+  };
+  for (const ev of list) {
+    const eventClass = gcloudEventClass(ev);
+    if (eventClass.startsWith("ace_")) stats.aceAll += 1;
+    if (eventClass === "ace_antidata") stats.antiData += 1;
+    else if (eventClass === "ace_light") stats.lightFeature += 1;
+    else if (eventClass === "ace_transfer") stats.transfer += 1;
+    else if (eventClass === "ace_other") stats.aceOther += 1;
+    else if (eventClass === "cstss_all") stats.cstssAll += 1;
+    else if (eventClass === "gcloud_4013") stats.gcloud4013 += 1;
+    else if (eventClass === "tgcp_control") stats.tgcpControl += 1;
+
+    if (eventClass === "ace_antidata") {
+      const preview = getGcloudPreviewBytes(ev);
+      const proto = getGcloudBusinessProtoCached(ev, preview.bytes, preview.complete);
+      const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : preview.bytes;
+      const carrier = analyzeGcloudAceCarrier(proto, protoBytes);
+      if (carrier.mode === "ascii_hex") stats.antiAsciiHex += 1;
+      else stats.antiBinary += 1;
+    }
+  }
+  if (cacheable) {
+    state.gcloudAceStatsCache = { signature, value: stats };
+  }
+  return stats;
+}
+
+function updateAceFilterUi() {
+  if (!el.filterAceMode) return;
+  const isGcloud = !!state.flowId && currentFlowLooksLikeGcloud65010();
+  el.filterAceMode.hidden = !isGcloud;
+  el.filterAceMode.disabled = !isGcloud;
+  if (!isGcloud) return;
+
+  const stats = collectGcloudAceStats();
+  const mode = normalizeAceFilterMode(state.filters.aceMode);
+  const options = [
+    ["all", `全部事件 · ${stats.total}`],
+    ["ace_all", `CSAce* · ${stats.aceAll}`],
+    ["ace_antidata", `AntiData 上报 · ${stats.antiData}`],
+    ["ace_light", `LightFeature 周期 · ${stats.lightFeature}`],
+    ["ace_transfer", `Transfer 下行 · ${stats.transfer}`],
+    ["cstss_all", `CSTss* · ${stats.cstssAll}`],
+    ["gcloud_4013", `其他 4013 · ${stats.gcloud4013}`],
+    ["tgcp_control", `TGCP 控制 · ${stats.tgcpControl}`],
+  ];
+  el.filterAceMode.textContent = "";
+  for (const [value, label] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    el.filterAceMode.appendChild(option);
+  }
+  el.filterAceMode.value = mode;
+}
+
+function buildAceFlowOverviewPanel() {
+  if (!state.flowId || !currentFlowLooksLikeGcloud65010()) return null;
+  const stats = collectGcloudAceStats();
+  const panel = document.createElement("section");
+  panel.className = "ace-flow-overview";
+  const title = document.createElement("div");
+  title.className = "ace-flow-overview-title";
+  title.textContent = "65010 · 安全命令统计";
+  panel.appendChild(title);
+
+  const chips = document.createElement("div");
+  chips.className = "ace-flow-overview-chips";
+  const activeMode = normalizeAceFilterMode(state.filters.aceMode);
+  const values = [
+    ["ace_all", `CSAce* ${stats.aceAll}`],
+    ["ace_antidata", `AntiData ${stats.antiData} out`],
+    ["ace_light", `LightFeature ${stats.lightFeature} out`],
+    ["ace_transfer", `Transfer ${stats.transfer} in`],
+    ["cstss_all", `CSTss* ${stats.cstssAll}`],
+    ["carrier", `AntiData carrier: binary ${stats.antiBinary} / ascii_hex ${stats.antiAsciiHex}`],
+    ["loaded", `已载入 ${stats.total} 包`],
+  ];
+  for (const [value, label] of values) {
+    const chip = document.createElement("span");
+    chip.className = `ace-flow-overview-chip${value === activeMode || (value === "ace_all" && activeMode === "ace_all") ? " ace-flow-overview-chip-active" : ""}`;
+    chip.textContent = label;
+    chips.appendChild(chip);
+  }
+  panel.appendChild(chips);
+  return panel;
+}
+
+function refreshAceOverviewUi() {
+  if (state.aceOverviewRefreshTimer) return;
+  state.aceOverviewRefreshTimer = window.setTimeout(() => {
+    state.aceOverviewRefreshTimer = 0;
+    if (!currentFlowLooksLikeGcloud65010()) return;
+    state.gcloudAceStatsCache = null;
+    updateAceFilterUi();
+    const current = el.events ? el.events.querySelector(".ace-flow-overview") : null;
+    const next = buildAceFlowOverviewPanel();
+    if (current && next) current.replaceWith(next);
+  }, 80);
 }
 
 function eventMatchesFilters(ev) {
@@ -12058,6 +14282,12 @@ function eventMatchesFilters(ev) {
   if (minLen !== null && Number.isFinite(minLen) && len < minLen) return false;
   if (maxLen !== null && Number.isFinite(maxLen) && len > maxLen) return false;
   if (state.filters.csobOnly && !eventHasCsob(ev)) return false;
+  const aceMode = normalizeAceFilterMode(state.filters.aceMode);
+  if (aceMode !== "all" && currentFlowLooksLikeGcloud65010()) {
+    const eventClass = gcloudEventClass(ev);
+    if (aceMode === "ace_all" && !eventClass.startsWith("ace_")) return false;
+    if (aceMode !== "ace_all" && eventClass !== aceMode) return false;
+  }
   return true;
 }
 
@@ -12125,6 +14355,9 @@ function applyFilters() {
   if (el.filterMaxLen) {
     el.filterMaxLen.value = state.filters.maxLen || "";
   }
+  if (el.filterAceMode) {
+    el.filterAceMode.value = state.filters.aceMode || "all";
+  }
   saveRules();
   saveAppliedFilters();
   renderEvents();
@@ -12142,6 +14375,9 @@ function clearFilters() {
   }
   if (el.filterCsobOnly) {
     el.filterCsobOnly.checked = false;
+  }
+  if (el.filterAceMode) {
+    el.filterAceMode.value = "all";
   }
   state.filters = getFilterDraftState();
   saveRules();
@@ -12273,6 +14509,7 @@ function renderEvents() {
   state.expandedIds = openIds;
 
   el.events.innerHTML = "";
+  updateAceFilterUi();
   const hideAscii = el.hideAscii.value === "1";
   const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
   const expandMode = getExpandMode();
@@ -12323,6 +14560,10 @@ function renderEvents() {
   }
   const autoExpandIds = collectAutoExpandIds(visibleEvents, expandMode);
   state.filteredCount = visibleEvents.length;
+  const aceOverview = buildAceFlowOverviewPanel();
+  if (aceOverview) {
+    el.events.appendChild(aceOverview);
+  }
   if (visibleEvents.length === 0) {
     state.hitEventIds = [];
     state.hitCursor = -1;
@@ -12893,6 +15134,7 @@ if (systemThemeQuery) {
   installPreviewSummaryStyles();
   installFlowListBadgeStyles();
   installDumpAsciiRowStyles();
+  installAceFilterControl();
   loadRules();
   setupSplitter();
   setupWheelRouting();

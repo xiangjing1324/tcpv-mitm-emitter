@@ -244,6 +244,28 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertNotIn("hex-ascii-under-label", app_js)
         self.assertIn("border-left: 2px solid", web_py)
 
+    def test_tcpview_frontend_surfaces_ace_before_after_state(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function makeGcloudAceCompareStatus", app_js)
+        self.assertIn("function gcloudAceCsobMarkerRewritePreview", app_js)
+        self.assertIn("未发送证据", app_js)
+        self.assertNotIn("本地模拟 before/after", app_js)
+        self.assertIn("payload_modified=1 / wire_rebuilt=1 / raw_pay=raw_after_4013", app_js)
+        self.assertIn("后端确认 rebuild/send", app_js)
+        self.assertIn("raw_pay=重建后转发包", app_js)
+        self.assertIn("raw_pay sent/rebuilt 4013", app_js)
+        self.assertIn("raw_pay_is_sent_wire=1", app_js)
+        self.assertIn("tcpview_after_source=raw_pay_sent_wire", app_js)
+        self.assertIn("after 来自后端 sent wire", app_js)
+        self.assertIn("收到的原始4013 [raw before/full_pay]", app_js)
+        self.assertIn("修改后重建4013 [raw after/sent]", app_js)
+        self.assertIn("修改后解密 [after/rebuilt]", app_js)
+        self.assertIn("forceSideBySideSame: compareRoot", app_js)
+        self.assertIn("forceSideBySideSame: hasBefore", app_js)
+        self.assertIn("backend rebuilt", app_js)
+
     def test_tcpview_frontend_has_gcloud_65010_proto_view(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"
@@ -260,6 +282,41 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("summary-insight-gcloud", app_js)
         self.assertIn("isGcloudEvent ? null : buildEventAnalysisGrid", app_js)
         self.assertIn("!isGcloudEvent && isRequest", app_js)
+
+    def test_tcpview_frontend_uses_static_lightfeature_layout(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function gcloudAnalyzeAceFixed64", app_js)
+        self.assertIn("bodyLength = layer1.length >= 6 ? readBe16(layer1, 4)", app_js)
+        self.assertIn("staticXorKey >= 0x10", app_js)
+        self.assertIn("staticXorKey <= 0xaf", app_js)
+        self.assertIn("(wireMarker ^ 0xb6b6) & 0xffff", app_js)
+        self.assertIn("common_protocol_id", app_js)
+        self.assertIn("schema_or_version", app_js)
+        self.assertIn("optional_u32", app_js)
+        self.assertIn("fixed64/state_vector", app_js)
+        self.assertNotIn("sample=${sampleCounter}", app_js)
+        self.assertNotIn("rolling_token?", app_js)
+
+    def test_tcpview_frontend_decodes_gateway_kick_player_notice(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function analyzeGcloudGatewayKickCommand", app_js)
+        self.assertIn('"2.1": "kick_code"', app_js)
+        self.assertIn('"2.2": "notice"', app_js)
+        self.assertIn("protoBytes.slice(Number(noticeNode.valueStart), Number(noticeNode.valueEnd))", app_js)
+        self.assertIn("gcloudBytesToUtf8(noticeBytes)", app_js)
+        self.assertIn("账号冻结 / 网关强制下线", app_js)
+        self.assertIn("kick_code 仅按本包 varint 原值展示", app_js)
+        self.assertIn("不把任何数值硬编码成官方处罚枚举", app_js)
+        self.assertIn("冻结期限、解封时间和风险提示均从当前 notice 动态提取", app_js)
+        self.assertIn("body.field1=varint", app_js)
+        self.assertIn("body.field2=utf8", app_js)
+        self.assertIn("不足以证明具体由哪条 ACE/TerSafe 上报触发", app_js)
+        self.assertIn("服务器提示", app_js)
+        self.assertIn("解封时间", app_js)
 
     def test_fff3_body_is_tick_plus_six_byte_probe_entries(self):
         tick = 0x0426
