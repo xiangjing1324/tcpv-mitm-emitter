@@ -335,6 +335,7 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
 
     if report_code & 0xFFFF0000 == 0x01120000:
         has_csob = all(token in lower for token in (b"cs:", b",ob:", b"state:", b",r:", b",p:"))
+        has_csob_candidate = all(token in lower for token in (b"cs:", b"state:", b",r:", b",p:"))
         has_device = b"model:" in lower or b"ver:" in lower
         has_file = any(token in lower for token in (b"config2.dat", b"config3.dat", b"comm.zip", b"mrpcs_i", b".data"))
         if report_code == 0x0112235B and _pubgm_0112235b_device_account_tail_fields(data):
@@ -355,6 +356,15 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
         if has_csob:
             return _semantic_profile(
                 "csob_state_snapshot", "metadata.state.csob", "CSOB 状态快照", "confirmed", "high", ("cs", "ob", "state", "r", "p"), exact_meaning=True
+            )
+        if has_csob_candidate:
+            return _semantic_profile(
+                "csob_state_candidate_missing_ob",
+                "metadata.state.csob_candidate",
+                "CSOB 状态候选（缺少 ob）" + (" + 设备画像" if has_device else ""),
+                "observed",
+                "high",
+                ("cs", "state", "r", "p", "missing_ob"),
             )
         if has_device and has_file:
             return _semantic_profile(

@@ -3087,12 +3087,24 @@ function eventPayloadSearchText(ev) {
 function eventHasCsob(ev) {
   if (!ev || typeof ev !== "object") return false;
   if (typeof ev.__tcpvHasCsob === "boolean") return ev.__tcpvHasCsob;
+  const analysis = ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  const hasCsobAnalysis = Boolean(
+    analysis
+    && String(analysis.schema || "") === "tersafe.semantic.v1"
+    && (
+      /csob/i.test(String(analysis.direction || ""))
+      || String(analysis.direction || "") === "8091_to_8092"
+      || String(analysis.direction || "") === "8091_record"
+      || String(analysis.source_key || "").includes("valorant:")
+    )
+  );
   const text = eventPayloadSearchText(ev);
   const hasCsOb = /cs:[^\x00;]{1,240},ob:/i.test(text);
+  const hasCs = /cs:[^\x00;]{1,240}/i.test(text);
   const hasState = /state:[0-9a-f]{8},r:/i.test(text);
-  const hasCsobSummary = /cs\/ob\/state|状态\s+state:/i.test(text);
+  const hasCsobSummary = /cs\/ob\/state|状态\s+state:|csob(?:_mirror|语义镜像|状态快照|状态候选)/i.test(text);
   const hasReport = /0x010a001b|010a001b/i.test(text) || /\x01\x0a\x00\x1b/.test(text);
-  const matched = hasCsobSummary || (hasCsOb && (hasState || hasReport));
+  const matched = hasCsobAnalysis || hasCsobSummary || (hasCsOb && (hasState || hasReport)) || (hasCs && hasState && hasReport);
   ev.__tcpvHasCsob = matched;
   return matched;
 }
@@ -8951,9 +8963,17 @@ function localChildSemanticProfile(record, reportCode) {
 
   if (((report >>> 16) & 0xffff) === 0x0112) {
     const hasCsob = ["cs:", ",ob:", "state:", ",r:", ",p:"].every((token) => rawLower.includes(token));
+    const hasCsobCandidate = ["cs:", "state:", ",r:", ",p:"].every((token) => rawLower.includes(token));
     const hasDevice = /model:|ver:/.test(rawLower);
     const hasFile = /config2\.dat|config3\.dat|comm\.zip|mrpcs_i|\.data/.test(rawLower);
     if (hasCsob) return semanticProfileValue("csob_state_snapshot", "metadata.state.csob", "CSOB 状态快照", "confirmed", ["cs", "ob", "state", "r", "p"]);
+    if (hasCsobCandidate) return semanticProfileValue(
+      "csob_state_candidate_missing_ob",
+      "metadata.state.csob_candidate",
+      `CSOB 状态候选（缺少 ob）${hasDevice ? " + 设备画像" : ""}`,
+      "observed",
+      ["cs", "state", "r", "p", "missing_ob"],
+    );
     if (hasDevice && hasFile) return semanticProfileValue("device_profile_with_file_reference", "metadata.device_profile", "设备画像 + 配置文件引用", "observed", ["model_ver", "file_name"]);
     if (hasDevice) return semanticProfileValue("device_profile_metadata", "metadata.device_profile", "设备型号/系统版本画像", "observed", ["model_ver"]);
     if (hasFile || /\bdl:/.test(rawLower)) return semanticProfileValue("configuration_file_observation", "metadata.file_reference", "配置/规则文件引用", "observed", ["file_name"]);

@@ -577,6 +577,20 @@ class ArchiveAndStoreTests(unittest.TestCase):
             _loaded_flow, loaded_events = read_flow_archive_bytes(path.read_bytes(), path.name)
         self.assertEqual(loaded_events[0]["analysis"]["schema"], "tersafe.semantic.v1")
 
+    def test_partial_csob_state_with_device_profile_is_labeled_as_csob_candidate(self):
+        record = _metadata_record(
+            0x01122388,
+            b"cs:b1aee09a/890ae32f;model:iPad13,6;ver:16.40;inc_id:95;obf_id:95\x00"
+            b"state:00b00017,r:0/2/330/332/210/2/2,p:12317/12317,13\x00",
+        )
+
+        analysis = analyze_payload(record, direction=0)
+
+        self.assertEqual(analysis["packet"]["semantic_role"], "csob_state_candidate_missing_ob")
+        self.assertEqual(analysis["packet"]["semantic_category"], "metadata.state.csob_candidate")
+        self.assertEqual(analysis["packet"]["semantic_label_zh"], "CSOB 状态候选（缺少 ob） + 设备画像")
+        self.assertIn("missing_ob", analysis["packet"]["semantic_role_evidence"])
+
     def test_ascii_dd3b_be32_candidate_is_rejected(self):
         record = bytearray(_metadata_record(0x01122342, b"x" * 80))
         record[0x44:0x48] = b"dd3b"
