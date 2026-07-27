@@ -241,7 +241,9 @@ INDEX_HTML = """
     }
 
     .flow-path {
-      display: block;
+      display: flex;
+      align-items: center;
+      gap: 5px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -270,7 +272,26 @@ INDEX_HTML = """
       font-weight: 700;
       padding: 0 4px;
       display: inline-block;
-      margin-right: 5px;
+      flex: 0 0 auto;
+    }
+
+    .badge-kp {
+      color: #ffe082;
+      background: rgba(245, 158, 11, 0.14);
+      border: 1px solid rgba(245, 158, 11, 0.64);
+      border-radius: 3px;
+      font-weight: 800;
+      padding: 0 4px;
+      display: inline-block;
+      flex: 0 0 auto;
+    }
+
+    .flow-cid {
+      color: var(--text);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .right {
@@ -1066,6 +1087,13 @@ INDEX_HTML = """
       align-items: start;
     }
 
+    .dump-grid > .child-compare-inline {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
+      overflow-x: hidden;
+    }
+
     .dump-grid-request.dump-grid-decrypted {
       grid-template-columns: repeat(2, minmax(520px, 1fr));
       grid-template-rows: auto;
@@ -1094,6 +1122,29 @@ INDEX_HTML = """
 
     .dump-grid-request.dump-grid-decrypted .dump-panel-decoded {
       grid-column: 2;
+    }
+
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only,
+    .dump-grid-request.child-structure-current-only {
+      grid-template-columns: minmax(0, 1fr);
+      overflow-x: hidden;
+    }
+
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-full,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-raw-after,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-before,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .dump-panel-decoded,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .string-result-inline,
+    .dump-grid-request.dump-grid-decrypted.child-structure-current-only > .child-compare-inline,
+    .dump-grid-request.child-structure-current-only > .dump-panel-full,
+    .dump-grid-request.child-structure-current-only > .dump-panel-raw-after,
+    .dump-grid-request.child-structure-current-only > .dump-panel-before,
+    .dump-grid-request.child-structure-current-only > .dump-panel-decoded,
+    .dump-grid-request.child-structure-current-only > .string-result-inline,
+    .dump-grid-request.child-structure-current-only > .child-compare-inline {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
     }
 
     .dump-panel {
@@ -1283,7 +1334,10 @@ INDEX_HTML = """
     }
 
     .hex-head {
-      padding: 6px 9px;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding: 5px 9px;
       border-bottom: 1px solid var(--line);
       background: var(--dump-head-bg);
       color: var(--muted);
@@ -1294,9 +1348,9 @@ INDEX_HTML = """
 
     .hex-body {
       margin: 0;
-      padding: 8px 9px;
+      padding: 7px 9px 8px;
       white-space: pre;
-      line-height: 1.45;
+      line-height: 1.34;
       word-break: normal;
       overflow-wrap: normal;
       font-variant-numeric: tabular-nums;
@@ -1344,6 +1398,7 @@ INDEX_HTML = """
 
     .hex-ascii {
       color: var(--hex-ascii-color);
+      opacity: 0.82;
     }
 
     .hex-ascii-compact {
@@ -1356,7 +1411,7 @@ INDEX_HTML = """
     }
 
     .hex-comment {
-      color: color-mix(in srgb, var(--accent) 76%, var(--text));
+      color: color-mix(in srgb, var(--accent) 64%, var(--muted));
       display: inline-block;
       max-width: none;
       white-space: pre;
@@ -1367,12 +1422,18 @@ INDEX_HTML = """
 
     .hex-comment-block {
       display: block;
-      margin-left: 8ch;
-      margin-top: 1px;
+      margin-left: 9ch;
+      margin-top: 2px;
+      margin-bottom: 2px;
+      padding: 2px 8px;
+      border-left: 2px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+      border-radius: 0 4px 4px 0;
+      background: color-mix(in srgb, var(--accent) 7%, transparent);
       max-width: min(148ch, calc(100vw - 240px));
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: normal;
+      line-height: 1.38;
     }
 
     .tree-shell {

@@ -17,8 +17,25 @@ from .analyzer import TersafeAnalyzer
 from .archive import export_event_from_api, make_archive_path, parse_import_bytes, write_flow_archive
 from .config import archive_dir, env_int, overflow_dir, runtime_config
 from .store import TcpvEventStore
+from .semantic import analysis_from_event, analysis_needs_upgrade, analyze_payload, correlate_events
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_instance_id(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    safe = "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)
+    return safe[:128]
+
+
+def _producer_analysis_is_authoritative(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("analysis_authoritative") is True
+        and str(value.get("schema") or "").startswith("tcpv.")
+    )
 
 
 class TcpvRuntime:
@@ -47,8 +64,12 @@ class TcpvRuntime:
         self._spooled_count = 0
         self._last_write_error = ""
         self._last_spool_path = ""
+        self._producer_analysis_count = 0
+        self._semantic_parse_count = 0
+        self._semantic_skipped_payload_count = 0
         self._drop_before_ts_ms: dict[str, int] = {}
         self._analyzer = TersafeAnalyzer()
+        self._cleanup_instance_on_stop = True
 
     def start(
         self,
@@ -57,6 +78,8 @@ class TcpvRuntime:
         redis_host: str = "127.0.0.1",
         redis_port: int = 6379,
         redis_db: int = 0,
+        instance_id: str = "",
+        cleanup_on_stop: bool | None = None,
     ) -> bool:
         with self._lock:
             if self.enabled:
@@ -67,7 +90,9 @@ class TcpvRuntime:
                 redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
                 redis_client.ping()
 
-                self.instance_id = uuid.uuid4().hex
+                requested_instance_id = _normalize_instance_id(instance_id)
+                self.instance_id = requested_instance_id or uuid.uuid4().hex
+                self._cleanup_instance_on_stop = bool(cleanup_on_stop) if cleanup_on_stop is not None else not bool(requested_instance_id)
                 self.store = TcpvEventStore(redis_client=redis_client, instance_id=self.instance_id)
                 self._stop_event.clear()
                 self._drop_before_ts_ms = {}
@@ -99,7 +124,7 @@ class TcpvRuntime:
                 self._stop_event.set()
                 if self._worker_thread and self._worker_thread.is_alive():
                     self._worker_thread.join(timeout=1.0)
-                if self.store is not None:
+                if self.store is not None and self._cleanup_instance_on_stop:
                     try:
                         self.store.cleanup_instance()
                     except Exception:
@@ -130,7 +155,7 @@ class TcpvRuntime:
             if self._server_thread and self._server_thread.is_alive():
                 self._server_thread.join(timeout=3.0)
 
-            if self.store is not None:
+            if self.store is not None and self._cleanup_instance_on_stop:
                 try:
                     self.store.cleanup_instance()
                 except Exception:
@@ -150,7 +175,11 @@ class TcpvRuntime:
             self._spooled_count = 0
             self._last_write_error = ""
             self._last_spool_path = ""
+            self._producer_analysis_count = 0
+            self._semantic_parse_count = 0
+            self._semantic_skipped_payload_count = 0
             self._drop_before_ts_ms = {}
+            self._cleanup_instance_on_stop = True
             self._drain_queue()
 
     def emit_packet(
@@ -171,6 +200,7 @@ class TcpvRuntime:
         before_packet_len: int | None = None,
         raw_packet_data: Any | None = None,
         raw_packet_len: int | None = None,
+        analysis: dict[str, Any] | None = None,
     ) -> None:
         if not self.enabled or self.store is None:
             return
@@ -229,6 +259,7 @@ class TcpvRuntime:
             "ts_ms": int(ts_ms or (time.time() * 1000)),
             "msg_idx": msg_idx,
             "chunk_idx": chunk_idx,
+            "analysis": dict(analysis) if isinstance(analysis, dict) else {},
         }
 
         try:
@@ -267,6 +298,7 @@ class TcpvRuntime:
         before_packet_len: int | None = None,
         raw_packet_data: Any | None = None,
         raw_packet_len: int | None = None,
+        analysis: dict[str, Any] | None = None,
     ) -> None:
         account_value = account
         if account_value is None and flow is not None:
@@ -283,6 +315,11 @@ class TcpvRuntime:
         if not proxy_username_value and flow is not None:
             proxy_username_value = str(getattr(flow, "proxy_username", "") or "").strip()
         summary_value = str(summary or "").strip()
+        analysis_value = analysis
+        if analysis_value is None and flow is not None:
+            candidate = getattr(flow, "last_csob_semantic_analysis", None)
+            if isinstance(candidate, dict):
+                analysis_value = candidate
 
         self.emit_packet(
             account=account_value or "",
@@ -301,6 +338,7 @@ class TcpvRuntime:
             before_packet_len=before_packet_len,
             raw_packet_data=raw_packet_data,
             raw_packet_len=raw_packet_len,
+            analysis=analysis_value,
         )
 
     def tcp_start(
@@ -387,16 +425,33 @@ class TcpvRuntime:
         after_id: str | None,
         limit: int,
         include_payload: bool = True,
+        include_analysis: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         store = self.store
         if store is None:
             return [], after_id, False
-        return store.get_events(
+        decode_payload = include_payload or include_analysis
+        events, last_id, has_more = store.get_events(
             account=account,
             after_id=after_id,
             limit=limit,
-            include_payload=include_payload,
+            # Old rows without `ana` still need payload bytes when the caller
+            # asks for analysis; compact list callers can skip both.
+            include_payload=decode_payload,
+            include_analysis=include_analysis,
         )
+        if include_analysis:
+            for event in events:
+                if analysis_needs_upgrade(event.get("analysis")):
+                    event["analysis"] = analysis_from_event(event)
+            correlate_events(events)
+        if not include_payload:
+            for event in events:
+                event["pay"] = ""
+                event["full_pay"] = ""
+                event["before_pay"] = ""
+                event["raw_pay"] = ""
+        return events, last_id, has_more
 
     def export_flow(self, account: str) -> tuple[Path, dict[str, Any]]:
         account = str(account or "").strip()
@@ -408,12 +463,40 @@ class TcpvRuntime:
         flow = next((item for item in store.list_accounts() if str(item.get("account") or "") == account), None)
         if flow is None:
             raise KeyError("flow not found")
-        events = [export_event_from_api(event) for event in store.iter_events(account, include_payload=True)]
+        api_events = store.iter_events(account, include_payload=True)
+        for event in api_events:
+            if analysis_needs_upgrade(event.get("analysis")):
+                event["analysis"] = analysis_from_event(event)
+        correlate_events(api_events)
+        events = [export_event_from_api(event) for event in api_events]
         if not events:
             raise KeyError("flow has no events")
         path = make_archive_path(flow)
         write_flow_archive(path, flow, events)
         return path, {"account": account, "events": len(events), "path": str(path)}
+
+    def get_deep_report(self, account: str) -> tuple[dict[str, Any], str]:
+        from .shape_summary import render_markdown, summarize_events
+
+        account = str(account or "").strip()
+        if not account:
+            raise ValueError("account is required")
+        store = self.store
+        if store is None:
+            raise RuntimeError("service not enabled")
+        flow = next((item for item in store.list_accounts() if str(item.get("account") or "") == account), None)
+        if flow is None:
+            raise KeyError("flow not found")
+        api_events = store.iter_events(account, include_payload=True)
+        for event in api_events:
+            if analysis_needs_upgrade(event.get("analysis")):
+                event["analysis"] = analysis_from_event(event)
+        correlate_events(api_events)
+        events = [export_event_from_api(event) for event in api_events]
+        if not events:
+            raise KeyError("flow has no events")
+        summary = summarize_events(flow, events, source="display", input_name=f"live:{account}")
+        return summary, render_markdown(summary, top=40)
 
     def save_flow(self, account: str) -> dict[str, Any]:
         path, info = self.export_flow(account)
@@ -458,7 +541,10 @@ class TcpvRuntime:
         store = self.store
         if store is None:
             return None
-        return store.get_event(account=account, event_id=event_id)
+        event = store.get_event(account=account, event_id=event_id)
+        if event is not None and analysis_needs_upgrade(event.get("analysis")):
+            event["analysis"] = analysis_from_event(event)
+        return event
 
     def get_connections(self, account: str, recent: int) -> list[dict[str, Any]]:
         store = self.store
@@ -531,6 +617,38 @@ class TcpvRuntime:
                 break
 
     def _append_store_event(self, store: TcpvEventStore, item: dict[str, Any]) -> None:
+        direction = int(item.get("dir") or 0)
+        before_payload = bytes(item.get("before_payload") or b"")
+        analysis: dict[str, Any] | None = (
+            item.get("analysis") if isinstance(item.get("analysis"), dict) else None
+        )
+        seen: set[bytes] = set()
+        candidates: list[bytes] = []
+        for candidate in (
+            bytes(item.get("payload") or b""),
+            before_payload,
+            bytes(item.get("full_payload") or b""),
+            bytes(item.get("raw_payload") or b""),
+        ):
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+        if _producer_analysis_is_authoritative(analysis):
+            self._producer_analysis_count += 1
+            self._semantic_skipped_payload_count += len(candidates)
+        else:
+            for candidate in candidates:
+                analysis = analyze_payload(
+                    candidate,
+                    direction=direction,
+                    before_payload=before_payload if candidate == bytes(item.get("payload") or b"") else b"",
+                    provided=analysis,
+                )
+                self._semantic_parse_count += 1
+        if analysis is None:
+            analysis = analyze_payload(b"", direction=direction)
+            self._semantic_parse_count += 1
         store.append_event(
             account=item["account"],
             cid=item["cid"],
@@ -545,6 +663,7 @@ class TcpvRuntime:
             raw_packet_len=item.get("raw_packet_len"),
             proxy_username=item.get("proxy_username", ""),
             summary=item.get("summary", ""),
+            analysis=analysis,
             ts_ms=item["ts_ms"],
             msg_idx=item.get("msg_idx"),
             chunk_idx=item.get("chunk_idx"),
@@ -586,6 +705,7 @@ class TcpvRuntime:
                 "ts_ms": item.get("ts_ms", 0),
                 "msg_idx": item.get("msg_idx"),
                 "chunk_idx": item.get("chunk_idx"),
+                "analysis": item.get("analysis") if isinstance(item.get("analysis"), dict) else {},
             }
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, separators=(",", ":")) + "\n")
@@ -608,6 +728,9 @@ class TcpvRuntime:
             "write_error_count": int(self._write_error_count),
             "dropped_count": int(self._dropped_count),
             "spooled_count": int(self._spooled_count),
+            "producer_analysis_count": int(self._producer_analysis_count),
+            "semantic_parse_count": int(self._semantic_parse_count),
+            "semantic_skipped_payload_count": int(self._semantic_skipped_payload_count),
             "last_write_error": self._last_write_error,
             "last_spool_path": self._last_spool_path,
             "stream_maxlen": int(cfg["stream_maxlen"]),
@@ -651,6 +774,8 @@ def init_emitter(
     redis_host: str = "127.0.0.1",
     redis_port: int = 6379,
     redis_db: int = 0,
+    instance_id: str = "",
+    cleanup_on_stop: bool | None = None,
 ) -> bool:
     return TCPV_RUNTIME.start(
         bind_host=bind_host,
@@ -658,6 +783,8 @@ def init_emitter(
         redis_host=redis_host,
         redis_port=redis_port,
         redis_db=redis_db,
+        instance_id=instance_id,
+        cleanup_on_stop=cleanup_on_stop,
     )
 
 
@@ -691,6 +818,7 @@ def emit_lobby_packet(
     before_packet_len: int | None = None,
     raw_packet_data: Any | None = None,
     raw_packet_len: int | None = None,
+    analysis: dict[str, Any] | None = None,
 ) -> None:
     """Safe no-op when runtime is disabled.
 
@@ -716,6 +844,7 @@ def emit_lobby_packet(
         before_packet_len=before_packet_len,
         raw_packet_data=raw_packet_data,
         raw_packet_len=raw_packet_len,
+        analysis=analysis,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 from typing import Any
 
@@ -37,6 +38,9 @@ class TcpvEventStore:
     def stream_key(self, account: str) -> str:
         return self._key(f"events:{account}")
 
+    def compact_stream_key(self, account: str) -> str:
+        return self._key(f"events_compact:{account}")
+
     def meta_key(self, account: str) -> str:
         return self._key(f"meta:{account}")
 
@@ -64,6 +68,7 @@ class TcpvEventStore:
         raw_packet_len: int | None = None,
         decode_status: str = "",
         source: str = "",
+        analysis: dict[str, Any] | None = None,
         imported_seq: int | None = None,
     ) -> str:
         if not account:
@@ -129,6 +134,8 @@ class TcpvEventStore:
             fields["dstat"] = str(decode_status)
         if source:
             fields["src"] = str(source)
+        if isinstance(analysis, dict) and analysis:
+            fields["ana"] = json.dumps(analysis, ensure_ascii=False, separators=(",", ":"))
         if msg_idx is not None:
             fields["midx"] = str(int(msg_idx))
         if chunk_idx is not None:
@@ -179,8 +186,11 @@ class TcpvEventStore:
         result = pipe.execute()
         stream_id = result[0]
         if isinstance(stream_id, (bytes, bytearray)):
-            return stream_id.decode("utf-8", errors="replace")
-        return str(stream_id)
+            event_id = stream_id.decode("utf-8", errors="replace")
+        else:
+            event_id = str(stream_id)
+        self._append_compact_event(account, event_id, fields)
+        return event_id
 
     def mark_flow_start(
         self,
@@ -323,6 +333,7 @@ class TcpvEventStore:
             clean = self.r.pipeline()
             for account in empty_accounts:
                 keys_to_remove.append(self.stream_key(account))
+                keys_to_remove.append(self.compact_stream_key(account))
                 keys_to_remove.append(self.meta_key(account))
                 keys_to_remove.append(self.seq_key(account))
                 clean.srem(self.accounts_key, account)
@@ -339,8 +350,11 @@ class TcpvEventStore:
         after_id: str | None = None,
         limit: int = 200,
         include_payload: bool = True,
+        include_analysis: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         stream_key = self.stream_key(account)
+        if not include_payload and not include_analysis and self.r.exists(self.compact_stream_key(account)):
+            stream_key = self.compact_stream_key(account)
         batch = max(1, min(int(limit), self.api_max_limit))
         min_id = f"({after_id}" if after_id else "-"
 
@@ -349,11 +363,26 @@ class TcpvEventStore:
         if has_more:
             rows = rows[:batch]
 
-        events = [self._decode_row(entry_id, fields, include_payload=include_payload) for entry_id, fields in rows]
+        events = [
+            self._decode_row(
+                entry_id,
+                fields,
+                include_payload=include_payload,
+                include_analysis=include_analysis,
+            )
+            for entry_id, fields in rows
+        ]
         last_id = events[-1]["id"] if events else after_id
         return events, last_id, has_more
 
-    def iter_events(self, account: str, *, include_payload: bool = True, batch_size: int = 5000) -> list[dict[str, Any]]:
+    def iter_events(
+        self,
+        account: str,
+        *,
+        include_payload: bool = True,
+        include_analysis: bool = True,
+        batch_size: int = 5000,
+    ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         after_id: str | None = None
         while True:
@@ -362,6 +391,7 @@ class TcpvEventStore:
                 after_id=after_id,
                 limit=batch_size,
                 include_payload=include_payload,
+                include_analysis=include_analysis,
             )
             events.extend(rows)
             if not has_more or not rows:
@@ -381,7 +411,7 @@ class TcpvEventStore:
         entry_id, fields = rows[0]
         if self._to_str(entry_id) != target_id:
             return None
-        return self._decode_row(entry_id, fields, include_payload=True)
+        return self._decode_row(entry_id, fields, include_payload=True, include_analysis=True)
 
     def get_connections(self, account: str, recent: int = 2000) -> list[dict[str, Any]]:
         stream_key = self.stream_key(account)
@@ -415,11 +445,25 @@ class TcpvEventStore:
             if cursor == 0:
                 break
 
+    def cleanup_all_instances(self) -> int:
+        """Remove every TCPView instance while preserving non-TCPView Redis data."""
+
+        cursor = 0
+        deleted = 0
+        while True:
+            cursor, keys = self.r.scan(cursor=cursor, match="tcpv:*", count=500)
+            if keys:
+                deleted += self._delete_keys([self._to_str(key) for key in keys])
+            if cursor == 0:
+                break
+        return deleted
+
     def cleanup_account(self, account: str) -> None:
         if not account:
             return
         keys_to_remove = [
             self.stream_key(account),
+            self.compact_stream_key(account),
             self.meta_key(account),
             self.seq_key(account),
         ]
@@ -466,6 +510,7 @@ class TcpvEventStore:
                 label=str(event.get("label") or ""),
                 decode_status=str(event.get("decode_status") or ""),
                 source=str(event.get("source") or flow_meta.get("source") or "import"),
+                analysis=event.get("analysis") if isinstance(event.get("analysis"), dict) else None,
                 ts_ms=self._to_int(event.get("ts"), first_ts or int(time.time() * 1000)),
                 msg_idx=self._to_int(event.get("msg_idx"), -1),
                 chunk_idx=self._to_int(event.get("chunk_idx"), -1),
@@ -507,8 +552,17 @@ class TcpvEventStore:
         entry_id: bytes | str,
         fields: dict[Any, Any],
         include_payload: bool = True,
+        include_analysis: bool = True,
     ) -> dict[str, Any]:
         decoded = {self._to_str(k): self._to_str(v) for k, v in fields.items()}
+        analysis: dict[str, Any] = {}
+        if include_analysis and decoded.get("ana"):
+            try:
+                value = json.loads(decoded["ana"])
+                if isinstance(value, dict):
+                    analysis = value
+            except (TypeError, ValueError, json.JSONDecodeError):
+                analysis = {}
         return {
             "id": self._to_str(entry_id),
             "ts": self._to_int(decoded.get("ts"), 0),
@@ -534,7 +588,26 @@ class TcpvEventStore:
             "seq": self._to_int(decoded.get("seq"), 0),
             "msg_idx": self._to_int(decoded.get("midx"), -1),
             "chunk_idx": self._to_int(decoded.get("cidx"), -1),
+            "analysis": analysis,
         }
+
+    def _append_compact_event(self, account: str, event_id: str, fields: dict[str, str]) -> None:
+        compact_key = self.compact_stream_key(account)
+        compact_fields = {
+            key: value
+            for key, value in fields.items()
+            if key not in {"pay", "fpay", "bpay", "rpay", "ana"}
+        }
+        try:
+            if self.stream_maxlen > 0:
+                self.r.xadd(compact_key, compact_fields, id=event_id, maxlen=self.stream_maxlen, approximate=True)
+            else:
+                self.r.xadd(compact_key, compact_fields, id=event_id)
+            if self.ttl_seconds > 0:
+                self.r.expire(compact_key, self.ttl_seconds)
+        except redis.ResponseError:
+            # Compact rows are an acceleration path only; the full stream is authoritative.
+            pass
 
     @staticmethod
     def _to_str(value: Any) -> str:
