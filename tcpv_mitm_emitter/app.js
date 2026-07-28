@@ -1724,8 +1724,13 @@ function buildPairedFlowTimeIndex(rows, nowMs = Date.now()) {
       if (used.has(gcloud.flowId) || used.has(tersafe.flowId)) continue;
       used.add(gcloud.flowId);
       used.add(tersafe.flowId);
-      const durationMs = Math.max(gcloud.time.durationMs, tersafe.time.durationMs);
-      const open = gcloud.time.open || tersafe.time.open;
+      const overlapStartTs = Math.max(gcloud.time.firstTs, tersafe.time.firstTs);
+      const overlapEndTs = Math.min(gcloud.time.recordedEndTs, tersafe.time.recordedEndTs);
+      const overlapDurationMs = Math.max(overlapEndTs - overlapStartTs, 0);
+      const durationMs = overlapDurationMs > 0
+        ? overlapDurationMs
+        : Math.min(gcloud.time.durationMs, tersafe.time.durationMs);
+      const open = gcloud.time.open && tersafe.time.open;
       result.set(gcloud.flowId, {
         accountInfo,
         durationMs,
