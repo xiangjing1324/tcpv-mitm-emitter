@@ -450,6 +450,7 @@ function installFlowListBadgeStyles() {
       flex: 0 0 auto;
       margin-right: 0;
     }
+    .badge-acc,
     .badge-kp {
       color: #ffe082;
       background: rgba(245, 158, 11, 0.14);
@@ -1628,6 +1629,11 @@ function getProxyUsername(rawValue) {
   return String(rawValue || "").trim();
 }
 
+function extractAccountInfoFromCid(cidText) {
+  const match = String(cidText || "").match(/\[acc:([^\]]+)\]/i);
+  return match ? String(match[1] || "").trim() : "";
+}
+
 function stripDecoratorsFromCid(cidText) {
   return String(cidText || "").replace(/\s*\[(?:acc|kp):[^\]]+\]/gi, "").trim();
 }
@@ -1659,6 +1665,75 @@ function isFlowOpen(item) {
   if (status === "closed") return false;
   const endedTs = Number(item.ended_ts || 0);
   return !Number.isFinite(endedTs) || endedTs <= 0;
+}
+
+const ACCOUNT_SESSION_JOIN_GAP_MS = 15 * 1000;
+
+function getFlowTimeInfo(item, nowMs = Date.now()) {
+  const firstRaw = Number(item && (item.first_ts || item.last_ts));
+  const firstTs = Number.isFinite(firstRaw) && firstRaw > 0 ? firstRaw : 0;
+  const lastRaw = Number(item && item.last_ts);
+  const lastTs = Number.isFinite(lastRaw) && lastRaw > 0 ? lastRaw : firstTs;
+  const endedRaw = Number(item && item.ended_ts);
+  const endedTs = Number.isFinite(endedRaw) && endedRaw > 0 ? endedRaw : 0;
+  const open = isFlowOpen(item);
+  const recordedEndTs = Math.max(firstTs, open ? lastTs : (endedTs || lastTs));
+  const displayEndTs = open ? Math.max(recordedEndTs, Number(nowMs) || 0) : recordedEndTs;
+  const fallbackDuration = Math.max(0, Number(item && item.duration_ms) || 0);
+  const durationMs = firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : fallbackDuration;
+  return { firstTs, recordedEndTs, displayEndTs, durationMs, open };
+}
+
+function buildAccountSessionTimeIndex(rows, nowMs = Date.now()) {
+  const byAccount = new Map();
+  const result = new Map();
+
+  for (const item of Array.isArray(rows) ? rows : []) {
+    const accountInfo = extractAccountInfoFromCid(item && item.last_cid);
+    const flowId = String(item && item.account || "");
+    const time = getFlowTimeInfo(item, nowMs);
+    if (!accountInfo || !flowId || time.firstTs <= 0) continue;
+    if (!byAccount.has(accountInfo)) byAccount.set(accountInfo, []);
+    byAccount.get(accountInfo).push({ flowId, time });
+  }
+
+  const saveSession = (accountInfo, session) => {
+    const durationMs = Math.max(session.displayEndTs - session.firstTs, 0);
+    for (const member of session.members) {
+      result.set(member.flowId, {
+        accountInfo,
+        durationMs,
+        open: session.open,
+        socketDurationMs: member.time.durationMs,
+        flowCount: session.members.length,
+      });
+    }
+  };
+
+  for (const [accountInfo, accountRows] of byAccount.entries()) {
+    accountRows.sort((a, b) => a.time.firstTs - b.time.firstTs || a.time.recordedEndTs - b.time.recordedEndTs);
+    let session = null;
+    for (const member of accountRows) {
+      if (!session || member.time.firstTs > session.recordedEndTs + ACCOUNT_SESSION_JOIN_GAP_MS) {
+        if (session) saveSession(accountInfo, session);
+        session = {
+          firstTs: member.time.firstTs,
+          recordedEndTs: member.time.recordedEndTs,
+          displayEndTs: member.time.displayEndTs,
+          open: member.time.open,
+          members: [member],
+        };
+        continue;
+      }
+      session.recordedEndTs = Math.max(session.recordedEndTs, member.time.recordedEndTs);
+      session.displayEndTs = Math.max(session.displayEndTs, member.time.displayEndTs);
+      session.open = session.open || member.time.open;
+      session.members.push(member);
+    }
+    if (session) saveSession(accountInfo, session);
+  }
+
+  return result;
 }
 
 function usePreviewSpace() {
@@ -1764,6 +1839,8 @@ function updateActionButtons() {
 
 function renderFlowList() {
   const rows = state.flows;
+  const nowMs = Date.now();
+  const accountSessionTime = buildAccountSessionTimeIndex(rows, nowMs);
   el.flowCount.textContent = `${rows.length}`;
   el.flowList.innerHTML = "";
   updateActionButtons();
@@ -1796,6 +1873,13 @@ function renderFlowList() {
       proxyBadge.textContent = `kp:${proxyUsername}`;
       path.appendChild(proxyBadge);
     }
+    const accountInfo = extractAccountInfoFromCid(item && item.last_cid);
+    if (accountInfo) {
+      const accountBadge = document.createElement("span");
+      accountBadge.className = "badge-acc";
+      accountBadge.textContent = `acc:${accountInfo}`;
+      path.appendChild(accountBadge);
+    }
     const cidText = document.createElement("span");
     cidText.className = "flow-cid";
     cidText.textContent = getFlowRowPath(item);
@@ -1808,10 +1892,18 @@ function renderFlowList() {
     size.textContent = formatSize(item.total_bytes ?? item.total);
 
     const duration = document.createElement("div");
-    const open = isFlowOpen(item);
+    const socketTime = getFlowTimeInfo(item, nowMs);
+    const sessionTime = accountSessionTime.get(flowId);
+    const durationMs = sessionTime ? sessionTime.durationMs : socketTime.durationMs;
+    const open = sessionTime ? sessionTime.open : socketTime.open;
     duration.className = `flow-time ${open ? "flow-time-open" : "flow-time-closed"}`;
-    duration.textContent = open ? "..." : formatDuration(item.duration_ms);
-    duration.title = open ? "active flow" : "closed flow duration";
+    duration.textContent = formatDuration(durationMs);
+    if (sessionTime) {
+      const stateText = open ? "进行中" : "已结束";
+      duration.title = `账号会话${stateText}（同 acc 的重叠 GCloud/Tersafe flow 合并）；本 socket ${formatDuration(sessionTime.socketDurationMs)}`;
+    } else {
+      duration.title = `${open ? "active" : "closed"} socket duration`;
+    }
 
     btn.appendChild(path);
     btn.appendChild(proto);
@@ -1895,21 +1987,21 @@ function renderSelectedTitle() {
 
   const rawCid = String(item.last_cid || "");
   const cid = stripDecoratorsFromCid(rawCid);
+  const accountInfo = extractAccountInfoFromCid(rawCid);
+  const accountText = accountInfo ? `[acc:${accountInfo}]` : "";
   const proxyUsername = getProxyUsername(item && item.proxy_username);
   const proxyText = proxyUsername ? `[kp:${proxyUsername}]` : "";
-  const text = cid ? `${proxyText} ${cid}`.trim() : proxyText;
+  const text = [accountText, proxyText, cid].filter(Boolean).join(" ");
   const dateTs = Number(item.first_ts || item.last_ts || 0);
   const dateText = dateTs > 0 ? `[${formatDateOnly(dateTs)}]` : "";
   if (currentFlowLooksLikeGcloud65010(null, rawCid)) {
     const gcloudPort = gcloudTargetPortFromText(rawCid) || "GCloud";
-    const accountMatch = rawCid.match(/\[acc:(\d{10,24})\]/i);
     const totalCount = Number(item.total_count || 0);
     const countText = totalCount > 0 ? `${totalCount}包` : "";
     const sizeText = formatSize(item.total_bytes ?? item.total);
     el.selectedTitle.textContent = [
       `${dateText} ${gcloudPort} · TGCP/GCloud`.trim(),
       text || "Flow selected",
-      accountMatch ? `acc:${accountMatch[1]}` : "",
       countText,
       sizeText,
     ].filter(Boolean).join("  |  ");
