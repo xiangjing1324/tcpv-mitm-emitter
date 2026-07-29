@@ -100,8 +100,12 @@ const cfgNumber = (key, fallback) => {
   const value = Number(TCPV_CONFIG[key]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 };
+const cfgNonNegativeNumber = (key, fallback) => {
+  const value = Number(TCPV_CONFIG[key]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+};
 const MAX_FULL_SCAN_BYTES = 8192;
-const MAX_EVENTS_IN_MEMORY = cfgNumber("max_events_in_memory", 50000);
+const MAX_EVENTS_IN_MEMORY = cfgNonNegativeNumber("max_events_in_memory", 0);
 const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 500);
 const INITIAL_DRAIN_PAGES = cfgNumber("initial_drain_pages", 4);
 const GCLOUD_INITIAL_DRAIN_PAGES = Math.max(INITIAL_DRAIN_PAGES, 16);
@@ -115,6 +119,8 @@ const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 96;
 const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 192;
 const MAX_RENDER_EVENTS_AUTO = 2000;
 const MAX_RENDER_EVENTS_MANUAL = 5000;
+const GCLOUD_MAX_RENDER_EVENTS_AUTO = 5000;
+const GCLOUD_MAX_RENDER_EVENTS_MANUAL = 20000;
 const DUMP_SCROLL_CACHE_MAX = 800;
 const AUTO_EXPAND_ON_COUNT = 3;
 const AUTO_EXPAND_SMART_COUNT = 2;
@@ -1649,13 +1655,44 @@ function formatDuration(durationMs) {
   const ms = Number(durationMs || 0);
   if (!Number.isFinite(ms) || ms <= 0) return "0s";
   const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
-  return `${Math.floor(sec / 3600)}h`;
+  const hours = Math.floor(sec / 3600);
+  const minutes = Math.floor((sec % 3600) / 60);
+  const seconds = sec % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+// TCPView on these servers is operated in China Standard Time.  Do not let
+// the browser/OS timezone silently turn a 14:59 packet into 06:59 UTC.
+const DISPLAY_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function displayTimeParts(ts) {
+  const value = Number(ts || 0);
+  if (!Number.isFinite(value)) return null;
+  const d = new Date(value + DISPLAY_TIME_OFFSET_MS);
+  if (!Number.isFinite(d.getTime())) return null;
+  return {
+    yyyy: String(d.getUTCFullYear()).padStart(4, "0"),
+    mm: String(d.getUTCMonth() + 1).padStart(2, "0"),
+    dd: String(d.getUTCDate()).padStart(2, "0"),
+    hh: String(d.getUTCHours()).padStart(2, "0"),
+    mi: String(d.getUTCMinutes()).padStart(2, "0"),
+    ss: String(d.getUTCSeconds()).padStart(2, "0"),
+  };
+}
+
+function formatFlowTimestamp(ts) {
+  const value = Number(ts || 0);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const date = new Date(value);
+  return `${formatTs(value)}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function isFlowOpen(item) {
   if (!item || typeof item !== "object") return false;
+  const tcpEndTs = Number(item.tcp_end_ts || 0);
+  if (Number.isFinite(tcpEndTs) && tcpEndTs > 0) return false;
   if (typeof item.is_open === "boolean") {
     return item.is_open;
   }
@@ -1669,18 +1706,53 @@ function isFlowOpen(item) {
 const FLOW_PAIR_START_GAP_MS = 15 * 1000;
 
 function getFlowTimeInfo(item, nowMs = Date.now()) {
+  const tcpStartRaw = Number(item && item.tcp_start_ts);
+  const tcpStartTs = Number.isFinite(tcpStartRaw) && tcpStartRaw > 0 ? tcpStartRaw : 0;
+  const firstPacketRaw = Number(item && item.first_packet_ts);
+  const firstPacketTs = Number.isFinite(firstPacketRaw) && firstPacketRaw > 0 ? firstPacketRaw : 0;
   const firstRaw = Number(item && (item.first_ts || item.last_ts));
-  const firstTs = Number.isFinite(firstRaw) && firstRaw > 0 ? firstRaw : 0;
+  const legacyFirstTs = Number.isFinite(firstRaw) && firstRaw > 0 ? firstRaw : 0;
+  const firstTs = tcpStartTs || legacyFirstTs || firstPacketTs;
+  const lastPacketRaw = Number(item && item.last_packet_ts);
+  const lastPacketTs = Number.isFinite(lastPacketRaw) && lastPacketRaw > 0 ? lastPacketRaw : 0;
   const lastRaw = Number(item && item.last_ts);
   const lastTs = Number.isFinite(lastRaw) && lastRaw > 0 ? lastRaw : firstTs;
+  const tcpEndRaw = Number(item && item.tcp_end_ts);
+  const tcpEndTs = Number.isFinite(tcpEndRaw) && tcpEndRaw > 0 ? tcpEndRaw : 0;
   const endedRaw = Number(item && item.ended_ts);
   const endedTs = Number.isFinite(endedRaw) && endedRaw > 0 ? endedRaw : 0;
-  const open = isFlowOpen(item);
-  const recordedEndTs = Math.max(firstTs, open ? lastTs : (endedTs || lastTs));
-  const displayEndTs = recordedEndTs;
+  const open = tcpEndTs <= 0 && isFlowOpen(item);
+  const recordedEndTs = Math.max(firstTs, open ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs));
+  const displayEndTs = open ? Math.max(firstTs, Number(nowMs) || recordedEndTs) : recordedEndTs;
   const fallbackDuration = Math.max(0, Number(item && item.duration_ms) || 0);
   const durationMs = firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : fallbackDuration;
-  return { firstTs, recordedEndTs, displayEndTs, durationMs, open };
+  const rawStatusSource = String(item && item.status_source || "").trim();
+  const statusSource = tcpEndTs > 0
+    ? "tcp_end"
+    : (!open && rawStatusSource) ? rawStatusSource
+      : tcpStartTs > 0 ? "tcp_start" : (rawStatusSource || "legacy");
+  return {
+    firstTs,
+    recordedEndTs,
+    displayEndTs,
+    durationMs,
+    open,
+    tcpStartTs,
+    tcpEndTs,
+    firstPacketTs,
+    lastPacketTs,
+    statusSource,
+  };
+}
+
+function flowLifecycleStateText(time) {
+  if (time && time.open) return "仍连接（未收到 tcp_end）";
+  const source = String(time && time.statusSource || "");
+  if (source === "tcp_end") return "tcp_end 已确认";
+  if (source === "runtime_restart_last_packet") {
+    return "MITM 重启时按末包收口（未收到 tcp_end）";
+  }
+  return "已收口（未收到 tcp_end）";
 }
 
 function getFlowPairKind(item) {
@@ -1725,7 +1797,7 @@ function buildPairedFlowTimeIndex(rows, nowMs = Date.now()) {
       used.add(gcloud.flowId);
       used.add(tersafe.flowId);
       const overlapStartTs = Math.max(gcloud.time.firstTs, tersafe.time.firstTs);
-      const overlapEndTs = Math.min(gcloud.time.recordedEndTs, tersafe.time.recordedEndTs);
+      const overlapEndTs = Math.min(gcloud.time.displayEndTs, tersafe.time.displayEndTs);
       const overlapDurationMs = Math.max(overlapEndTs - overlapStartTs, 0);
       const durationMs = overlapDurationMs > 0
         ? overlapDurationMs
@@ -1908,12 +1980,23 @@ function renderFlowList() {
     const open = pairTime ? pairTime.open : socketTime.open;
     duration.className = `flow-time ${open ? "flow-time-open" : "flow-time-closed"}`;
     duration.textContent = formatDuration(durationMs);
+    const socketState = flowLifecycleStateText(socketTime);
+    const socketTimeTitle = [
+      `开始 ${formatFlowTimestamp(socketTime.firstTs)}`,
+      `结束 ${socketTime.open ? "进行中" : formatFlowTimestamp(socketTime.recordedEndTs)}`,
+      `时长 ${formatDuration(socketTime.durationMs)}`,
+      socketState,
+      `source=${socketTime.statusSource}`,
+      socketTime.firstPacketTs > 0 ? `首包 ${formatFlowTimestamp(socketTime.firstPacketTs)}` : "",
+      socketTime.lastPacketTs > 0 ? `末包 ${formatFlowTimestamp(socketTime.lastPacketTs)}` : "",
+    ].filter(Boolean).join("；");
     if (pairTime) {
       const stateText = open ? "进行中" : "已结束";
-      duration.title = `配套 GCloud/Tersafe ${stateText}（开始相差 ${Math.round(pairTime.startGapMs / 1000)}s）；本 socket ${formatDuration(pairTime.socketDurationMs)}`;
+      duration.title = `${socketTimeTitle}；配套 GCloud/Tersafe ${stateText}（开始相差 ${Math.round(pairTime.startGapMs / 1000)}s，重叠 ${formatDuration(pairTime.durationMs)}）`;
     } else {
-      duration.title = `${open ? "active" : "closed"} socket duration`;
+      duration.title = socketTimeTitle;
     }
+    btn.title = `${flowId}\n${socketTimeTitle}`;
 
     btn.appendChild(path);
     btn.appendChild(proto);
@@ -2000,8 +2083,15 @@ function renderSelectedTitle() {
   const proxyUsername = getProxyUsername(item && item.proxy_username);
   const proxyText = proxyUsername ? `[kp:${proxyUsername}]` : "";
   const text = [proxyText, cid].filter(Boolean).join(" ");
-  const dateTs = Number(item.first_ts || item.last_ts || 0);
+  const time = getFlowTimeInfo(item);
+  const dateTs = Number(time.firstTs || 0);
   const dateText = dateTs > 0 ? `[${formatDateOnly(dateTs)}]` : "";
+  const lifecycleText = [
+    `开始 ${formatFlowTimestamp(time.firstTs)}`,
+    `结束 ${time.open ? "进行中" : formatFlowTimestamp(time.recordedEndTs)}`,
+    `时长 ${formatDuration(time.durationMs)}`,
+    flowLifecycleStateText(time),
+  ].join("  |  ");
   if (currentFlowLooksLikeGcloud65010(null, rawCid)) {
     const gcloudPort = gcloudTargetPortFromText(rawCid) || "GCloud";
     const totalCount = Number(item.total_count || 0);
@@ -2012,10 +2102,12 @@ function renderSelectedTitle() {
       text || "Flow selected",
       countText,
       sizeText,
+      lifecycleText,
     ].filter(Boolean).join("  |  ");
   } else {
-    el.selectedTitle.textContent = `${dateText} ${text || "Flow selected"}`.trim();
+    el.selectedTitle.textContent = [`${dateText} ${text || "Flow selected"}`.trim(), lifecycleText].join("  |  ");
   }
+  el.selectedTitle.title = lifecycleText;
   updateAceFilterUi();
 }
 
@@ -2074,7 +2166,14 @@ async function selectFlow(flowId) {
   renderEvents();
   setStatus("loading selected flow...");
   const initialPages = currentFlowLooksLikeGcloud65010() ? GCLOUD_INITIAL_DRAIN_PAGES : INITIAL_DRAIN_PAGES;
-  await syncLatestEvents({ drain: true, maxPages: initialPages, force: true });
+  const flow = getCurrentFlowMeta();
+  const expectedPackets = Math.max(0, Number(flow && flow.total_count) || 0);
+  const expectedPages = expectedPackets > 0 ? Math.ceil(expectedPackets / EVENTS_FETCH_LIMIT) + 1 : 1;
+  await syncLatestEvents({
+    drain: true,
+    maxPages: Math.max(initialPages, Math.min(expectedPages, 1000)),
+    force: true,
+  });
 }
 
 async function syncLatestEvents(options = {}) {
@@ -2120,15 +2219,10 @@ async function syncLatestEvents(options = {}) {
       }
       if (rows.length > 0) {
         state.events.push(...rows);
-        if (state.events.length > MAX_EVENTS_IN_MEMORY) {
+        if (MAX_EVENTS_IN_MEMORY > 0 && state.events.length > MAX_EVENTS_IN_MEMORY) {
           state.events = state.events.slice(-MAX_EVENTS_IN_MEMORY);
         }
         changed = true;
-        if (drain) {
-          renderEvents();
-          changed = false;
-          shouldRenderEmpty = false;
-        }
       } else if (state.events.length === 0) {
         shouldRenderEmpty = true;
       }
@@ -2291,13 +2385,7 @@ function b64ToBytesWindow(base64Text, startOffset, windowLen) {
 
 function formatTs(ts) {
   try {
-    const d = new Date(ts || 0);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
+    const { yyyy, mm, dd, hh, mi, ss } = displayTimeParts(ts);
     return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
   } catch (_e) {
     return String(ts || 0);
@@ -2306,10 +2394,7 @@ function formatTs(ts) {
 
 function formatDateOnly(ts) {
   try {
-    const d = new Date(ts || 0);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
+    const { yyyy, mm, dd } = displayTimeParts(ts);
     return `${yyyy}-${mm}-${dd}`;
   } catch (_e) {
     return String(ts || 0);
@@ -2318,10 +2403,7 @@ function formatDateOnly(ts) {
 
 function formatTsShort(ts) {
   try {
-    const d = new Date(ts || 0);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
+    const { hh, mi, ss } = displayTimeParts(ts);
     return `${hh}:${mi}:${ss}`;
   } catch (_e) {
     return String(ts || 0);
@@ -3442,10 +3524,7 @@ function isPlausibleTimestampSeconds(value) {
 function formatTimestampClock(seconds) {
   if (!Number.isFinite(Number(seconds))) return "";
   try {
-    const d = new Date(Number(seconds) * 1000);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
+    const { hh, mi, ss } = displayTimeParts(Number(seconds) * 1000);
     return `${hh}:${mi}:${ss}`;
   } catch (_e) {
     return "";
@@ -7343,11 +7422,58 @@ function analyzeGcloudEvent(ev, summaryText = "") {
   };
 }
 
+function getGcloudProducerValidation(ev) {
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  const validation = analysis && analysis.validation && typeof analysis.validation === "object"
+    ? analysis.validation
+    : null;
+  return validation && validation.schema === "tcpv.gcloud.validation.v1" ? validation : null;
+}
+
+function gcloudValidationSummaryInsights(ev) {
+  const validation = getGcloudProducerValidation(ev);
+  if (!validation) return [];
+  const out = [];
+  const resource = validation.login_resource && validation.login_resource.present
+    ? validation.login_resource
+    : null;
+  if (resource) {
+    out.push({
+      kind: "file",
+      text: String(resource.resource_name || "LoginRes resource"),
+      title: `field20 resource · field21 ZIP ${Number(resource.blob_len || 0)}B · ${resource.zip_entry || "entry?"}`,
+    });
+    out.push({
+      kind: resource.crc_match === true ? "state" : "type",
+      text: resource.crc_match === true ? "ZIP CRC32 ✓" : resource.crc_match === false ? "ZIP CRC32 ✗" : "ZIP CRC32 未带线值",
+      title: `wire=${resource.wire_crc32 || "-"} actual=${resource.actual_crc32 || "-"} confidence=${resource.confidence || "observed"}`,
+    });
+  }
+  const antidata = validation.ace_antidata && typeof validation.ace_antidata === "object"
+    ? validation.ace_antidata
+    : null;
+  const records = antidata && Array.isArray(antidata.records) ? antidata.records : [];
+  if (records.length > 0) {
+    const first = records[0] || {};
+    out.push({ kind: "file", text: String(first.resource_name || "MRPCS"), title: `confidence=${first.confidence || "observed"}` });
+    out.push({ kind: "type", text: String(first.report_code || "report=?"), title: `${first.carrier_kind || "carrier"} · ${Number(first.record_len || 0)}B` });
+  }
+  const light = validation.ace_light_feature && typeof validation.ace_light_feature === "object"
+    ? validation.ace_light_feature
+    : null;
+  const carrier = light && light.carrier && typeof light.carrier === "object" ? light.carrier : null;
+  if (carrier) {
+    out.push({ kind: "carrier", text: `LightFeature ${carrier.kind || "carrier"}`, title: `${carrier.source_encoding || "-"} · decoded=${Number(carrier.decoded_length || 0)}B` });
+  }
+  return out;
+}
+
 function buildGcloudSummaryInsights(ev, summaryText = "") {
   if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return [];
   const info = analyzeGcloudEvent(ev, summaryText);
   if (!info) return [];
   const out = [];
+  const validationInsights = gcloudValidationSummaryInsights(ev);
   if (info.kind === "control") {
     const direction = normalizeGcloudDirection(ev, info.meta);
     const control = info.control || null;
@@ -7367,7 +7493,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
         title: `当前窗口匹配到另一半 index=${pair.index}`,
       });
     }
-    return out;
+    return out.concat(validationInsights);
   }
   if (info.kind === "ace" && info.ace) {
     const ace = info.ace;
@@ -7375,7 +7501,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     out.push({ kind: "ace", text: ace.label, title: ace.commandName });
     out.push({ kind: "carrier", text: carrier.mode || "ACE carrier", title: carrier.chain || carrier.mode || "" });
     if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
-    return out;
+    return out.concat(validationInsights);
   }
   if (info.kind === "kick" && info.kick) {
     const kick = info.kick;
@@ -7383,7 +7509,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     if (kick.codeValue !== null) out.push({ kind: "type", text: `kick_code=${kick.codeValue}`, title: kick.codeMeaning });
     if (Number.isFinite(kick.freezeDays)) out.push({ kind: "carrier", text: `冻结${kick.freezeDays}天`, title: kick.penaltyText });
     if (kick.unlockTime) out.push({ kind: "time", text: `解封 ${kick.unlockTime}`, title: kick.notice });
-    return out;
+    return out.concat(validationInsights);
   }
   if (info.kind === "tss" && info.tss) {
     const tss = info.tss;
@@ -7391,7 +7517,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     out.push({ kind: "ace", text: "CSTss", title: tss.commandName });
     out.push({ kind: "carrier", text: carrier.mode || "TSS carrier", title: carrier.chain || carrier.mode || "" });
     if (tss.identity) out.push({ kind: "type", text: tss.identity, title: tss.meaning || tss.identity });
-    return out;
+    return out.concat(validationInsights);
   }
   const proto = info.proto || null;
   const name = String(
@@ -7418,7 +7544,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     });
     if (proto.module) out.push({ kind: "type", text: proto.module, title: "protobuf field[8] module" });
   }
-  return out;
+  return out.concat(validationInsights);
 }
 
 function appendGcloudKv(grid, label, value) {
@@ -7628,6 +7754,100 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   return panel;
 }
 
+function buildGcloudValidationPanel(ev) {
+  const validation = getGcloudProducerValidation(ev);
+  if (!validation) return null;
+
+  const panel = document.createElement("section");
+  panel.className = "gcloud-brief gcloud-validation-panel";
+  const head = document.createElement("div");
+  head.className = "gcloud-head";
+  const title = document.createElement("div");
+  title.className = "gcloud-title";
+  title.textContent = "GCloud 验证证据 · MRPCS / CSAce / CRC";
+  head.appendChild(title);
+  const chips = document.createElement("div");
+  chips.className = "gcloud-chip-list";
+
+  const command = validation.command && typeof validation.command === "object" ? validation.command : {};
+  const resource = validation.login_resource && typeof validation.login_resource === "object"
+    ? validation.login_resource
+    : null;
+  const antidata = validation.ace_antidata && typeof validation.ace_antidata === "object"
+    ? validation.ace_antidata
+    : null;
+  const records = antidata && Array.isArray(antidata.records) ? antidata.records : [];
+  const light = validation.ace_light_feature && typeof validation.ace_light_feature === "object"
+    ? validation.ace_light_feature
+    : null;
+  const relation = validation.ace_relation && typeof validation.ace_relation === "object"
+    ? validation.ace_relation
+    : null;
+  const chipTexts = [
+    command.name || "GCloud",
+    command.confidence ? `command:${command.confidence}` : "",
+    resource && resource.present ? resource.resource_name : "",
+    resource && resource.present ? `ZIP ${Number(resource.blob_len || 0)}B` : "",
+    resource && resource.present && resource.crc_match === true ? "CRC32 MATCH" : "",
+    records.length > 0 ? records[0].resource_name : "",
+    records.length > 0 ? records[0].report_code : "",
+    light && light.carrier ? `LightFeature ${light.carrier.kind || "carrier"}` : "",
+  ].filter(Boolean);
+  for (const text of chipTexts.slice(0, 8)) {
+    const chip = document.createElement("span");
+    chip.className = "gcloud-chip gcloud-chip-ace";
+    chip.textContent = String(text);
+    chips.appendChild(chip);
+  }
+  head.appendChild(chips);
+  panel.appendChild(head);
+
+  const grid = document.createElement("div");
+  grid.className = "gcloud-kv-grid";
+  appendGcloudKv(
+    grid,
+    "命令证据",
+    `${command.name || "未识别"} · ${command.direction || "direction?"} · confidence=${command.confidence || "inferred"}`,
+  );
+  if (resource && resource.present) {
+    const entries = Array.isArray(resource.zip_entries)
+      ? resource.zip_entries.map((item) => `${item.name} (${Number(item.size || 0)}B, crc=${item.crc32 || "-"})`).join("  |  ")
+      : String(resource.zip_entry || "");
+    appendGcloudKv(grid, "LoginRes 资源", `field20=${resource.resource_name || "-"} · field21=${resource.blob_type || "zip"} ${Number(resource.blob_len || 0)}B · confidence=${resource.confidence || "observed"}`);
+    appendGcloudKv(grid, "ZIP entry", entries || "中央目录为空");
+    appendGcloudKv(grid, "ZIP blob CRC32", `field22 wire=${resource.wire_crc32 || "-"} · actual=${resource.actual_crc32 || "-"} · match=${resource.crc_match === true ? "true" : resource.crc_match === false ? "false" : "unknown"}`);
+    appendGcloudKv(grid, "LoginRes flag", `field23=${resource.flag ?? "-"}`);
+  } else if (resource) {
+    appendGcloudKv(grid, "LoginRes 资源", `当前 payload 未形成完整 field20+field21 ZIP bundle · ${resource.reason || "not present"}`);
+  }
+  for (const [index, record] of records.entries()) {
+    appendGcloudKv(
+      grid,
+      `AntiData MRPCS #${index + 1}`,
+      `${record.resource_name || "MRPCS"} · report=${record.report_code || "-"} · carrier=${record.carrier_kind || "-"} · record=${Number(record.record_len || 0)}B · request_flag=${record.request_flag ?? "-"} · confidence=${record.confidence || "observed"}`,
+    );
+  }
+  if (antidata && records.length <= 0) {
+    appendGcloudKv(grid, "AntiData", `命令已观察，当前 payload 未见完整 MRPCS record · ${antidata.evidence || ""}`);
+  }
+  if (light) {
+    const carrier = light.carrier && typeof light.carrier === "object" ? light.carrier : {};
+    const envelope = carrier.envelope && typeof carrier.envelope === "object" ? carrier.envelope : null;
+    appendGcloudKv(grid, "LightFeature carrier", `${carrier.kind || "unresolved"} · encoding=${carrier.source_encoding || "-"} · decoded=${Number(carrier.decoded_length || 0)}B · confidence=${light.confidence || "observed"}`);
+    if (envelope) {
+      appendGcloudKv(grid, "LightFeature envelope", `type=${envelope.type ?? "-"} · xor_key=${envelope.xor_key ?? "-"} · feature=0x${Number(envelope.raw_feature_id || 0).toString(16).padStart(4, "0")} · common=0x${Number(envelope.common_protocol_id || 0).toString(16).padStart(4, "0")} · schema=${envelope.schema_or_version ?? "-"} · payload=${Number(envelope.payload_length || 0)}B`);
+    } else if (carrier.kind) {
+      appendGcloudKv(grid, "LightFeature 字段边界", `fixed64_family=${carrier.fixed64_family || "-"} · field_semantics=${carrier.field_semantics || "unresolved"}`);
+    }
+  }
+  if (relation) {
+    appendGcloudKv(grid, "Transfer/Ack 边界", `${relation.role || "relation"} · confidence=${relation.confidence || "inferred"} · ${relation.boundary || ""}`);
+  }
+  appendGcloudKv(grid, "证据等级", validation.boundary || "confirmed / observed / inferred 分层展示");
+  panel.appendChild(grid);
+  return panel;
+}
+
 function eventPrefixText(ev) {
   const chunks = [];
   for (const key of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
@@ -7676,11 +7896,8 @@ function shortClockFromEpochSeconds(value) {
   const seconds = Number(value);
   if (!Number.isFinite(seconds)) return "";
   try {
-    const d = new Date(seconds * 1000);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${hh}:${mm}:${ss}`;
+    const { hh, mi, ss } = displayTimeParts(seconds * 1000);
+    return `${hh}:${mi}:${ss}`;
   } catch (_e) {
     return "";
   }
@@ -11149,13 +11366,7 @@ function formatTimestampDateTime(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value)) return "";
   try {
-    const d = new Date(value * 1000);
-    const yyyy = String(d.getFullYear()).padStart(4, "0");
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
+    const { yyyy, mm, dd, hh, mi, ss } = displayTimeParts(value * 1000);
     return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
   } catch (_e) {
     return "";
@@ -13944,6 +14155,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   if (gcloudPanel) {
     body.appendChild(gcloudPanel);
   }
+  const gcloudValidationPanel = isGcloudEvent ? buildGcloudValidationPanel(ev) : null;
+  if (gcloudValidationPanel) {
+    body.appendChild(gcloudValidationPanel);
+  }
   const aceCarrierDeepPanel = isGcloudEvent ? buildGcloudAceCarrierDeepPanel(ev, summaryText) : null;
   if (aceCarrierDeepPanel) {
     body.appendChild(aceCarrierDeepPanel);
@@ -14773,9 +14988,14 @@ function renderEvents() {
   const needFullScan = state.search.active && modeSpec.scope === "full";
   const filteredEvents = state.events.filter((ev) => eventMatchesFilters(ev));
   let visibleEvents = filteredEvents;
+  let omittedRenderCount = 0;
   if (!needFullScan && !state.search.active) {
-    const renderLimit = state.autoRefresh ? MAX_RENDER_EVENTS_AUTO : MAX_RENDER_EVENTS_MANUAL;
+    const gcloudFlow = currentFlowLooksLikeGcloud65010();
+    const renderLimit = gcloudFlow
+      ? (state.autoRefresh ? GCLOUD_MAX_RENDER_EVENTS_AUTO : GCLOUD_MAX_RENDER_EVENTS_MANUAL)
+      : (state.autoRefresh ? MAX_RENDER_EVENTS_AUTO : MAX_RENDER_EVENTS_MANUAL);
     if (filteredEvents.length > renderLimit) {
+      omittedRenderCount = filteredEvents.length - renderLimit;
       visibleEvents = filteredEvents.slice(-renderLimit);
     }
   }
@@ -14784,6 +15004,12 @@ function renderEvents() {
   const aceOverview = buildAceFlowOverviewPanel();
   if (aceOverview) {
     el.events.appendChild(aceOverview);
+  }
+  if (omittedRenderCount > 0) {
+    const note = document.createElement("div");
+    note.className = "render-window-note";
+    note.textContent = `Redis 已加载 ${filteredEvents.length} 包；为保证页面响应，当前渲染最近 ${visibleEvents.length} 包，前面 ${omittedRenderCount} 包未丢失。启用搜索/过滤可扫描已加载全量。`;
+    el.events.appendChild(note);
   }
   if (visibleEvents.length === 0) {
     state.hitEventIds = [];

@@ -25,12 +25,13 @@ class TcpvEventStore:
         self.r = redis_client
         self.instance_id = instance_id
         self.ttl_seconds = int(ttl_seconds if ttl_seconds is not None else env_int("TCPV_TTL_SECONDS", 24 * 60 * 60, min_value=0))
-        self.stream_maxlen = int(stream_maxlen if stream_maxlen is not None else env_int("TCPV_STREAM_MAXLEN", 50_000, min_value=0))
+        self.stream_maxlen = int(stream_maxlen if stream_maxlen is not None else env_int("TCPV_STREAM_MAXLEN", 0, min_value=0))
         self.prefix_len = int(prefix_len if prefix_len is not None else env_int("TCPV_PREFIX_LEN", 128, min_value=16, max_value=2048))
         self.api_max_limit = int(api_max_limit if api_max_limit is not None else env_int("TCPV_API_MAX_LIMIT", 20_000, min_value=100, max_value=100_000))
         self._prefer_unlink = True
 
         self.accounts_key = self._key("accounts")
+        self.runtime_key = self._key("runtime")
 
     def _key(self, suffix: str) -> str:
         return f"tcpv:{self.instance_id}:{suffix}"
@@ -46,6 +47,22 @@ class TcpvEventStore:
 
     def seq_key(self, account: str) -> str:
         return self._key(f"seq:{account}")
+
+    def runtime_owner_pid(self) -> int:
+        meta = {
+            self._to_str(key): self._to_str(value)
+            for key, value in self.r.hgetall(self.runtime_key).items()
+        }
+        return self._to_int(meta.get("owner_pid"), 0)
+
+    def register_runtime_owner(self, owner_pid: int, started_ts_ms: int) -> None:
+        self.r.hset(
+            self.runtime_key,
+            mapping={
+                "owner_pid": str(int(owner_pid)),
+                "started_ts": str(int(started_ts_ms)),
+            },
+        )
 
     def append_event(
         self,
@@ -160,12 +177,18 @@ class TcpvEventStore:
             pipe.xadd(stream_key, fields)
         pipe.sadd(self.accounts_key, account)
         pipe.hsetnx(meta_key, "first_ts", str(now_ms))
+        pipe.hsetnx(meta_key, "first_packet_ts", str(now_ms))
         pipe.hsetnx(meta_key, "first_seq", str(seq))
+        # Lifecycle state is monotonic.  A packet can be written after tcp_end
+        # because packet analysis happens on the background writer queue; use
+        # HSETNX so that such a late write can never reopen a closed flow.
+        pipe.hsetnx(meta_key, "status", "open")
+        pipe.hsetnx(meta_key, "ended_ts", "0")
+        pipe.hsetnx(meta_key, "status_source", "packet_fallback")
         meta_mapping = {
             "last_ts": str(now_ms),
+            "last_packet_ts": str(now_ms),
             "last_seq": str(seq),
-            "status": "open",
-            "ended_ts": "0",
         }
         if self.stream_maxlen > 0 and seq > self.stream_maxlen:
             meta_mapping["trimmed_possible"] = "1"
@@ -209,10 +232,12 @@ class TcpvEventStore:
         pipe = self.r.pipeline()
         pipe.sadd(self.accounts_key, account)
         pipe.hsetnx(meta_key, "first_ts", str(now_ms))
+        pipe.hsetnx(meta_key, "tcp_start_ts", str(now_ms))
+        pipe.hsetnx(meta_key, "status", "open")
+        pipe.hsetnx(meta_key, "ended_ts", "0")
+        pipe.hsetnx(meta_key, "status_source", "tcp_start")
         meta_mapping = {
             "last_ts": str(now_ms),
-            "status": "open",
-            "ended_ts": "0",
         }
         if cid:
             meta_mapping["last_cid"] = cid
@@ -246,6 +271,8 @@ class TcpvEventStore:
             "last_ts": str(now_ms),
             "status": "closed",
             "ended_ts": str(now_ms),
+            "tcp_end_ts": str(now_ms),
+            "status_source": "tcp_end",
         }
         if cid:
             meta_mapping["last_cid"] = cid
@@ -253,10 +280,75 @@ class TcpvEventStore:
             meta_mapping["proxy_username"] = str(proxy_username)
         pipe.hset(meta_key, mapping=meta_mapping)
         if self.ttl_seconds > 0:
+            # Refresh every per-flow key from the authoritative tcp_end so
+            # they expire as one retention unit instead of leaving a partial
+            # stream or orphaned metadata behind.
+            pipe.expire(self.stream_key(account), self.ttl_seconds)
+            pipe.expire(self.compact_stream_key(account), self.ttl_seconds)
             pipe.expire(meta_key, self.ttl_seconds)
             pipe.expire(self.accounts_key, self.ttl_seconds)
             pipe.expire(self.seq_key(account), self.ttl_seconds)
         pipe.execute()
+
+    def close_orphaned_open_flows(self, cutoff_ts_ms: int | None = None) -> int:
+        """Close flows left open by a previous emitter process.
+
+        A process restart destroys the old TCP sockets even when a stable
+        Redis instance keeps their packet history.  There is no authoritative
+        ``tcp_end`` callback in that case, so close at the last observed packet
+        instead of letting the browser grow the duration until ``Date.now()``.
+        """
+
+        cutoff = int(cutoff_ts_ms or int(time.time() * 1000))
+        accounts = [self._to_str(item) for item in self.r.smembers(self.accounts_key)]
+        if not accounts:
+            return 0
+
+        read_pipe = self.r.pipeline()
+        for account in accounts:
+            read_pipe.hgetall(self.meta_key(account))
+        raw_rows = read_pipe.execute()
+
+        close_rows: list[tuple[str, int]] = []
+        for account, raw_meta in zip(accounts, raw_rows):
+            meta = {self._to_str(k): self._to_str(v) for k, v in raw_meta.items()}
+            if not meta:
+                continue
+            status = str(meta.get("status", "")).strip().lower()
+            tcp_end_ts = self._to_int(meta.get("tcp_end_ts"), 0)
+            ended_ts = self._to_int(meta.get("ended_ts"), 0)
+            if tcp_end_ts > 0 or status == "closed" or ended_ts > 0:
+                continue
+
+            first_ts = (
+                self._to_int(meta.get("tcp_start_ts"), 0)
+                or self._to_int(meta.get("first_ts"), 0)
+                or self._to_int(meta.get("first_packet_ts"), 0)
+            )
+            last_observed_ts = (
+                self._to_int(meta.get("last_packet_ts"), 0)
+                or self._to_int(meta.get("last_ts"), 0)
+                or first_ts
+                or cutoff
+            )
+            close_ts = max(first_ts, min(last_observed_ts, cutoff))
+            close_rows.append((account, close_ts))
+
+        if not close_rows:
+            return 0
+
+        write_pipe = self.r.pipeline()
+        for account, close_ts in close_rows:
+            write_pipe.hset(
+                self.meta_key(account),
+                mapping={
+                    "status": "closed",
+                    "ended_ts": str(close_ts),
+                    "status_source": "runtime_restart_last_packet",
+                },
+            )
+        write_pipe.execute()
+        return len(close_rows)
 
     def list_accounts(self) -> list[dict[str, Any]]:
         raw_accounts = self.r.smembers(self.accounts_key)
@@ -268,30 +360,44 @@ class TcpvEventStore:
         pipe = self.r.pipeline()
         for account in accounts:
             pipe.hgetall(self.meta_key(account))
-        raw_metas = pipe.execute()
+            pipe.xlen(self.stream_key(account))
+        raw_rows = pipe.execute()
 
         items: list[dict[str, Any]] = []
         empty_accounts: list[str] = []
-        for account, raw_meta in zip(accounts, raw_metas):
+        for index, account in enumerate(accounts):
+            raw_meta = raw_rows[index * 2]
+            stream_count = self._to_int(raw_rows[index * 2 + 1], 0)
             if not raw_meta:
                 empty_accounts.append(account)
                 continue
             meta = {self._to_str(k): self._to_str(v) for k, v in raw_meta.items()}
-            first_ts = self._to_int(meta.get("first_ts"), 0)
-            last_ts = self._to_int(meta.get("last_ts"), 0)
-            ended_ts = self._to_int(meta.get("ended_ts"), 0)
+            stored_first_ts = self._to_int(meta.get("first_ts"), 0)
+            stored_last_ts = self._to_int(meta.get("last_ts"), 0)
+            tcp_start_ts = self._to_int(meta.get("tcp_start_ts"), 0)
+            tcp_end_ts = self._to_int(meta.get("tcp_end_ts"), 0)
+            first_packet_ts = self._to_int(meta.get("first_packet_ts"), 0)
+            last_packet_ts = self._to_int(meta.get("last_packet_ts"), 0)
+            first_ts = tcp_start_ts or stored_first_ts or first_packet_ts
+            ended_ts = tcp_end_ts or self._to_int(meta.get("ended_ts"), 0)
+            last_ts = max(stored_last_ts, last_packet_ts, ended_ts)
             total_count = self._to_int(meta.get("total_count"), 0)
             total_bytes = self._to_int(meta.get("total_bytes"), 0)
             first_seq = self._to_int(meta.get("first_seq"), 0)
             last_seq = self._to_int(meta.get("last_seq"), 0)
             trimmed_possible = self._to_int(meta.get("trimmed_possible"), 0) > 0
 
-            # Ignore and prune flows that only called start/end but never emitted packet payload.
-            if total_count <= 0 and total_bytes <= 0:
+            # The full Redis stream is authoritative. A flow is either
+            # complete or absent: never expose a TTL/MAXLEN-truncated prefix.
+            if total_count <= 0 and stream_count > 0:
+                total_count = stream_count
+            if stream_count <= 0 or total_count != stream_count:
                 empty_accounts.append(account)
                 continue
 
             status = str(meta.get("status", "")).strip().lower()
+            if tcp_end_ts > 0:
+                status = "closed"
             if status not in {"open", "closed"}:
                 status = "closed" if ended_ts > 0 else "open"
             if total_bytes <= 0 and total_count > 0:
@@ -310,7 +416,12 @@ class TcpvEventStore:
                     "first_ts": first_ts,
                     "last_ts": last_ts,
                     "ended_ts": ended_ts,
+                    "tcp_start_ts": tcp_start_ts,
+                    "tcp_end_ts": tcp_end_ts,
+                    "first_packet_ts": first_packet_ts,
+                    "last_packet_ts": last_packet_ts,
                     "status": status,
+                    "status_source": meta.get("status_source", ""),
                     "is_open": status == "open",
                     "duration_ms": duration_ms,
                     "total": total_bytes,
@@ -353,8 +464,26 @@ class TcpvEventStore:
         include_analysis: bool = True,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         stream_key = self.stream_key(account)
-        if not include_payload and not include_analysis and self.r.exists(self.compact_stream_key(account)):
-            stream_key = self.compact_stream_key(account)
+        raw_meta = self.r.hgetall(self.meta_key(account))
+        meta = {
+            self._to_str(key): self._to_str(value)
+            for key, value in raw_meta.items()
+        }
+        full_count = self._to_int(self.r.xlen(stream_key), 0)
+        expected_count = self._to_int(
+            meta.get("total_count"),
+            full_count,
+        )
+        if not meta or full_count <= 0 or expected_count != full_count:
+            # TTL expiry and any legacy MAXLEN trimming are resolved at the
+            # flow boundary. Direct API callers also never receive half-flow.
+            self.cleanup_account(account)
+            return [], after_id, False
+        if not include_payload and not include_analysis:
+            compact_key = self.compact_stream_key(account)
+            compact_count = self._to_int(self.r.xlen(compact_key), 0)
+            if compact_count == full_count:
+                stream_key = compact_key
         batch = max(1, min(int(limit), self.api_max_limit))
         min_id = f"({after_id}" if after_id else "-"
 
@@ -529,7 +658,13 @@ class TcpvEventStore:
         }
         self.r.hset(meta_key, mapping=meta_mapping)
         if self.ttl_seconds > 0:
-            self.r.expire(meta_key, self.ttl_seconds)
+            pipe = self.r.pipeline()
+            pipe.expire(self.stream_key(account), self.ttl_seconds)
+            pipe.expire(self.compact_stream_key(account), self.ttl_seconds)
+            pipe.expire(meta_key, self.ttl_seconds)
+            pipe.expire(self.seq_key(account), self.ttl_seconds)
+            pipe.expire(self.accounts_key, self.ttl_seconds)
+            pipe.execute()
         return {"account": account, "events": imported_count, "total_bytes": total_bytes}
 
     def _delete_keys(self, keys: list[str]) -> int:
@@ -599,12 +734,21 @@ class TcpvEventStore:
             if key not in {"pay", "fpay", "bpay", "rpay", "ana"}
         }
         try:
+            pipe = self.r.pipeline()
             if self.stream_maxlen > 0:
-                self.r.xadd(compact_key, compact_fields, id=event_id, maxlen=self.stream_maxlen, approximate=True)
+                pipe.xadd(compact_key, compact_fields, id=event_id, maxlen=self.stream_maxlen, approximate=True)
             else:
-                self.r.xadd(compact_key, compact_fields, id=event_id)
+                pipe.xadd(compact_key, compact_fields, id=event_id)
             if self.ttl_seconds > 0:
-                self.r.expire(compact_key, self.ttl_seconds)
+                # Re-align all flow-key TTLs after the compact row is written.
+                # This makes the final packet timestamp the common retention
+                # deadline even when packet analysis completed asynchronously.
+                pipe.expire(self.stream_key(account), self.ttl_seconds)
+                pipe.expire(compact_key, self.ttl_seconds)
+                pipe.expire(self.meta_key(account), self.ttl_seconds)
+                pipe.expire(self.seq_key(account), self.ttl_seconds)
+                pipe.expire(self.accounts_key, self.ttl_seconds)
+            pipe.execute()
         except redis.ResponseError:
             # Compact rows are an acceleration path only; the full stream is authoritative.
             pass

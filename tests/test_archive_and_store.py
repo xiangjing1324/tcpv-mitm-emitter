@@ -131,6 +131,9 @@ class FakeRedis:
             rows = rows[: int(count)]
         return rows
 
+    def xlen(self, key):
+        return len(self.streams.get(key, []))
+
     def sadd(self, key, value):
         self.sets.setdefault(key, set()).add(value)
         return 1
@@ -214,6 +217,33 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn('`child_synth=${synthCount}`', app_js)
         self.assertIn('"local_semantic_synthesis"', app_js)
         self.assertIn("compactSynthesisInsight(summaryText)", app_js)
+
+    def test_tcpview_frontend_shows_authoritative_tcp_lifecycle_times(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function formatFlowTimestamp(ts)", app_js)
+        self.assertIn("item.tcp_start_ts", app_js)
+        self.assertIn("item.tcp_end_ts", app_js)
+        self.assertIn("tcp_end 已确认", app_js)
+        self.assertIn("未收到 tcp_end", app_js)
+        self.assertIn("开始 ${formatFlowTimestamp(time.firstTs)}", app_js)
+        self.assertIn("结束 ${time.open ? \"进行中\"", app_js)
+        self.assertIn("`${minutes}m ${seconds}s`", app_js)
+        self.assertIn("const DISPLAY_TIME_OFFSET_MS = 8 * 60 * 60 * 1000", app_js)
+        self.assertIn("MITM 重启时按末包收口（未收到 tcp_end）", app_js)
+
+    def test_tcpview_frontend_renders_gcloud_mrpcs_crc_validation_panel(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function buildGcloudValidationPanel(ev)", app_js)
+        self.assertIn("GCloud 验证证据 · MRPCS / CSAce / CRC", app_js)
+        self.assertIn("ZIP blob CRC32", app_js)
+        self.assertIn("AntiData MRPCS #", app_js)
+        self.assertIn("LightFeature envelope", app_js)
+        self.assertIn("Transfer/Ack 边界", app_js)
+        self.assertIn("前面 ${omittedRenderCount} 包未丢失", app_js)
 
     def test_tcpview_frontend_labels_opaque_outer_packets_as_raw(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
@@ -832,6 +862,86 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertFalse(has_more)
         self.assertFalse(accounts[0]["trimmed_possible"])
         self.assertEqual(accounts[0]["last_seq"], 3)
+
+    def test_store_hides_and_removes_packet_trimmed_flow_as_one_unit(self):
+        redis_client = FakeRedis()
+        store = TcpvEventStore(redis_client, "test", ttl_seconds=0, stream_maxlen=2, api_max_limit=10)
+        for idx in range(3):
+            store.append_event("acct", "cid", 0, bytes([idx + 1]), ts_ms=1000 + idx)
+
+        self.assertEqual(redis_client.xlen(store.stream_key("acct")), 2)
+        self.assertEqual(store.list_accounts(), [])
+        self.assertFalse(redis_client.exists(store.stream_key("acct")))
+        self.assertFalse(redis_client.exists(store.meta_key("acct")))
+
+    def test_store_falls_back_to_full_stream_when_compact_is_incomplete(self):
+        redis_client = FakeRedis()
+        store = TcpvEventStore(redis_client, "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        for idx in range(3):
+            store.append_event("acct", "cid", 0, bytes([idx + 1]), ts_ms=1000 + idx)
+        redis_client.streams[store.compact_stream_key("acct")].pop(0)
+
+        events, _last_id, has_more = store.get_events(
+            "acct",
+            limit=10,
+            include_payload=False,
+            include_analysis=False,
+        )
+
+        self.assertEqual([event["seq"] for event in events], [1, 2, 3])
+        self.assertFalse(has_more)
+
+    def test_tcp_end_is_not_reopened_by_late_writer_packet(self):
+        store = TcpvEventStore(FakeRedis(), "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+
+        store.mark_flow_start("acct", "cid", ts_ms=1_000)
+        store.mark_flow_end("acct", "cid", ts_ms=7_000)
+        # This models an event that was queued before tcp_end but whose Redis
+        # write completed afterwards.
+        store.append_event("acct", "cid", 1, b"late", ts_ms=6_000)
+
+        flow = store.list_accounts()[0]
+        self.assertEqual(flow["status"], "closed")
+        self.assertFalse(flow["is_open"])
+        self.assertEqual(flow["status_source"], "tcp_end")
+        self.assertEqual(flow["tcp_start_ts"], 1_000)
+        self.assertEqual(flow["tcp_end_ts"], 7_000)
+        self.assertEqual(flow["first_packet_ts"], 6_000)
+        self.assertEqual(flow["last_packet_ts"], 6_000)
+        self.assertEqual(flow["duration_ms"], 6_000)
+
+    def test_tcp_lifecycle_uses_start_and_end_not_packet_span(self):
+        store = TcpvEventStore(FakeRedis(), "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+
+        store.mark_flow_start("acct", "cid", ts_ms=10_000)
+        store.append_event("acct", "cid", 0, b"request", ts_ms=12_500)
+        store.append_event("acct", "cid", 1, b"response", ts_ms=14_000)
+        store.mark_flow_end("acct", "cid", ts_ms=16_250)
+
+        flow = store.list_accounts()[0]
+        self.assertEqual(flow["first_ts"], 10_000)
+        self.assertEqual(flow["ended_ts"], 16_250)
+        self.assertEqual(flow["first_packet_ts"], 12_500)
+        self.assertEqual(flow["last_packet_ts"], 14_000)
+        self.assertEqual(flow["duration_ms"], 6_250)
+
+    def test_runtime_restart_closes_orphaned_open_flow_at_last_packet(self):
+        store = TcpvEventStore(FakeRedis(), "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+
+        store.mark_flow_start("acct", "cid", ts_ms=10_000)
+        store.append_event("acct", "cid", 0, b"request", ts_ms=12_500)
+        store.append_event("acct", "cid", 1, b"response", ts_ms=14_000)
+
+        closed = store.close_orphaned_open_flows(cutoff_ts_ms=20_000)
+        flow = store.list_accounts()[0]
+
+        self.assertEqual(closed, 1)
+        self.assertEqual(flow["status"], "closed")
+        self.assertFalse(flow["is_open"])
+        self.assertEqual(flow["ended_ts"], 14_000)
+        self.assertEqual(flow["tcp_end_ts"], 0)
+        self.assertEqual(flow["duration_ms"], 4_000)
+        self.assertEqual(flow["status_source"], "runtime_restart_last_packet")
 
     def test_runtime_backfills_old_analysis_even_for_compact_event_lists(self):
         record = _metadata_record(0x0112237A, b"state:00300015,r:0/0/0,p:1/1,0\x00")

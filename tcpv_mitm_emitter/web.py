@@ -192,7 +192,7 @@ INDEX_HTML = """
 
     .flow-cols {
       display: grid;
-      grid-template-columns: minmax(110px, 1fr) 38px 54px 40px;
+      grid-template-columns: minmax(110px, 1fr) 38px 54px 78px;
       gap: 4px;
       padding: 7px 8px;
       border-bottom: 1px solid var(--line);
@@ -217,7 +217,7 @@ INDEX_HTML = """
       font: inherit;
       color: inherit;
       display: grid;
-      grid-template-columns: minmax(110px, 1fr) 38px 54px 40px;
+      grid-template-columns: minmax(110px, 1fr) 38px 54px 78px;
       gap: 4px;
       align-items: center;
       cursor: pointer;
@@ -263,6 +263,17 @@ INDEX_HTML = """
 
     .flow-time-closed {
       color: var(--muted);
+    }
+
+    .render-window-note {
+      margin: 8px 10px;
+      padding: 8px 10px;
+      border: 1px solid color-mix(in srgb, #f59e0b 46%, var(--line));
+      border-radius: 6px;
+      background: color-mix(in srgb, #f59e0b 10%, var(--panel));
+      color: color-mix(in srgb, #f59e0b 72%, var(--text));
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     .badge-tcp {

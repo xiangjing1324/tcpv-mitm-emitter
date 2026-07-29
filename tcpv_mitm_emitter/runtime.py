@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import base64
 import json
+import os
 import queue
 import threading
 import time
@@ -94,6 +95,19 @@ class TcpvRuntime:
                 self.instance_id = requested_instance_id or uuid.uuid4().hex
                 self._cleanup_instance_on_stop = bool(cleanup_on_stop) if cleanup_on_stop is not None else not bool(requested_instance_id)
                 self.store = TcpvEventStore(redis_client=redis_client, instance_id=self.instance_id)
+                runtime_started_ts_ms = int(time.time() * 1000)
+                previous_owner_pid = self.store.runtime_owner_pid()
+                recovered_open_flows = 0
+                if previous_owner_pid != os.getpid():
+                    recovered_open_flows = self.store.close_orphaned_open_flows(
+                        cutoff_ts_ms=runtime_started_ts_ms
+                    )
+                self.store.register_runtime_owner(os.getpid(), runtime_started_ts_ms)
+                if recovered_open_flows:
+                    logger.info(
+                        "closed %s flow(s) orphaned by the previous tcpv runtime at their last packet",
+                        recovered_open_flows,
+                    )
                 self._stop_event.clear()
                 self._drop_before_ts_ms = {}
 
