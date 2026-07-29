@@ -184,7 +184,15 @@ class FakeRedis:
         return deleted
 
     def scan(self, cursor=0, match=None, count=500):
-        return 0, []
+        keys = set(self.values) | set(self.hashes) | set(self.sets) | set(self.streams)
+        if match:
+            pattern = str(match)
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                keys = {key for key in keys if str(key).startswith(prefix)}
+            else:
+                keys = {key for key in keys if str(key) == pattern}
+        return 0, sorted(keys)
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
@@ -925,23 +933,21 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(flow["last_packet_ts"], 14_000)
         self.assertEqual(flow["duration_ms"], 6_250)
 
-    def test_runtime_restart_closes_orphaned_open_flow_at_last_packet(self):
-        store = TcpvEventStore(FakeRedis(), "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+    def test_runtime_restart_cleanup_removes_every_instance_flow_key(self):
+        redis_client = FakeRedis()
+        store = TcpvEventStore(redis_client, "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
 
+        store.register_runtime_owner(100, 9_000)
         store.mark_flow_start("acct", "cid", ts_ms=10_000)
         store.append_event("acct", "cid", 0, b"request", ts_ms=12_500)
-        store.append_event("acct", "cid", 1, b"response", ts_ms=14_000)
 
-        closed = store.close_orphaned_open_flows(cutoff_ts_ms=20_000)
-        flow = store.list_accounts()[0]
+        deleted = store.cleanup_instance()
 
-        self.assertEqual(closed, 1)
-        self.assertEqual(flow["status"], "closed")
-        self.assertFalse(flow["is_open"])
-        self.assertEqual(flow["ended_ts"], 14_000)
-        self.assertEqual(flow["tcp_end_ts"], 0)
-        self.assertEqual(flow["duration_ms"], 4_000)
-        self.assertEqual(flow["status_source"], "runtime_restart_last_packet")
+        self.assertGreaterEqual(deleted, 6)
+        self.assertEqual(store.list_accounts(), [])
+        self.assertEqual(store.runtime_owner_pid(), 0)
+        self.assertFalse(any(key.startswith("tcpv:lifecycle:") for key in redis_client.hashes))
+        self.assertFalse(any(key.startswith("tcpv:lifecycle:") for key in redis_client.streams))
 
     def test_runtime_backfills_old_analysis_even_for_compact_event_lists(self):
         record = _metadata_record(0x0112237A, b"state:00300015,r:0/0/0,p:1/1,0\x00")

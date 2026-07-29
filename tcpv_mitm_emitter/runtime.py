@@ -97,16 +97,17 @@ class TcpvRuntime:
                 self.store = TcpvEventStore(redis_client=redis_client, instance_id=self.instance_id)
                 runtime_started_ts_ms = int(time.time() * 1000)
                 previous_owner_pid = self.store.runtime_owner_pid()
-                recovered_open_flows = 0
+                cleared_runtime_keys = 0
                 if previous_owner_pid != os.getpid():
-                    recovered_open_flows = self.store.close_orphaned_open_flows(
-                        cutoff_ts_ms=runtime_started_ts_ms
-                    )
+                    # A real mitmweb process restart defines a new observation
+                    # window. Keep flows for 24 hours only within one runtime;
+                    # never carry the previous process's list into the new one.
+                    cleared_runtime_keys = self.store.cleanup_instance()
                 self.store.register_runtime_owner(os.getpid(), runtime_started_ts_ms)
-                if recovered_open_flows:
+                if cleared_runtime_keys:
                     logger.info(
-                        "closed %s flow(s) orphaned by the previous tcpv runtime at their last packet",
-                        recovered_open_flows,
+                        "cleared %s tcpv redis key(s) from the previous runtime",
+                        cleared_runtime_keys,
                     )
                 self._stop_event.clear()
                 self._drop_before_ts_ms = {}

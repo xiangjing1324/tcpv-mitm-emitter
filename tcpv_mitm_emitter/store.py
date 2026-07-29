@@ -290,66 +290,6 @@ class TcpvEventStore:
             pipe.expire(self.seq_key(account), self.ttl_seconds)
         pipe.execute()
 
-    def close_orphaned_open_flows(self, cutoff_ts_ms: int | None = None) -> int:
-        """Close flows left open by a previous emitter process.
-
-        A process restart destroys the old TCP sockets even when a stable
-        Redis instance keeps their packet history.  There is no authoritative
-        ``tcp_end`` callback in that case, so close at the last observed packet
-        instead of letting the browser grow the duration until ``Date.now()``.
-        """
-
-        cutoff = int(cutoff_ts_ms or int(time.time() * 1000))
-        accounts = [self._to_str(item) for item in self.r.smembers(self.accounts_key)]
-        if not accounts:
-            return 0
-
-        read_pipe = self.r.pipeline()
-        for account in accounts:
-            read_pipe.hgetall(self.meta_key(account))
-        raw_rows = read_pipe.execute()
-
-        close_rows: list[tuple[str, int]] = []
-        for account, raw_meta in zip(accounts, raw_rows):
-            meta = {self._to_str(k): self._to_str(v) for k, v in raw_meta.items()}
-            if not meta:
-                continue
-            status = str(meta.get("status", "")).strip().lower()
-            tcp_end_ts = self._to_int(meta.get("tcp_end_ts"), 0)
-            ended_ts = self._to_int(meta.get("ended_ts"), 0)
-            if tcp_end_ts > 0 or status == "closed" or ended_ts > 0:
-                continue
-
-            first_ts = (
-                self._to_int(meta.get("tcp_start_ts"), 0)
-                or self._to_int(meta.get("first_ts"), 0)
-                or self._to_int(meta.get("first_packet_ts"), 0)
-            )
-            last_observed_ts = (
-                self._to_int(meta.get("last_packet_ts"), 0)
-                or self._to_int(meta.get("last_ts"), 0)
-                or first_ts
-                or cutoff
-            )
-            close_ts = max(first_ts, min(last_observed_ts, cutoff))
-            close_rows.append((account, close_ts))
-
-        if not close_rows:
-            return 0
-
-        write_pipe = self.r.pipeline()
-        for account, close_ts in close_rows:
-            write_pipe.hset(
-                self.meta_key(account),
-                mapping={
-                    "status": "closed",
-                    "ended_ts": str(close_ts),
-                    "status_source": "runtime_restart_last_packet",
-                },
-            )
-        write_pipe.execute()
-        return len(close_rows)
-
     def list_accounts(self) -> list[dict[str, Any]]:
         raw_accounts = self.r.smembers(self.accounts_key)
         accounts = [self._to_str(item) for item in raw_accounts]
@@ -564,15 +504,17 @@ class TcpvEventStore:
         items.sort(key=lambda x: x["last_ts"], reverse=True)
         return items
 
-    def cleanup_instance(self) -> None:
+    def cleanup_instance(self) -> int:
         cursor = 0
         pattern = self._key("*")
+        deleted = 0
         while True:
             cursor, keys = self.r.scan(cursor=cursor, match=pattern, count=500)
             if keys:
-                self._delete_keys([self._to_str(k) for k in keys])
+                deleted += self._delete_keys([self._to_str(k) for k in keys])
             if cursor == 0:
                 break
+        return deleted
 
     def cleanup_all_instances(self) -> int:
         """Remove every TCPView instance while preserving non-TCPView Redis data."""
