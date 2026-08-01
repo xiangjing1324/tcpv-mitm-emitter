@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tcpv_mitm_emitter.analyzer import TersafeAnalyzer
 from tcpv_mitm_emitter.archive import parse_txt_capture, read_flow_archive_bytes, write_flow_archive
+from tcpv_mitm_emitter.config import runtime_config
 from tcpv_mitm_emitter.runtime import TcpvRuntime
 from tcpv_mitm_emitter.store import TcpvEventStore
 from tcpv_mitm_emitter.semantic import analysis_from_event, analyze_payload, correlate_events
@@ -196,6 +199,24 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
+    def test_web_retention_defaults_to_no_ttl(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            config = runtime_config()
+        self.assertEqual(config["ttl_seconds"], 0)
+
+    def test_web_exposes_cache_only_flow_delete_control(self):
+        root = Path(__file__).parents[1] / "tcpv_mitm_emitter"
+        web_html = (root / "web.py").read_text(encoding="utf-8")
+        api_source = (root / "api.py").read_text(encoding="utf-8")
+        app_js = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="deleteFlowBtn"', web_html)
+        self.assertIn("仅删除 TCPView 中该 flow 的展示记录和 Redis 缓存，不关闭网络连接", web_html)
+        self.assertIn('"scope": "tcpview_cache_only"', api_source)
+        self.assertIn('"connection_action": "none"', api_source)
+        self.assertNotIn("request_proxy_connection_close", api_source)
+        self.assertIn("TCPView 记录和缓存已删除；网络连接未关闭", app_js)
+
     def test_pubgm_0112235b_exposes_only_closed_tail_state_semantics(self):
         alternate = analyze_payload(_pubgm_0112235b_record(), direction=0)
         baseline = analyze_payload(_pubgm_0112235b_record(state=(1, 1, 1)), direction=0)
@@ -237,9 +258,23 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("未收到 tcp_end", app_js)
         self.assertIn("开始 ${formatFlowTimestamp(time.firstTs)}", app_js)
         self.assertIn("结束 ${time.open ? \"进行中\"", app_js)
-        self.assertIn("`${minutes}m ${seconds}s`", app_js)
+        self.assertIn('return "0ms";', app_js)
+        self.assertIn('if (ms < 1000) return `${Math.floor(ms)}ms`;', app_js)
+        self.assertIn('String(hours).padStart(2, "0")', app_js)
+        self.assertIn('String(minutes).padStart(2, "0")', app_js)
+        self.assertIn('String(seconds).padStart(2, "0")', app_js)
+        self.assertIn("font-variant-numeric: tabular-nums", app_js)
+        self.assertIn(".flow-cols > :last-child", app_js)
+        self.assertIn("X-TCPV-Server-Time-Ms", app_js)
+        self.assertIn("Date.now() + Number(state.serverClockOffsetMs || 0)", app_js)
         self.assertIn("const DISPLAY_TIME_OFFSET_MS = 8 * 60 * 60 * 1000", app_js)
         self.assertIn("MITM 重启时按末包收口（未收到 tcp_end）", app_js)
+        self.assertIn("const durationMs = socketTime.durationMs;", app_js)
+        self.assertIn("const open = socketTime.open;", app_js)
+        self.assertNotIn(
+            "const durationMs = pairTime ? pairTime.durationMs : socketTime.durationMs;",
+            app_js,
+        )
 
     def test_tcpview_frontend_renders_gcloud_mrpcs_crc_validation_panel(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
@@ -299,6 +334,15 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("after 来自后端 sent wire", app_js)
         self.assertIn("收到的原始4013 [raw before/full_pay]", app_js)
         self.assertIn("修改后重建4013 [raw after/sent]", app_js)
+        self.assertIn("收到的响应原始4013 [修改前/full_pay]", app_js)
+        self.assertIn("实际发送的响应4013 [修改后/raw_pay]", app_js)
+        self.assertIn("响应解密 [decoded/内层保持]", app_js)
+        self.assertIn("function gcloudSummaryHasSentWireChange", app_js)
+        self.assertIn("wire_header_modified=1|wire_changed=1|report_010a005f=outer_header_only|outer_header_0x15=01->00", app_js)
+        self.assertIn("实际发送修改成功", app_js)
+        self.assertIn("isGcloud65010Summary(summaryText)", app_js)
+        self.assertIn("gcloudSummaryHasSentWireChange(summaryText)", app_js)
+        self.assertIn("rawWireChangedOffsets", app_js)
         self.assertIn("修改后解密 [after/rebuilt]", app_js)
         self.assertIn("forceSideBySideSame: compareRoot", app_js)
         self.assertIn("forceSideBySideSame: hasBefore", app_js)
@@ -871,16 +915,40 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertFalse(accounts[0]["trimmed_possible"])
         self.assertEqual(accounts[0]["last_seq"], 3)
 
-    def test_store_hides_and_removes_packet_trimmed_flow_as_one_unit(self):
+    def test_store_never_deletes_incomplete_flow_from_read_paths(self):
         redis_client = FakeRedis()
         store = TcpvEventStore(redis_client, "test", ttl_seconds=0, stream_maxlen=2, api_max_limit=10)
         for idx in range(3):
             store.append_event("acct", "cid", 0, bytes([idx + 1]), ts_ms=1000 + idx)
 
         self.assertEqual(redis_client.xlen(store.stream_key("acct")), 2)
-        self.assertEqual(store.list_accounts(), [])
-        self.assertFalse(redis_client.exists(store.stream_key("acct")))
-        self.assertFalse(redis_client.exists(store.meta_key("acct")))
+        accounts = store.list_accounts()
+        events, _last_id, has_more = store.get_events("acct", limit=10)
+
+        self.assertEqual(len(accounts), 1)
+        self.assertTrue(accounts[0]["incomplete_possible"])
+        self.assertEqual(accounts[0]["stored_total_count"], 3)
+        self.assertEqual(accounts[0]["stream_count"], 2)
+        self.assertEqual([event["seq"] for event in events], [2, 3])
+        self.assertFalse(has_more)
+        self.assertTrue(redis_client.exists(store.stream_key("acct")))
+        self.assertTrue(redis_client.exists(store.meta_key("acct")))
+
+    def test_empty_started_flow_is_preserved_until_first_packet(self):
+        redis_client = FakeRedis()
+        store = TcpvEventStore(redis_client, "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.mark_flow_start("acct", "cid", ts_ms=1_000)
+
+        accounts = store.list_accounts()
+        events, last_id, has_more = store.get_events("acct", limit=10)
+
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["status_source"], "tcp_start")
+        self.assertEqual(accounts[0]["stream_count"], 0)
+        self.assertEqual(events, [])
+        self.assertIsNone(last_id)
+        self.assertFalse(has_more)
+        self.assertTrue(redis_client.exists(store.meta_key("acct")))
 
     def test_store_falls_back_to_full_stream_when_compact_is_incomplete(self):
         redis_client = FakeRedis()
@@ -932,6 +1000,18 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(flow["first_packet_ts"], 12_500)
         self.assertEqual(flow["last_packet_ts"], 14_000)
         self.assertEqual(flow["duration_ms"], 6_250)
+
+    def test_tcp_lifecycle_prefers_authoritative_mitm_duration(self):
+        store = TcpvEventStore(FakeRedis(), "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+
+        store.mark_flow_start("acct", "cid", ts_ms=10_000)
+        store.append_event("acct", "cid", 0, b"request", ts_ms=10_050)
+        store.mark_flow_end("acct", "cid", ts_ms=10_296, duration_ms=295)
+
+        flow = store.list_accounts()[0]
+        self.assertEqual(flow["tcp_end_ts"], 10_296)
+        self.assertEqual(flow["tcp_duration_ms"], 295)
+        self.assertEqual(flow["duration_ms"], 295)
 
     def test_runtime_restart_cleanup_removes_every_instance_flow_key(self):
         redis_client = FakeRedis()

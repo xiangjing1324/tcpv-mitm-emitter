@@ -181,10 +181,24 @@ export TCPV_ARCHIVE_DIR=~/.tcpv/flows
 export TCPV_TERSAFE_ROOT=/Users/jinger/locaTest   # or /root/Hello on server
 export TCPV_QUEUE_MAXSIZE=100000
 export TCPV_STREAM_MAXLEN=50000                   # 0 disables Redis stream trimming
-export TCPV_TTL_SECONDS=86400                     # 0 disables Redis TTL
+export TCPV_TTL_SECONDS=0                         # default: keep flows until restart/operator action
 export TCPV_MAX_EVENTS_IN_MEMORY=50000
 export TCPV_EVENTS_FETCH_LIMIT=2000
 ```
+
+Web mode does not expire flows automatically. The `POST /flows/clear` action
+deletes only the selected flow's TCPView display rows and Redis cache. It never
+closes the underlying mitmproxy/keyproxy socket; if that socket remains active,
+its next packet starts a fresh TCPView record.
+
+Account and event GET requests are strictly non-destructive. A transient or
+legacy mismatch between flow metadata and Redis stream length is exposed as
+`incomplete_possible`; it is never repaired by deleting the live flow.
+
+Mitmweb restart is the observation boundary: startup clears the previous
+runtime's TCPView Redis keys so the new session starts empty. During a running
+session there is no TTL/MAXLEN/read-triggered cleanup, so each flow remains
+complete until the next explicit restart or operator delete action.
 
 ## Semantic deep report
 

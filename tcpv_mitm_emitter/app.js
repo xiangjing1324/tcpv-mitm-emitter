@@ -36,6 +36,7 @@ const state = {
   gcloud9001PairIndex: null,
   gcloudAceStatsCache: null,
   aceOverviewRefreshTimer: 0,
+  serverClockOffsetMs: 0,
 };
 
 const el = {
@@ -472,6 +473,18 @@ function installFlowListBadgeStyles() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    .flow-cols > :last-child,
+    .flow-time {
+      text-align: right;
+    }
+    .flow-time {
+      white-space: nowrap;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1;
+      font-weight: 600;
+      letter-spacing: 0.02em;
     }
   `;
 }
@@ -1255,10 +1268,17 @@ function getExpectedPreviewWindowLen(ev, previewOffset, previewLen) {
 }
 
 async function apiJson(url) {
+  const requestStartedMs = Date.now();
   const resp = await fetch(url, { cache: "no-store" });
+  const responseReceivedMs = Date.now();
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${body.slice(0, 200)}`);
+  }
+  const serverNowMs = Number(resp.headers.get("X-TCPV-Server-Time-Ms"));
+  if (Number.isFinite(serverNowMs) && serverNowMs > 0) {
+    const localMidpointMs = (requestStartedMs + responseReceivedMs) / 2;
+    state.serverClockOffsetMs = serverNowMs - localMidpointMs;
   }
   return resp.json();
 }
@@ -1653,14 +1673,13 @@ function formatSize(bytes) {
 
 function formatDuration(durationMs) {
   const ms = Number(durationMs || 0);
-  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+  if (ms < 1000) return `${Math.floor(ms)}ms`;
   const sec = Math.floor(ms / 1000);
   const hours = Math.floor(sec / 3600);
   const minutes = Math.floor((sec % 3600) / 60);
   const seconds = sec % 60;
-  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 // TCPView on these servers is operated in China Standard Time.  Do not let
@@ -1724,8 +1743,14 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
   const open = tcpEndTs <= 0 && isFlowOpen(item);
   const recordedEndTs = Math.max(firstTs, open ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs));
   const displayEndTs = open ? Math.max(firstTs, Number(nowMs) || recordedEndTs) : recordedEndTs;
-  const fallbackDuration = Math.max(0, Number(item && item.duration_ms) || 0);
-  const durationMs = firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : fallbackDuration;
+  const durationRaw = Number(item && item.duration_ms);
+  const hasAuthoritativeDuration = Number.isFinite(durationRaw) && durationRaw >= 0;
+  const fallbackDuration = hasAuthoritativeDuration ? durationRaw : 0;
+  const durationMs = open
+    ? (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : fallbackDuration)
+    : (hasAuthoritativeDuration
+      ? fallbackDuration
+      : (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : 0));
   const rawStatusSource = String(item && item.status_source || "").trim();
   const statusSource = tcpEndTs > 0
     ? "tcp_end"
@@ -1928,7 +1953,7 @@ function updateActionButtons() {
 
 function renderFlowList() {
   const rows = state.flows;
-  const nowMs = Date.now();
+  const nowMs = Date.now() + Number(state.serverClockOffsetMs || 0);
   const pairedFlowTime = buildPairedFlowTimeIndex(rows, nowMs);
   el.flowCount.textContent = `${rows.length}`;
   el.flowList.innerHTML = "";
@@ -1976,8 +2001,12 @@ function renderFlowList() {
     const duration = document.createElement("div");
     const socketTime = getFlowTimeInfo(item, nowMs);
     const pairTime = pairedFlowTime.get(flowId);
-    const durationMs = pairTime ? pairTime.durationMs : socketTime.durationMs;
-    const open = pairTime ? pairTime.open : socketTime.open;
+    // The flow row represents this TCP socket, so its primary duration and
+    // open/closed state must come from this socket's tcp_start/tcp_end.  A
+    // paired GCloud/Tersafe overlap is correlation evidence only and remains
+    // available in the tooltip below.
+    const durationMs = socketTime.durationMs;
+    const open = socketTime.open;
     duration.className = `flow-time ${open ? "flow-time-open" : "flow-time-closed"}`;
     duration.textContent = formatDuration(durationMs);
     const socketState = flowLifecycleStateText(socketTime);
@@ -2297,7 +2326,7 @@ async function clearCurrentFlow() {
   } else {
     renderEvents();
   }
-  setStatus("selected flow cleared");
+  setStatus("TCPView 记录和缓存已删除；网络连接未关闭");
 }
 
 async function importFlowFile(file) {
@@ -13163,6 +13192,11 @@ function gcloudSummaryHasBackendRebuild(summaryText) {
   return /payload_modified=1|wire_rebuilt=1|send_chain=replace_4013_plaintext|raw_pay=raw_after_4013|raw_pay_is_sent_wire=1|tcpview_after_source=raw_pay_sent_wire|rewrite_4013_samekey_ace_csob_dfm_patch|relay_4013_ace_csob_dfm_patch/i.test(String(summaryText || ""));
 }
 
+function gcloudSummaryHasSentWireChange(summaryText) {
+  return /wire_header_modified=1|wire_changed=1|report_010a005f=outer_header_only|outer_header_0x15=01->00/i.test(String(summaryText || ""))
+    || gcloudSummaryHasBackendRebuild(summaryText);
+}
+
 function makeGcloudAceCompareStatus(ev, summaryText, beforePayload, payload, beforeVariant, statusOptions = {}) {
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
@@ -14177,7 +14211,11 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const isRequest = Number(ev && ev.dir) === 0;
   const isDecodedRequest = isRequest && isDecodedFlowEvent(ev, summaryText) && (hasFullDump || hasBeforeDump || hasDecodedDump);
   const gcloudWireRebuilt = isGcloudEvent && gcloudSummaryHasBackendRebuild(summaryText);
-  const gcloudWireCompare = gcloudWireRebuilt && hasFullDump && hasRawAfterDump && fullPay !== rawAfterPay;
+  const gcloudSentWireChanged = isGcloudEvent && gcloudSummaryHasSentWireChange(summaryText);
+  const gcloudWireCompare = gcloudSentWireChanged && hasFullDump && hasRawAfterDump && fullPay !== rawAfterPay;
+  const rawWireChangedOffsets = hasFullDump && hasRawAfterDump
+    ? buildChangedOffsetSet(fullPay, rawAfterPay)
+    : null;
   const showRawCompare =
     isDecodedRequest
     && hasFullDump
@@ -14187,6 +14225,27 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
+
+  if (!isRequest && gcloudWireCompare) {
+    const beforeWireBytes = b64ToBytes(fullPay);
+    const afterWireBytes = b64ToBytes(rawAfterPay);
+    const wireDiff = countChangedBytes(beforeWireBytes, afterWireBytes);
+    const changedOffsets = Array.from(rawWireChangedOffsets || []).sort((a, b) => a - b);
+    const changedPreview = changedOffsets.slice(0, 8).map((offset) => {
+      const beforeByte = offset < beforeWireBytes.length ? childHexByteText(beforeWireBytes[offset]) : "--";
+      const afterByte = offset < afterWireBytes.length ? childHexByteText(afterWireBytes[offset]) : "--";
+      return `+${formatHexValue(offset)} ${beforeByte}->${afterByte}`;
+    }).join("，");
+    const proof = document.createElement("div");
+    proof.className = "ace-compare-status ace-compare-status-changed";
+    const proofLabel = document.createElement("strong");
+    proofLabel.textContent = "实际发送修改成功";
+    const proofText = document.createElement("span");
+    proofText.textContent = `收到 full_pay -> 实际发送 raw_pay：变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? `，lenΔ=${wireDiff.lenDelta}` : ""}${changedPreview ? `；${changedPreview}` : ""}`;
+    proof.appendChild(proofLabel);
+    proof.appendChild(proofText);
+    body.appendChild(proof);
+  }
 
 	  if (isDecodedRequest && !isGcloudEvent) {
 	    const timeStrip = buildEventTimestampStrip(summaryText, beforePay, decodedPay);
@@ -14351,6 +14410,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         {
           collapsed: isDecodedRequest,
           foldNote: showRawCompare ? (gcloudWireCompare ? "收到原包" : "修改前") : "raw 参考",
+          changedOffsets: showRawCompare ? rawWireChangedOffsets : null,
         }
       );
     } else {
@@ -14368,6 +14428,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         {
           collapsed: true,
           foldNote: gcloudWireCompare ? "已转发" : "8092 after",
+          changedOffsets: rawWireChangedOffsets,
         }
       );
     }
@@ -14412,6 +14473,26 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         opaqueUndecrypted ? "当前事件没有 pay，无法显示修改后/当前原始封包。" : "当前事件没有 pay，无法显示修改后/当前解密内容。",
         "dump-panel-decoded"
       );
+    }
+  } else if (gcloudWireCompare) {
+    appendDumpSection(
+      "收到的响应原始4013 [修改前/full_pay]",
+      fullPay,
+      ev.full_len,
+      "dump-panel-full",
+      "full",
+      { changedOffsets: rawWireChangedOffsets }
+    );
+    appendDumpSection(
+      "实际发送的响应4013 [修改后/raw_pay]",
+      rawAfterPay,
+      ev.raw_len,
+      "dump-panel-raw-after",
+      "raw_after",
+      { changedOffsets: rawWireChangedOffsets }
+    );
+    if (hasDecodedDump) {
+      appendDumpSection("响应解密 [decoded/内层保持]", decodedPay, ev.len, "dump-panel-decoded", "decoded");
     }
   } else if (hasFullDump && !fullDumpSameAsDecoded) {
     appendDumpSection("响应原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
@@ -14519,9 +14600,17 @@ async function ensureEventPayload(ev, account, eventId) {
   const isRequest = Number(ev.dir) === 0;
   const summaryText = String(ev && ev.summary ? ev.summary : "");
   const needsRawPayload =
-    isRequest
-    && isDecodedFlowEvent(ev, summaryText)
-    && currentFlowLooksLikePort8092(ev, summaryText)
+    (
+      (
+        isRequest
+        && isDecodedFlowEvent(ev, summaryText)
+        && currentFlowLooksLikePort8092(ev, summaryText)
+      )
+      || (
+        isGcloud65010Summary(summaryText)
+        && gcloudSummaryHasSentWireChange(summaryText)
+      )
+    )
     && !String(ev.raw_pay || "")
     && !ev.__tcpvPayloadDetailFetched;
   const needsFullPayload = !String(ev.full_pay || "");

@@ -220,8 +220,11 @@ def create_app(runtime) -> FastAPI:
         }
 
     @app.get("/accounts")
-    def accounts() -> list[dict]:
-        return runtime.get_accounts()
+    def accounts() -> JSONResponse:
+        return JSONResponse(
+            content=runtime.get_accounts(),
+            headers={"X-TCPV-Server-Time-Ms": str(int(time.time() * 1000))},
+        )
 
     @app.get("/events")
     def events(
@@ -278,8 +281,15 @@ def create_app(runtime) -> FastAPI:
 
     @app.post("/flows/clear")
     def clear_flow(account: str = Query(..., min_length=1)) -> dict:
+        # This endpoint owns TCPView data only. It deliberately has no access
+        # to mitmproxy flows or keyproxy's connection-close control plane.
         runtime.clear_account(account=account)
-        return {"ok": True, "account": account}
+        return {
+            "ok": True,
+            "account": account,
+            "scope": "tcpview_cache_only",
+            "connection_action": "none",
+        }
 
     @app.get("/instance")
     def instance() -> dict:

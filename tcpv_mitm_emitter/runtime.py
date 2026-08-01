@@ -100,8 +100,8 @@ class TcpvRuntime:
                 cleared_runtime_keys = 0
                 if previous_owner_pid != os.getpid():
                     # A real mitmweb process restart defines a new observation
-                    # window. Keep flows for 24 hours only within one runtime;
-                    # never carry the previous process's list into the new one.
+                    # window. Runtime GET/list paths never clear a live flow;
+                    # cleanup is confined to this explicit restart boundary.
                     cleared_runtime_keys = self.store.cleanup_instance()
                 self.store.register_runtime_owner(os.getpid(), runtime_started_ts_ms)
                 if cleared_runtime_keys:
@@ -399,6 +399,7 @@ class TcpvRuntime:
         cid: str | None = None,
         proxy_username: str | None = None,
         ts_ms: int | None = None,
+        duration_ms: int | None = None,
     ) -> str:
         if not self.enabled or self.store is None:
             return ""
@@ -425,6 +426,7 @@ class TcpvRuntime:
             cid=cid_value or "",
             proxy_username=proxy_username_value,
             ts_ms=now_ms,
+            duration_ms=duration_ms,
         )
         return account_value
 
@@ -891,6 +893,7 @@ def tcp_end(
     cid: str | None = None,
     proxy_username: str | None = None,
     ts_ms: int | None = None,
+    duration_ms: int | None = None,
 ) -> str:
     """Mark flow as ended in external emitter."""
     return TCPV_RUNTIME.tcp_end(
@@ -899,4 +902,5 @@ def tcp_end(
         cid=cid,
         proxy_username=proxy_username,
         ts_ms=ts_ms,
+        duration_ms=duration_ms,
     )

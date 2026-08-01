@@ -1960,7 +1960,7 @@ INDEX_HTML = """
           <button id="reloadBtn">刷新</button>
           <button id="saveFlowBtn" title="把当前 flow 保存到服务器归档目录">保存</button>
           <button id="exportFlowBtn" title="导出当前 flow 为 .tcpvflow.jsonl.gz">导出</button>
-          <button id="deleteFlowBtn">删除连接</button>
+          <button id="deleteFlowBtn" title="仅删除 TCPView 中该 flow 的展示记录和 Redis 缓存，不关闭网络连接">删除记录</button>
         </div>
       </div>
       <div class="flow-cols">
