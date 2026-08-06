@@ -288,6 +288,28 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("Transfer/Ack 边界", app_js)
         self.assertIn("前面 ${omittedRenderCount} 包未丢失", app_js)
 
+    def test_tcpview_frontend_labels_unknown_uagame_opcode_and_direct_tss_body(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('gcloudOpcode: readSummaryValue(raw, "gcloud_opcode")', app_js)
+        self.assertIn('`UAGame ${formatHexValue(opcode, 8)}`', app_js)
+        self.assertIn('return "UAGame body";', app_js)
+        self.assertIn('directTssRecord ? `UAGame body -> TSS record ${payload.length}B`', app_js)
+        self.assertIn('["ascii_hex", "tss_record"].includes(carrierMode)', app_js)
+        self.assertIn("function gcloudUagame4013Insights(meta, commandName", app_js)
+        self.assertIn('text: "4013 decrypted"', app_js)
+        self.assertIn("所有 opcode 均进入完整 body 展示", app_js)
+        self.assertIn("来自 UAGame 40-byte private header offset 0x04", app_js)
+        self.assertIn('label: "UAGame 4013"', app_js)
+        self.assertIn("function gcloudUagameEnvelopeAnchorText()", app_js)
+        self.assertIn('text: "opcode@+0x04"', app_js)
+        self.assertIn('text: "abab@+0x26"', app_js)
+        self.assertIn('label: "Identity anchor"', app_js)
+        self.assertIn('label: "识别边界"', app_js)
+        self.assertIn('"1.3": "call_id"', app_js)
+        self.assertIn('label: "消息关联 ID"', app_js)
+
     def test_tcpview_frontend_labels_opaque_outer_packets_as_raw(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"
@@ -593,6 +615,86 @@ class ArchiveAndStoreTests(unittest.TestCase):
         upgraded = analysis_from_event(event)
         self.assertEqual(upgraded["packet"]["report_code"], "0x0112237a")
         self.assertEqual(upgraded["packet"]["semantic_label_zh"], "设备型号/系统版本画像")
+
+    def test_authoritative_uagame_body_reparse_keeps_opcode_and_decodes_antidata(self):
+        record = _metadata_record(
+            0x01122388,
+            b"cs:11111111/22222222,ob:58/d4/ffffffff/0/79/1781534846/1781534856/1781534848/1/0/1;"
+            b"\x00state:00300015,r:0/0/0/0,p:21752/21752,0\x00",
+        )
+        provided = {
+            "schema": "tcpv.gcloud.analysis.v1",
+            "analysis_authoritative": True,
+            "generic_semantic_reparse": "uagame_body",
+            "packet": {
+                "report_code": "0x00000000",
+                "report_family": "tgcp_4013",
+                "role": "CSAceSendAntiDataNtf",
+                "semantic_role": "ace_antidata",
+                "semantic_category": "security.ace.antidata",
+                "semantic_label_zh": "ACE AntiData 上报",
+                "shape": {
+                    "transport": "tgcp",
+                    "gcloud_schema": "uagame_binary_v1",
+                    "gcloud_opcode": "0x08100003",
+                    "gcloud_type": "CSAceSendAntiDataNtf",
+                },
+                "children": [],
+                "fields": [],
+            },
+        }
+        event = {
+            "dir": 0,
+            "pay": base64.b64encode(record).decode("ascii"),
+            # These are deliberately not TSS bodies and must not replace pay.
+            "full_pay": base64.b64encode(b"encrypted-tgcp-before").decode("ascii"),
+            "raw_pay": base64.b64encode(b"encrypted-tgcp-after").decode("ascii"),
+            "analysis": provided,
+        }
+
+        analysis = analysis_from_event(event)
+        packet = analysis["packet"]
+        self.assertEqual(analysis["schema"], "tersafe.semantic.v1")
+        self.assertEqual(packet["role"], "CSAceSendAntiDataNtf")
+        self.assertEqual(packet["semantic_role"], "ace_antidata")
+        self.assertEqual(packet["shape"]["gcloud_opcode"], "0x08100003")
+        self.assertEqual(packet["report_code"], "0x01122388")
+        self.assertEqual(packet["body_semantic"]["semantic_role"], "csob_state_snapshot")
+        fields = {item["name"]: item["value"] for item in packet["fields"]}
+        self.assertEqual(fields["state"], "00300015")
+        self.assertEqual(fields["r"], "0/0/0/0")
+        self.assertEqual(fields["p"], "21752/21752,0")
+
+    def test_authoritative_uagame_parent_body_produces_child_nodes(self):
+        child = _metadata_record(0x010A0011, b"child")
+        parent = bytearray(_metadata_record(0x010A001B))
+        parent.extend((1).to_bytes(4, "little"))
+        parent.extend(len(child).to_bytes(4, "little"))
+        parent.extend(child)
+        parent[4:6] = len(parent).to_bytes(2, "big")
+        provided = {
+            "schema": "tcpv.gcloud.analysis.v1",
+            "analysis_authoritative": True,
+            "generic_semantic_reparse": "uagame_body",
+            "packet": {
+                "role": "CSAceSendAntiDataNtf",
+                "semantic_role": "ace_antidata",
+                "shape": {
+                    "gcloud_schema": "uagame_binary_v1",
+                    "gcloud_opcode": "0x08100003",
+                },
+            },
+        }
+        analysis = analysis_from_event(
+            {
+                "dir": 0,
+                "pay": base64.b64encode(bytes(parent)).decode("ascii"),
+                "analysis": provided,
+            }
+        )
+        self.assertEqual(analysis["packet"]["report_code"], "0x010a001b")
+        self.assertEqual(len(analysis["packet"]["children"]), 1)
+        self.assertEqual(analysis["packet"]["children"][0]["report_code"], "0x010a0011")
 
     def test_deep_report_uses_structured_analysis_when_display_is_outer_frame(self):
         decoded = _metadata_record(0x0112237A, b"model:iPhone12,5;ver:26.50\x00")

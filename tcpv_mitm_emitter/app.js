@@ -5142,6 +5142,7 @@ function parseGcloud65010Summary(summaryText = "") {
     gcloudTypeConfidence: readSummaryValue(raw, "gcloud_type_confidence"),
     gcloudTypeBasis: readSummaryValue(raw, "gcloud_type_basis"),
     gcloudSchema: readSummaryValue(raw, "gcloud_schema"),
+    gcloudOpcode: readSummaryValue(raw, "gcloud_opcode"),
     gcloudMessageId: readSummaryValue(raw, "gcloud_message_id"),
     gcloudMessageSeq: readSummaryValue(raw, "gcloud_message_seq"),
     gcloudContext: readSummaryValue(raw, "gcloud_context"),
@@ -5149,6 +5150,64 @@ function parseGcloud65010Summary(summaryText = "") {
     gcloudFocus: readSummaryValue(raw, "gcloud_focus"),
     gcloudProto: readSummaryValue(raw, "gcloud_proto"),
   };
+}
+
+function isUagameGcloudMeta(meta) {
+  if (!meta || typeof meta !== "object") return false;
+  return String(meta.gcloudProto || "").toLowerCase() === "uagame_message"
+    || String(meta.gcloudSchema || "").toLowerCase().startsWith("uagame_");
+}
+
+function gcloudUagameOpcodeDisplay(meta) {
+  if (!isUagameGcloudMeta(meta)) return "";
+  const opcode = parseFlexibleInt(meta.gcloudOpcode);
+  return opcode === null ? "UAGame message" : `UAGame ${formatHexValue(opcode, 8)}`;
+}
+
+function gcloudUagameEnvelopeAnchorText() {
+  return "body_len BE32 @ header+0x00 · opcode BE32 @ header+0x04 · marker abab @ header+0x26 · body @ header+0x28";
+}
+
+function gcloudUagame4013Insights(meta, commandName = "") {
+  if (!isUagameGcloudMeta(meta)) return [];
+  const opcodeDisplay = gcloudUagameOpcodeDisplay(meta);
+  const name = String(commandName || "").trim();
+  const out = [
+    {
+      kind: "gcloud",
+      text: "4013 decrypted",
+      title: "UAGame 20001 · TGCP 4013 已解密；所有 opcode 均进入完整 body 展示。",
+    },
+    {
+      kind: "type",
+      text: opcodeDisplay,
+      title: "来自 UAGame 40-byte private header offset 0x04 的真实 opcode。",
+    },
+    {
+      kind: "gcloud",
+      text: "opcode@+0x04",
+      title: gcloudUagameEnvelopeAnchorText(),
+    },
+    {
+      kind: "gcloud",
+      text: "abab@+0x26",
+      title: "UAGame 自身 40-byte envelope marker；不是从 DFM/Valorant 移植的 marker。",
+    },
+  ];
+  if (name && name !== opcodeDisplay) {
+    out.push({
+      kind: "gcloud",
+      text: name,
+      title: "该名称仅在 UAGame 自身映射已有实证时显示；未知 opcode 不套用其他游戏名称。",
+    });
+  }
+  return out;
+}
+
+function gcloudEventPayloadStatusText(proto, meta) {
+  if (proto && proto.ok) return "protobuf ok";
+  if (isUagameGcloudMeta(meta)) return "UAGame body";
+  return "proto fragment";
 }
 
 function getGcloudPreviewBytes(ev, maxBytes = 384) {
@@ -5799,7 +5858,7 @@ function gcloudProtoFieldAlias(path, node, proto) {
   const key = gcloudPathKey(path);
   const generic = {
     "1": "header",
-    "1.3": "cmd_id",
+    "1.3": "call_id",
     "1.7": "command",
     "1.8": "module",
     "1.9": "language",
@@ -6949,6 +7008,14 @@ function gcloudAceReadableSignals(payload, maxItems = 6) {
 
 function analyzeGcloudAceCarrier(proto, protoBytes) {
   const flat = proto && Array.isArray(proto.flat) ? proto.flat : [];
+  const directTotal = Array.isArray(protoBytes) && protoBytes.length >= 10
+    ? readBe16(protoBytes, 4)
+    : null;
+  const directTssRecord = Array.isArray(protoBytes)
+    && protoBytes.length >= 10
+    && readBe32(protoBytes, 0) === 1
+    && Number.isFinite(directTotal)
+    && Math.abs(Number(directTotal) - protoBytes.length) <= 4;
   const candidates = flat
     .filter((item) => (
       item && item.node && item.node.string
@@ -6956,9 +7023,11 @@ function analyzeGcloudAceCarrier(proto, protoBytes) {
       && gcloudAnalyzeHexString(item.node.string)
     ))
     .sort((left, right) => String(right.node.string || "").length - String(left.node.string || "").length);
-  let sourceNode = candidates.length > 0 ? candidates[0].node : null;
+  let sourceNode = directTssRecord ? null : (candidates.length > 0 ? candidates[0].node : null);
   let hexInfo = sourceNode ? gcloudAnalyzeHexString(sourceNode.string) : null;
-  let payload = hexInfo && Array.isArray(hexInfo.payload) ? hexInfo.payload : [];
+  let payload = directTssRecord
+    ? protoBytes.slice(0, Number(directTotal))
+    : (hexInfo && Array.isArray(hexInfo.payload) ? hexInfo.payload : []);
 
   if (payload.length <= 0) {
     const byteCandidates = flat
@@ -6975,7 +7044,9 @@ function analyzeGcloudAceCarrier(proto, protoBytes) {
     }
   }
 
-  const carrierMode = proto && proto.compression ? "binary_carrier" : (hexInfo ? "ascii_hex" : "binary_carrier");
+  const carrierMode = directTssRecord
+    ? "tss_record"
+    : proto && proto.compression ? "binary_carrier" : (hexInfo ? "ascii_hex" : "binary_carrier");
   const total = payload.length >= 6 ? readBe16(payload, 4) : null;
   const rootReport = payload.length >= 10 && readBe32(payload, 0) === 1
     && Number.isFinite(total) && Math.abs(Number(total) - payload.length) <= 4
@@ -6984,8 +7055,9 @@ function analyzeGcloudAceCarrier(proto, protoBytes) {
   const reportTokens = gcloudAceReportTokens(payload);
   const readable = gcloudAceReadableSignals(payload);
   const carrierChain = [
+    directTssRecord ? `UAGame body -> TSS record ${payload.length}B` : "",
     proto && proto.compression ? `LZ4 解压 ${proto.compression.inputLength}->${proto.compression.outputLength}B` : "",
-    hexInfo ? `ASCII hex -> ${payload.length}B` : payload.length > 0 ? `${payload.length}B binary` : "payload unavailable",
+    directTssRecord ? "" : hexInfo ? `ASCII hex -> ${payload.length}B` : payload.length > 0 ? `${payload.length}B binary` : "payload unavailable",
   ].filter(Boolean).join(" · ");
   return {
     mode: carrierMode,
@@ -6998,7 +7070,7 @@ function analyzeGcloudAceCarrier(proto, protoBytes) {
     readable,
     entropy: payload.length > 0 ? gcloudByteEntropy(payload) : null,
     prefix: payload.length > 0 ? gcloudHexBytes(payload, 16) : "",
-    confidence: rootReport !== null && carrierMode === "ascii_hex"
+    confidence: rootReport !== null && ["ascii_hex", "tss_record"].includes(carrierMode)
       ? "decoded"
       : (hexInfo && hexInfo.profile) || reportTokens.length > 0
         ? "observed"
@@ -7035,6 +7107,7 @@ function gcloudCommandNameForEvent(ev, summaryText = "") {
     if (!value && meta.gcloudInferredType) {
       value = String(meta.gcloudInferredType || "");
     }
+    if (!value) value = gcloudUagameOpcodeDisplay(meta);
   }
   ev.__tcpvGcloudCommandCache = { signature, value };
   return value;
@@ -7270,6 +7343,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       || (proto && proto.commandDisplay)
       || (numeric && numeric.commandName)
       || meta.gcloudInferredType
+      || gcloudUagameOpcodeDisplay(meta)
       || ""
     );
     // 17500 的数字信封没有 CS* 明文命令名。把后端已验证或按端口
@@ -7338,6 +7412,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         ace,
         title: `${ace.label} · ${effectiveCommandDisplay}`,
         chips: [
+          ...(isUagameGcloudMeta(meta) ? ["4013 decrypted", gcloudUagameOpcodeDisplay(meta)] : []),
           ace.label,
           normalizeGcloudDirection(ev, meta),
           numeric ? `msg_id=${formatHexValue(numeric.messageId)}` : "",
@@ -7404,23 +7479,43 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       proto,
       title,
       chips: [
+        ...(isUagameGcloudMeta(meta) ? ["4013 decrypted", gcloudUagameOpcodeDisplay(meta)] : []),
         effectiveCommandDisplay || "4013 decrypted",
         numeric ? `msg_id=${formatHexValue(numeric.messageId)}` : "",
         numeric && Number.isFinite(numeric.messageSeq) ? `msg_seq=${numeric.messageSeq}` : "",
         numeric ? `confidence=${numeric.confidence}` : "",
         meta.gcloudTypeSource ? `type=${meta.gcloudTypeSource}` : "",
         meta.gcloudContext ? `ctx=${meta.gcloudContext}` : "",
-        proto && proto.commandId !== null && proto.commandId !== undefined ? `cmd_id=${formatHexValue(proto.commandId)}` : "",
+        proto && proto.commandId !== null && proto.commandId !== undefined ? `call_id=${formatHexValue(proto.commandId)}` : "",
         proto && proto.module ? `module=${proto.module}` : "",
         proto && proto.language ? proto.language : "",
         compression && compression.kind === "lz4-block" ? "LZ4已解压" : "",
-        proto ? gcloudProtoStatusText(proto) : "",
+        proto ? gcloudEventPayloadStatusText(proto, meta) : (isUagameGcloudMeta(meta) ? "UAGame body" : ""),
       ].filter(Boolean),
       rows: [
+        ...(isUagameGcloudMeta(meta) ? [{
+          label: "UAGame 4013",
+          value: `${gcloudUagameOpcodeDisplay(meta)} · direction=${normalizeGcloudDirection(ev, meta)} · 40-byte header · body=${meta.plainLen ? Math.max(0, Number(meta.plainLen) - 40) : protoBytes.length}B`,
+        }, {
+          label: "Identity anchor",
+          value: gcloudUagameEnvelopeAnchorText(),
+        }, {
+          label: "识别边界",
+          value: "opcode 是 UAGame 消息类型；body 再按 protobuf tree / TSS record / private binary 分层识别，不套用 65010 的 CS* 名称。",
+        }] : []),
         { label: "命令", value: effectiveCommandDisplay || "未从当前 payload/prefix 识别到 CS* 名称" },
+        ...(!isUagameGcloudMeta(meta) && proto && proto.commandId !== null && proto.commandId !== undefined ? [{
+          label: "消息关联 ID",
+          value: `root.1.3=${formatHexValue(proto.commandId)} · 用于请求/响应配对，会随调用变化，不是固定消息类型 ID；类型由 root.1.7 command 确定。`,
+        }] : []),
         ...(numeric ? [{ label: "数字信封", value: `schema=${numeric.schema} msg_id=${formatHexValue(numeric.messageId)} seq=${numeric.messageSeq ?? "-"} basis=${numeric.basis} confidence=${numeric.confidence}` }] : []),
         ...(meta.gcloudContext ? [{ label: "上下文", value: meta.gcloudContext }] : []),
-        { label: "Proto", value: proto ? gcloudProtoStatusText(proto) : "payload 未加载" },
+        {
+          label: isUagameGcloudMeta(meta) ? "Payload" : "Proto",
+          value: proto
+            ? (proto.ok ? gcloudProtoStatusText(proto) : gcloudEventPayloadStatusText(proto, meta))
+            : (isUagameGcloudMeta(meta) ? "UAGame body" : "payload 未加载"),
+        },
         { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${protoBytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
         { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 body (field[2])" },
         ...timeRows,
@@ -7527,6 +7622,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
   if (info.kind === "ace" && info.ace) {
     const ace = info.ace;
     const carrier = ace.carrier || {};
+    out.push(...gcloudUagame4013Insights(info.meta, ace.commandName));
     out.push({ kind: "ace", text: ace.label, title: ace.commandName });
     out.push({ kind: "carrier", text: carrier.mode || "ACE carrier", title: carrier.chain || carrier.mode || "" });
     if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
@@ -7552,6 +7648,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
   const name = String(
     (proto && proto.commandDisplay)
     || gcloudCommandNameForEvent(ev, summaryText)
+    || gcloudUagameOpcodeDisplay(info.meta)
     || ""
   );
   const flow = getCurrentFlowMeta();
@@ -7560,18 +7657,29 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     flow && flow.last_cid,
     summaryText,
   );
-  out.push({
-    kind: "gcloud",
-    text: name || (info.meta && info.meta.commandText ? `${info.meta.commandText} ${info.meta.crypto || ""}`.trim() : `GCloud ${gcloudPort || "TGCP"}`),
-    title: info.meta ? info.meta.raw : "",
-  });
+  const uagameInsights = gcloudUagame4013Insights(info.meta, name);
+  if (uagameInsights.length > 0) {
+    out.push(...uagameInsights);
+  } else {
+    out.push({
+      kind: "gcloud",
+      text: name || (info.meta && info.meta.commandText ? `${info.meta.commandText} ${info.meta.crypto || ""}`.trim() : `GCloud ${gcloudPort || "TGCP"}`),
+      title: info.meta ? info.meta.raw : "",
+    });
+  }
   if (proto) {
     out.push({
       kind: "proto",
-      text: proto.ok ? "protobuf ok" : "proto fragment",
+      text: gcloudEventPayloadStatusText(proto, info.meta),
       title: gcloudProtoStatusText(proto),
     });
     if (proto.module) out.push({ kind: "type", text: proto.module, title: "protobuf field[8] module" });
+  } else if (isUagameGcloudMeta(info.meta)) {
+    out.push({
+      kind: "proto",
+      text: "UAGame body",
+      title: "已按 UAGame 20001 的 40-byte envelope 提取 body；当前 body 不强制假设为 protobuf。",
+    });
   }
   return out.concat(validationInsights);
 }

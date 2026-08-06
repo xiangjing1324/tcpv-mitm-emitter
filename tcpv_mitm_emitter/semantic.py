@@ -405,6 +405,49 @@ def _merge_packet_analysis(provided: dict[str, Any], computed: dict[str, Any]) -
     """
     supplied = copy.deepcopy(provided) if isinstance(provided, dict) else {}
     local = copy.deepcopy(computed) if isinstance(computed, dict) else {}
+    supplied_shape = supplied.get("shape") if isinstance(supplied.get("shape"), dict) else {}
+    is_uagame_body = str(supplied_shape.get("gcloud_schema") or "").startswith("uagame_")
+    if is_uagame_body:
+        # The producer owns the UAGame transport/opcode identity, while this
+        # parser owns the already-extracted body record.  Do not let either
+        # side erase the other: keep the verified opcode/type and overlay only
+        # body-derived report structure, fields, timestamps and child nodes.
+        merged = copy.deepcopy(supplied)
+        for key in (
+            "index",
+            "report_code",
+            "report_family",
+            "dynamic_subtype",
+            "leaf_id",
+            "body_layout",
+            "fields",
+            "timestamps",
+            "children",
+            "parent",
+        ):
+            if key in local:
+                merged[key] = copy.deepcopy(local[key])
+        local_shape = local.get("shape") if isinstance(local.get("shape"), dict) else {}
+        merged_shape = copy.deepcopy(local_shape)
+        merged_shape.update(copy.deepcopy(supplied_shape))
+        merged["shape"] = merged_shape
+        merged["body_semantic"] = {
+            key: copy.deepcopy(local.get(key))
+            for key in (
+                "role",
+                "role_confidence",
+                "semantic_role",
+                "semantic_role_confidence",
+                "semantic_role_evidence",
+                "semantic_category",
+                "semantic_label_zh",
+                "semantic_tier",
+                "semantic_exact_meaning",
+            )
+            if key in local
+        }
+        return merged
+
     supplied_wins = _packet_quality(supplied) > _packet_quality(local)
     primary, secondary = (supplied, local) if supplied_wins else (local, supplied)
     merged = copy.deepcopy(secondary)
@@ -425,6 +468,8 @@ def _merge_packet_analysis(provided: dict[str, Any], computed: dict[str, Any]) -
 
 def analysis_needs_upgrade(analysis: dict[str, Any] | None) -> bool:
     if not isinstance(analysis, dict):
+        return True
+    if analysis.get("generic_semantic_reparse") == "uagame_body":
         return True
     # Producer-owned analyses describe transports that are not TSS records
     # (notably decrypted GCloud protobuf plus encrypted TGCP before/after
@@ -462,6 +507,15 @@ def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
 
     payload = decode("pay")
     before = decode("before_pay")
+    if isinstance(provided, dict) and provided.get("generic_semantic_reparse") == "uagame_body":
+        # raw/full payloads are encrypted TGCP frames for this handoff.  Only
+        # pay is the verified, 40-byte-envelope-stripped UAGame message body.
+        return analyze_payload(
+            payload,
+            direction=int(event.get("dir") or 0),
+            before_payload=before,
+            provided=provided,
+        )
     analysis = provided
     seen: set[bytes] = set()
     for candidate in (payload, before, decode("full_pay"), decode("raw_pay")):
