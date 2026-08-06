@@ -5120,6 +5120,49 @@ function isGcloud65010Summary(summaryText = "") {
     || (/\bcommand=0x(?:1001|1002|4013|9001)\b/i.test(raw) && /\b65010\b|tgcp/i.test(raw));
 }
 
+function isWssJsonSummary(summaryText = "", ev = null) {
+  const raw = String(summaryText || (ev && ev.summary) || "");
+  if (/\btransport=wss_json\b/i.test(raw)) return true;
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  return !!(analysis && analysis.schema === "tcpv.wss_json.analysis.v1");
+}
+
+function getWssJsonAnalysis(ev) {
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  return analysis && analysis.schema === "tcpv.wss_json.analysis.v1" ? analysis : null;
+}
+
+function buildWssSummaryInsights(ev, summaryText = "") {
+  const analysis = getWssJsonAnalysis(ev);
+  const jsonInfo = analysis && analysis.json && typeof analysis.json === "object" ? analysis.json : {};
+  const resource = analysis && analysis.feature_resource && typeof analysis.feature_resource === "object"
+    ? analysis.feature_resource
+    : null;
+  const method = String(jsonInfo.method || readSummaryValue(summaryText, "method") || "WSS JSON");
+  const items = [
+    { kind: "gcloud", text: method, title: "TLS 解密后的 WebSocket JSON method/Method" },
+    { kind: "type", text: Number(ev && ev.dir) === 0 ? "客户端→服务端" : "服务端→客户端" },
+    { kind: "match", text: jsonInfo.valid === false ? "JSON 解析失败" : "JSON 明文" },
+  ];
+  if (resource) {
+    const archive = resource.archive && typeof resource.archive === "object" ? resource.archive : {};
+    items.push({
+      kind: "file",
+      text: resource.feature_name || "ACE feature resource",
+      title: "当前 WSS flow 中观察到的 featureName",
+    });
+    items.push({
+      kind: resource.crc_match === true ? "protect" : "warn",
+      text: `blob CRC32 ${resource.crc_match === true ? "MATCH" : resource.crc_match === false ? "MISMATCH" : "UNKNOWN"}`,
+      title: `${resource.wire_crc32 || "-"} / ${resource.actual_crc32 || "-"}`,
+    });
+    if (archive.valid === true) {
+      items.push({ kind: "child", text: `ZIP entries ${Number(archive.entry_count || 0)}` });
+    }
+  }
+  return items.filter((item) => item && item.text);
+}
+
 function parseGcloud65010Summary(summaryText = "") {
   const raw = String(summaryText || "").trim();
   const commandText = readSummaryValue(raw, "command");
@@ -7877,6 +7920,101 @@ function buildGcloudValidationPanel(ev) {
   return panel;
 }
 
+function buildWssJsonPanel(ev, summaryText = "") {
+  if (!isWssJsonSummary(summaryText, ev)) return null;
+  const analysis = getWssJsonAnalysis(ev);
+  if (!analysis) return null;
+  const transport = analysis.transport && typeof analysis.transport === "object" ? analysis.transport : {};
+  const jsonInfo = analysis.json && typeof analysis.json === "object" ? analysis.json : {};
+  const resource = analysis.feature_resource && typeof analysis.feature_resource === "object"
+    ? analysis.feature_resource
+    : null;
+  const method = String(jsonInfo.method || readSummaryValue(summaryText, "method") || "unknown");
+
+  const panel = document.createElement("section");
+  panel.className = "gcloud-brief gcloud-validation-panel wss-json-panel";
+  const head = document.createElement("div");
+  head.className = "gcloud-head";
+  const title = document.createElement("div");
+  title.className = "gcloud-title";
+  title.textContent = "Lobby WSS JSON · MRPCS / CRC";
+  head.appendChild(title);
+  const chips = document.createElement("div");
+  chips.className = "gcloud-chip-list";
+  const archive = resource && resource.archive && typeof resource.archive === "object" ? resource.archive : {};
+  const chipTexts = [
+    method,
+    Number(ev && ev.dir) === 0 ? "C→S" : "S→C",
+    jsonInfo.valid === true ? "JSON plaintext" : "JSON invalid",
+    resource ? resource.feature_name : "",
+    resource && resource.crc_match === true ? "blob CRC32 MATCH" : "",
+    archive.valid === true ? `ZIP ${Number(archive.entry_count || 0)} entry` : "",
+  ].filter(Boolean);
+  for (const text of chipTexts) {
+    const chip = document.createElement("span");
+    chip.className = "gcloud-chip gcloud-chip-ace";
+    chip.textContent = String(text);
+    chips.appendChild(chip);
+  }
+  head.appendChild(chips);
+  panel.appendChild(head);
+
+  const grid = document.createElement("div");
+  grid.className = "gcloud-kv-grid";
+  appendGcloudKv(
+    grid,
+    "传输边界",
+    `wss:// TLS 在线加密；当前为 mitmproxy 解密后的 payload · app=${transport.application_payload || "unknown"}`,
+  );
+  appendGcloudKv(
+    grid,
+    "WSS 路径",
+    `${transport.host || "-"}${transport.path || "/"} · query_stored=${transport.query_stored === false ? "false" : "unknown"}`,
+  );
+  appendGcloudKv(
+    grid,
+    "JSON 方法",
+    `${jsonInfo.method_key || "method"}=${method} · keys=${Array.isArray(jsonInfo.keys) ? jsonInfo.keys.join(", ") : "-"}`,
+  );
+
+  if (resource) {
+    appendGcloudKv(
+      grid,
+      "ACE featureName",
+      `${resource.feature_name || "-"} · kind=${resource.kind || "ace_feature_resource_push"} · confidence=${resource.confidence || "observed"}`,
+    );
+    appendGcloudKv(
+      grid,
+      "featureData",
+      `Base64=${resource.base64_valid === true ? "valid" : "invalid"} · decoded=${Number(resource.blob_len || 0)}B · sha256=${resource.blob_sha256 || "-"}`,
+    );
+    appendGcloudKv(
+      grid,
+      "dataCRC",
+      `wire=${resource.wire_crc32 || "-"} · actual=${resource.actual_crc32 || "-"} · match=${resource.crc_match === true ? "true" : resource.crc_match === false ? "false" : "unknown"} · scope=${resource.crc_scope || "unresolved"}`,
+    );
+    if (archive.valid === true) {
+      const entries = Array.isArray(archive.entries) ? archive.entries : [];
+      for (const [index, entry] of entries.entries()) {
+        appendGcloudKv(
+          grid,
+          `ZIP entry #${index + 1}`,
+          `${entry.name || "-"} · ${Number(entry.actual_size ?? entry.size ?? 0)}B · wire_crc=${entry.wire_crc32 || "-"} · actual_crc=${entry.actual_crc32 || "-"} · match=${entry.crc_match === true ? "true" : entry.crc_match === false ? "false" : "unknown"} · sha256=${entry.sha256 || "-"}`,
+        );
+      }
+    } else {
+      appendGcloudKv(grid, "ZIP", archive.reason || resource.reason || "not validated");
+    }
+    appendGcloudKv(
+      grid,
+      "跨 flow 边界",
+      "只确认当前 WSS flow 的资源字段；与 65010 LightFeature/MRPCS 仅作同族命名参考，未证明直接关联，也不是解密密钥。",
+    );
+  }
+  panel.appendChild(grid);
+  return panel;
+}
+
 function eventPrefixText(ev) {
   const chunks = [];
   for (const key of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
@@ -8319,10 +8457,13 @@ function buildSummaryInsightStrip(ev, summaryText) {
     ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
   );
   const isGcloud = isGcloud65010Summary(summaryText);
-  if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic && !isGcloud) return null;
+  const isWssJson = isWssJsonSummary(summaryText, ev);
+  if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic && !isGcloud && !isWssJson) return null;
   const candidates = isGcloud
     ? buildGcloudSummaryInsights(ev, summaryText).filter(Boolean)
-    : [
+    : isWssJson
+      ? buildWssSummaryInsights(ev, summaryText).filter(Boolean)
+      : [
       compactOpaqueInsight(summaryText),
       compactSynthesisInsight(summaryText),
       ...compactStructuredSemanticInsights(ev),
@@ -14088,10 +14229,19 @@ function buildEventReadableSummary(ev, summaryText) {
   primary.className = "event-summary-primary";
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
   const isGcloud = isGcloud65010Summary(summaryText);
+  const isWssJson = isWssJsonSummary(summaryText, ev);
   if (isGcloud) {
     for (const item of buildGcloudSummaryInsights(ev, summaryText).slice(0, 6)) {
       const chip = document.createElement("div");
       chip.className = "event-summary-chip event-summary-chip-state";
+      chip.textContent = item.text;
+      chip.title = item.title || item.text;
+      primary.appendChild(chip);
+    }
+  } else if (isWssJson) {
+    for (const item of buildWssSummaryInsights(ev, summaryText).slice(0, 6)) {
+      const chip = document.createElement("div");
+      chip.className = `event-summary-chip event-summary-chip-${item.kind || "info"}`;
       chip.textContent = item.text;
       chip.title = item.title || item.text;
       primary.appendChild(chip);
@@ -14121,7 +14271,7 @@ function buildEventReadableSummary(ev, summaryText) {
       primary.appendChild(chip);
     }
   }
-  if (!isGcloud && items.length > 0) {
+  if (!isGcloud && !isWssJson && items.length > 0) {
     for (const item of items.slice(0, 6)) {
       const chip = document.createElement("div");
       chip.className = `event-summary-chip event-summary-chip-${item.kind || "info"}`;
@@ -14184,6 +14334,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const isGcloudEvent = isGcloud65010Summary(summaryText);
+  const isWssJsonEvent = isWssJsonSummary(summaryText, ev);
   body.appendChild(buildEventReadableSummary(ev, summaryText));
   const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
   if (gcloudPanel) {
@@ -14192,6 +14343,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const gcloudValidationPanel = isGcloudEvent ? buildGcloudValidationPanel(ev) : null;
   if (gcloudValidationPanel) {
     body.appendChild(gcloudValidationPanel);
+  }
+  const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
+  if (wssJsonPanel) {
+    body.appendChild(wssJsonPanel);
   }
   const aceCarrierDeepPanel = isGcloudEvent ? buildGcloudAceCarrierDeepPanel(ev, summaryText) : null;
   if (aceCarrierDeepPanel) {
@@ -14272,7 +14427,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const isRawSource = opaqueUndecrypted || sourceKey === "full" || sourceKey === "raw_after";
     const isDecodedSource = !opaqueUndecrypted && sourceShowsDecodedAsciiRows(sourceKey);
     const showDecodedAsciiRows = false;
-    const enableTersafeAnnotations = !isGcloudEvent;
+    const enableTersafeAnnotations = !isGcloudEvent && !isWssJsonEvent;
     const tailChecksum = enableTersafeAnnotations && isDecodedSource ? findTrailingChecksumCandidate(b64ToBytes(base64Text)) : null;
     const timestampHighlights =
       isRawSource || !enableTersafeAnnotations
@@ -14503,7 +14658,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
   }
 
-  if (!isGcloudEvent && isRequest && (hasBeforeDump || hasDecodedDump)) {
+  if (!isGcloudEvent && isRequest && !isWssJsonEvent && (hasBeforeDump || hasDecodedDump)) {
     const childCompare = buildChildComparePanel(beforePay, decodedPay, summaryText);
     if (childCompare) {
       childCompare.classList.add("child-compare-inline");
@@ -14518,7 +14673,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         body.appendChild(treeRow);
       }
     }
-  } else if (!isGcloudEvent && !isRequest && hasDecodedDump) {
+  } else if (!isGcloudEvent && !isRequest && !isWssJsonEvent && hasDecodedDump) {
     const responseBeforePay = hasBeforeDump ? beforePay : "";
     const childCompare = buildChildComparePanel(responseBeforePay, decodedPay, summaryText);
     if (childCompare) {
@@ -14533,7 +14688,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   }
 
   const analysisGrid = isGcloudEvent ? null : buildEventAnalysisGrid(ev);
-  if (analysisGrid) {
+  if (analysisGrid && !isWssJsonEvent) {
     if (semanticCompareAdded) {
       const details = document.createElement("details");
       details.className = "analysis-debug-details";
