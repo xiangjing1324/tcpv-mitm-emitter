@@ -7,6 +7,7 @@ from .runtime import (
     tcp_end,
     tcp_start,
 )
+from .websocket_semantic import analyze_websocket_payload, format_websocket_summary
 
 __all__ = [
     "TCPV_RUNTIME",
@@ -16,4 +17,6 @@ __all__ = [
     "clear_lobby_account",
     "tcp_start",
     "tcp_end",
+    "analyze_websocket_payload",
+    "format_websocket_summary",
 ]

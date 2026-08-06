@@ -310,6 +310,20 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn('"1.3": "call_id"', app_js)
         self.assertIn('label: "消息关联 ID"', app_js)
 
+    def test_tcpview_frontend_renders_lobby_wss_feature_resource_without_cross_flow_claim(self):
+        app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function isWssJsonSummary", app_js)
+        self.assertIn("function buildWssJsonPanel", app_js)
+        self.assertIn("Lobby WSS JSON · MRPCS / CRC", app_js)
+        self.assertIn("ACE featureName", app_js)
+        self.assertIn("featureData", app_js)
+        self.assertIn("dataCRC", app_js)
+        self.assertIn("跨 flow 边界", app_js)
+        self.assertIn("未证明直接关联，也不是解密密钥", app_js)
+        self.assertIn("!isGcloudEvent && !isWssJsonEvent", app_js)
+
     def test_tcpview_frontend_labels_opaque_outer_packets_as_raw(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"
