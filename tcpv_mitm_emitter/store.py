@@ -445,6 +445,19 @@ class TcpvEventStore:
             if cursor == 0:
                 break
 
+    def cleanup_all_instances(self) -> int:
+        """Remove every TCPView instance while preserving non-TCPView Redis data."""
+
+        cursor = 0
+        deleted = 0
+        while True:
+            cursor, keys = self.r.scan(cursor=cursor, match="tcpv:*", count=500)
+            if keys:
+                deleted += self._delete_keys([self._to_str(key) for key in keys])
+            if cursor == 0:
+                break
+        return deleted
+
     def cleanup_account(self, account: str) -> None:
         if not account:
             return

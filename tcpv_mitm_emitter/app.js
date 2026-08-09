@@ -4881,17 +4881,36 @@ function parseFlexibleInt(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isGcloud65010Summary(summaryText = "") {
+function gcloudAuthoritativeAnalysis(ev) {
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  if (!analysis) return null;
+  return analysis.analysis_authoritative === true
+    && String(analysis.schema || "") === "tcpv.gcloud.analysis.v1"
+    ? analysis
+    : null;
+}
+
+function gcloudProducerTransport(ev) {
+  const analysis = gcloudAuthoritativeAnalysis(ev);
+  return analysis && analysis.transport && typeof analysis.transport === "object"
+    ? analysis.transport
+    : {};
+}
+
+function isGcloud65010Summary(summaryText = "", ev = null) {
   const raw = String(summaryText || "");
-  return /\btransport=tgcp65010\b/i.test(raw)
+  return !!gcloudAuthoritativeAnalysis(ev)
+    || /\btransport=tgcp65010\b/i.test(raw)
     || /\bbeforedump=gcloud_4013\b/i.test(raw)
     || (/\bcommand=0x(?:1001|1002|4013|9001)\b/i.test(raw) && /\b65010\b|tgcp/i.test(raw));
 }
 
-function parseGcloud65010Summary(summaryText = "") {
+function parseGcloud65010Summary(summaryText = "", ev = null) {
   const raw = String(summaryText || "").trim();
   const commandText = readSummaryValue(raw, "command");
-  const command = parseFlexibleInt(commandText);
+  const transport = gcloudProducerTransport(ev);
+  const producerCommandText = String(transport.command || "");
+  const command = parseFlexibleInt(commandText || producerCommandText);
   const lightFeature = readSummaryValue(raw, "ace_light")
     ? {
       evidence: readSummaryValue(raw, "ace_light"),
@@ -4913,17 +4932,170 @@ function parseGcloud65010Summary(summaryText = "") {
     : null;
   return {
     raw,
-    transport: readSummaryValue(raw, "transport") || "tgcp65010",
+    transport: readSummaryValue(raw, "transport") || String(transport.kind || "tgcp65010"),
     command,
-    commandText: command !== null ? formatHexValue(command, 4) : commandText,
-    direction: readSummaryValue(raw, "direction"),
-    seq: readSummaryValue(raw, "seq"),
+    commandText: command !== null ? formatHexValue(command, 4) : (commandText || producerCommandText),
+    direction: readSummaryValue(raw, "direction") || String(transport.direction || ""),
+    seq: readSummaryValue(raw, "seq") || String(transport.sequence ?? ""),
     crypto: readSummaryValue(raw, "crypto"),
     plainLen: readSummaryValue(raw, "plain_len"),
     padding: readSummaryValue(raw, "padding"),
     beforedump: readSummaryValue(raw, "beforedump"),
     lightFeature,
   };
+}
+
+function parseGcloudHandshakeWire(bytes) {
+  const raw = Array.isArray(bytes) ? bytes : [];
+  if (raw.length < 24 || raw[0] !== 0x33 || raw[1] !== 0x66) return null;
+  const command = ((raw[6] & 0xff) << 8) | (raw[7] & 0xff);
+  if (command !== 0x1001 && command !== 0x1002) return null;
+  const headerLen = (
+    ((raw[13] & 0xff) * 0x1000000)
+    + ((raw[14] & 0xff) << 16)
+    + ((raw[15] & 0xff) << 8)
+    + (raw[16] & 0xff)
+  ) >>> 0;
+  const payloadLen = (
+    ((raw[17] & 0xff) * 0x1000000)
+    + ((raw[18] & 0xff) << 16)
+    + ((raw[19] & 0xff) << 8)
+    + (raw[20] & 0xff)
+  ) >>> 0;
+  const method = raw[21] & 0xff;
+  if (method !== 3) {
+    return {
+      command,
+      method,
+      keyLength: null,
+      keyHex: "",
+      headerLen,
+      payloadLen,
+      frameLen: raw.length,
+      valid: true,
+      reason: "non_method3",
+    };
+  }
+  const keyLength = ((raw[22] & 0xff) << 8) | (raw[23] & 0xff);
+  const keyStart = 24;
+  const keyEnd = keyStart + keyLength;
+  const keyInNativeRange = keyLength >= 1 && keyLength <= 64;
+  const keyComplete = keyEnd <= raw.length && keyEnd <= headerLen;
+  const frameBoundaryValid = headerLen >= keyEnd
+    && headerLen <= raw.length
+    && headerLen + payloadLen === raw.length;
+  const keyBytes = keyComplete ? raw.slice(keyStart, keyEnd) : [];
+  return {
+    command,
+    method,
+    keyLength,
+    keyHex: keyBytes.map((byte) => (byte & 0xff).toString(16).padStart(2, "0")).join(""),
+    headerLen,
+    payloadLen,
+    frameLen: raw.length,
+    valid: keyInNativeRange && keyComplete && frameBoundaryValid,
+    keyInNativeRange,
+    keyComplete,
+    frameBoundaryValid,
+    reason: !keyInNativeRange
+      ? "method3_key_length_out_of_range"
+      : !keyComplete
+        ? "method3_key_truncated"
+        : !frameBoundaryValid
+          ? "tgcp_frame_boundary_mismatch"
+          : "native_variable_length_method3",
+  };
+}
+
+function gcloudWireHandshakeEvidence(ev) {
+  const sources = [
+    ["forwarded", "raw_pay"],
+    ["received", "full_pay"],
+    ["current", "pay"],
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const [label, key] of sources) {
+    const encoded = String(ev && ev[key] ? ev[key] : "");
+    if (!encoded || seen.has(encoded)) continue;
+    seen.add(encoded);
+    const parsed = parseGcloudHandshakeWire(b64ToBytes(encoded));
+    if (parsed) out.push({ ...parsed, source: label, sourceField: key });
+  }
+  return out;
+}
+
+function gcloudProducerHandshakeDiagnostics(ev) {
+  const analysis = gcloudAuthoritativeAnalysis(ev) || {};
+  const transport = gcloudProducerTransport(ev);
+  const mitm = analysis.mitm && typeof analysis.mitm === "object" ? analysis.mitm : {};
+  const validation = analysis.validation && typeof analysis.validation === "object" ? analysis.validation : {};
+  const first = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
+  return {
+    command: first(transport.command, mitm.command),
+    direction: first(transport.direction, mitm.direction, analysis.direction),
+    method: first(transport.key_method, mitm.key_method, mitm.method),
+    keyLength: first(transport.key_length, mitm.key_length),
+    headerLen: first(transport.header_len, mitm.header_len),
+    frameLen: first(transport.frame_len, mitm.frame_len),
+    rewriteBefore: first(transport.rewrite_before_length, mitm.rewrite_before_length),
+    rewriteAfter: first(transport.rewrite_after_length, mitm.rewrite_after_length),
+    sessionStage: first(transport.session_stage, mitm.session_stage),
+    keysReady: first(transport.keys_ready, mitm.keys_ready),
+    fallbackReason: first(transport.fallback_reason, mitm.fallback_reason, validation.fallback_reason),
+    handshakeFailedAfterRewrite: first(
+      transport.handshake_failed_after_rewrite,
+      mitm.handshake_failed_after_rewrite,
+      validation.handshake_failed_after_rewrite,
+    ),
+  };
+}
+
+function gcloudHandshakeDiagnosticRows(ev, evidence = null) {
+  const wires = Array.isArray(evidence) ? evidence : gcloudWireHandshakeEvidence(ev);
+  const producer = gcloudProducerHandshakeDiagnostics(ev);
+  const rows = [];
+  const producerCore = [
+    producer.command ? `command=${producer.command}` : "",
+    producer.direction ? `direction=${producer.direction}` : "",
+    producer.method !== undefined ? `method=${producer.method}` : "",
+    producer.keyLength !== undefined ? `key_length=${producer.keyLength}` : "",
+    producer.headerLen !== undefined ? `header_len=${producer.headerLen}` : "",
+    producer.frameLen !== undefined ? `frame_len=${producer.frameLen}` : "",
+  ].filter(Boolean);
+  if (producerCore.length > 0) rows.push({ label: "Producer handshake", value: producerCore.join(" · ") });
+  for (const wire of wires) {
+    const label = wire.source === "received" ? "Wire key (received/original)" : wire.source === "forwarded" ? "Wire key (forwarded)" : "Wire key (current)";
+    if (wire.method === 3) {
+      rows.push({
+        label,
+        value: `method=3 · key_len=${wire.keyLength} · header_len=${wire.headerLen} · frame_len=${wire.frameLen} · valid=${wire.valid ? "yes" : "no"} · key=${wire.keyHex || "<truncated>"}`,
+      });
+    } else {
+      rows.push({ label, value: `method=${wire.method} · header_len=${wire.headerLen} · frame_len=${wire.frameLen}` });
+    }
+  }
+  const rewrite = [
+    producer.rewriteBefore !== undefined ? `before_len=${producer.rewriteBefore}` : "",
+    producer.rewriteAfter !== undefined ? `after_len=${producer.rewriteAfter}` : "",
+  ].filter(Boolean);
+  if (rewrite.length > 0) rows.push({ label: "Rewrite", value: rewrite.join(" · ") });
+  const state = [
+    producer.sessionStage !== undefined ? `session_stage=${producer.sessionStage}` : "",
+    producer.keysReady !== undefined ? `keys_ready=${producer.keysReady}` : "",
+    producer.handshakeFailedAfterRewrite !== undefined
+      ? `handshake_failed_after_rewrite=${producer.handshakeFailedAfterRewrite}`
+      : "",
+  ].filter(Boolean);
+  if (state.length > 0) rows.push({ label: "Session", value: state.join(" · ") });
+  const failure = [
+    producer.fallbackReason ? `fallback_reason=${producer.fallbackReason}` : "",
+    producer.handshakeFailedAfterRewrite === true
+      ? "fail_closed_after_one_sided_rewrite"
+      : "",
+  ].filter(Boolean);
+  if (failure.length > 0) rows.push({ label: "Handshake failure", value: failure.join(" · ") });
+  return rows;
 }
 
 function getGcloudPreviewBytes(ev, maxBytes = 384) {
@@ -5052,8 +5224,8 @@ function getGcloud9001PairIndex() {
   const events = Array.isArray(state.events) ? state.events : [];
   events.forEach((candidate, index) => {
     const summary = String(candidate && candidate.summary ? candidate.summary : "");
-    if (!isGcloud65010Summary(summary)) return;
-    const meta = parseGcloud65010Summary(summary);
+    if (!isGcloud65010Summary(summary, candidate)) return;
+    const meta = parseGcloud65010Summary(summary, candidate);
     if (meta.command !== 0x9001) return;
     const preview = getGcloudPreviewBytes(candidate, 64);
     const frame = parseGcloudTgcpFrame(preview.bytes);
@@ -6757,8 +6929,8 @@ function gcloudCommandNameForEvent(ev, summaryText = "") {
     return ev.__tcpvGcloudCommandCache.value;
   }
   let value = "";
-  if (isGcloud65010Summary(summary)) {
-    const meta = parseGcloud65010Summary(summary);
+  if (isGcloud65010Summary(summary, ev)) {
+    const meta = parseGcloud65010Summary(summary, ev);
     const preview = getGcloudPreviewBytes(ev);
     const frame = parseGcloudTgcpFrame(preview.bytes);
     const command = meta.command !== null ? meta.command : (frame ? frame.command : null);
@@ -6774,13 +6946,13 @@ function gcloudCommandNameForEvent(ev, summaryText = "") {
 function gcloudEventClass(ev) {
   if (!ev || typeof ev !== "object") return "other";
   const summary = String(ev.summary || "");
-  if (!isGcloud65010Summary(summary)) return "other";
+  if (!isGcloud65010Summary(summary, ev)) return "other";
   const name = gcloudCommandNameForEvent(ev, summary);
   const aceKind = gcloudAceCommandKind(name);
   if (aceKind) return aceKind;
   const tssKind = gcloudTssCommandKind(name);
   if (tssKind) return tssKind;
-  const meta = parseGcloud65010Summary(summary);
+  const meta = parseGcloud65010Summary(summary, ev);
   if (meta.command === 0x4013) return "gcloud_4013";
   return "tgcp_control";
 }
@@ -6948,8 +7120,8 @@ function analyzeGcloudGatewayKickCommand(proto, commandName) {
 }
 
 function analyzeGcloudEvent(ev, summaryText = "") {
-  if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return null;
-  const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary));
+  if (!isGcloud65010Summary(summaryText || (ev && ev.summary), ev)) return null;
+  const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary), ev);
   const preview = getGcloudPreviewBytes(ev);
   const bytes = preview.bytes;
   const frame = parseGcloudTgcpFrame(bytes);
@@ -7148,27 +7320,37 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     };
   }
 
+  const handshakeEvidence = gcloudWireHandshakeEvidence(ev);
+  const handshakeRows = gcloudHandshakeDiagnosticRows(ev, handshakeEvidence);
+  const currentHandshake = handshakeEvidence.find((item) => item.source === "forwarded")
+    || handshakeEvidence.find((item) => item.source === "current")
+    || handshakeEvidence[0]
+    || null;
   return {
     kind: "raw",
     meta,
     bytes,
     frame,
+    handshakeEvidence,
     title: command !== null ? `TGCP ${formatHexValue(command, 4)}` : "TGCP 65010",
     chips: [
       command !== null ? formatHexValue(command, 4) : "",
       meta.direction ? `dir=${meta.direction}` : "",
       meta.crypto || "",
+      currentHandshake && currentHandshake.method !== null ? `method=${currentHandshake.method}` : "",
+      currentHandshake && currentHandshake.method === 3 ? `wire key_len=${currentHandshake.keyLength}` : "",
     ].filter(Boolean),
     rows: [
       { label: "说明", value: "当前帧不是已解密的 4013 业务明文，按 TGCP 原始帧观察。" },
       { label: "Header", value: frame ? `header_len=${frame.headerLen ?? "-"} payload_len=${frame.payloadLen ?? "-"}` : "raw preview 未加载" },
+      ...handshakeRows,
     ],
     nodeRows: [],
   };
 }
 
 function buildGcloudSummaryInsights(ev, summaryText = "") {
-  if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return [];
+  if (!isGcloud65010Summary(summaryText || (ev && ev.summary), ev)) return [];
   const info = analyzeGcloudEvent(ev, summaryText);
   if (!info) return [];
   const out = [];
@@ -7896,7 +8078,7 @@ function buildSummaryInsightStrip(ev, summaryText) {
   const hasStructuredSemantic = !!(
     ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
   );
-  const isGcloud = isGcloud65010Summary(summaryText);
+  const isGcloud = isGcloud65010Summary(summaryText, ev);
   if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic && !isGcloud) return null;
   const candidates = isGcloud
     ? buildGcloudSummaryInsights(ev, summaryText).filter(Boolean)
@@ -13666,7 +13848,7 @@ function buildEventReadableSummary(ev, summaryText) {
   const primary = document.createElement("div");
   primary.className = "event-summary-primary";
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
-  const isGcloud = isGcloud65010Summary(summaryText);
+  const isGcloud = isGcloud65010Summary(summaryText, ev);
   if (isGcloud) {
     for (const item of buildGcloudSummaryInsights(ev, summaryText).slice(0, 6)) {
       const chip = document.createElement("div");
@@ -13762,7 +13944,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
 
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
-  const isGcloudEvent = isGcloud65010Summary(summaryText);
+  const isGcloudEvent = isGcloud65010Summary(summaryText, ev);
   body.appendChild(buildEventReadableSummary(ev, summaryText));
   const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
   if (gcloudPanel) {

@@ -426,6 +426,16 @@ def _merge_packet_analysis(provided: dict[str, Any], computed: dict[str, Any]) -
 def analysis_needs_upgrade(analysis: dict[str, Any] | None) -> bool:
     if not isinstance(analysis, dict):
         return True
+    # Producer-owned analyses describe transports that are not TSS records
+    # (notably decrypted GCloud protobuf plus encrypted TGCP before/after
+    # frames).  Re-running the generic TSS parser over those byte arrays is
+    # both expensive and semantically wrong.  The retained payload bytes stay
+    # available to the browser for on-demand rendering and byte diffs.
+    if (
+        analysis.get("analysis_authoritative") is True
+        and str(analysis.get("schema") or "").startswith("tcpv.")
+    ):
+        return False
     if analysis.get("schema") != SCHEMA:
         return True
     try:
@@ -437,6 +447,10 @@ def analysis_needs_upgrade(analysis: dict[str, Any] | None) -> bool:
 
 
 def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
+    provided = event.get("analysis") if isinstance(event.get("analysis"), dict) else None
+    if not analysis_needs_upgrade(provided):
+        return provided
+
     def decode(name: str) -> bytes:
         value = str(event.get(name) or "")
         if not value:
@@ -448,7 +462,6 @@ def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
 
     payload = decode("pay")
     before = decode("before_pay")
-    provided = event.get("analysis") if isinstance(event.get("analysis"), dict) else None
     analysis = provided
     seen: set[bytes] = set()
     for candidate in (payload, before, decode("full_pay"), decode("raw_pay")):

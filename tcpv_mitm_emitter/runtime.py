@@ -30,6 +30,14 @@ def _normalize_instance_id(value: str | None) -> str:
     return safe[:128]
 
 
+def _producer_analysis_is_authoritative(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("analysis_authoritative") is True
+        and str(value.get("schema") or "").startswith("tcpv.")
+    )
+
+
 class TcpvRuntime:
     """Runtime manager for TCP packet event service and async Redis writer."""
 
@@ -56,6 +64,9 @@ class TcpvRuntime:
         self._spooled_count = 0
         self._last_write_error = ""
         self._last_spool_path = ""
+        self._producer_analysis_count = 0
+        self._semantic_parse_count = 0
+        self._semantic_skipped_payload_count = 0
         self._drop_before_ts_ms: dict[str, int] = {}
         self._analyzer = TersafeAnalyzer()
         self._cleanup_instance_on_stop = True
@@ -164,6 +175,9 @@ class TcpvRuntime:
             self._spooled_count = 0
             self._last_write_error = ""
             self._last_spool_path = ""
+            self._producer_analysis_count = 0
+            self._semantic_parse_count = 0
+            self._semantic_skipped_payload_count = 0
             self._drop_before_ts_ms = {}
             self._cleanup_instance_on_stop = True
             self._drain_queue()
@@ -609,6 +623,7 @@ class TcpvRuntime:
             item.get("analysis") if isinstance(item.get("analysis"), dict) else None
         )
         seen: set[bytes] = set()
+        candidates: list[bytes] = []
         for candidate in (
             bytes(item.get("payload") or b""),
             before_payload,
@@ -618,14 +633,22 @@ class TcpvRuntime:
             if not candidate or candidate in seen:
                 continue
             seen.add(candidate)
-            analysis = analyze_payload(
-                candidate,
-                direction=direction,
-                before_payload=before_payload if candidate == bytes(item.get("payload") or b"") else b"",
-                provided=analysis,
-            )
+            candidates.append(candidate)
+        if _producer_analysis_is_authoritative(analysis):
+            self._producer_analysis_count += 1
+            self._semantic_skipped_payload_count += len(candidates)
+        else:
+            for candidate in candidates:
+                analysis = analyze_payload(
+                    candidate,
+                    direction=direction,
+                    before_payload=before_payload if candidate == bytes(item.get("payload") or b"") else b"",
+                    provided=analysis,
+                )
+                self._semantic_parse_count += 1
         if analysis is None:
             analysis = analyze_payload(b"", direction=direction)
+            self._semantic_parse_count += 1
         store.append_event(
             account=item["account"],
             cid=item["cid"],
@@ -705,6 +728,9 @@ class TcpvRuntime:
             "write_error_count": int(self._write_error_count),
             "dropped_count": int(self._dropped_count),
             "spooled_count": int(self._spooled_count),
+            "producer_analysis_count": int(self._producer_analysis_count),
+            "semantic_parse_count": int(self._semantic_parse_count),
+            "semantic_skipped_payload_count": int(self._semantic_skipped_payload_count),
             "last_write_error": self._last_write_error,
             "last_spool_path": self._last_spool_path,
             "stream_maxlen": int(cfg["stream_maxlen"]),
