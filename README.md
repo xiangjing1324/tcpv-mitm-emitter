@@ -214,6 +214,24 @@ the next older page. The first three views omit legacy hex prefix fields;
 focused compatibility checks. Every query is read-only and has explicit event,
 scan, and payload-byte limits.
 
+### Payload encryption/decryption stages
+
+For `view=payload` or `view=full`, `payloads` uses stable stage names instead
+of exposing the internal storage names directly:
+
+| Agent field | Stored field | Meaning |
+| --- | --- | --- |
+| `display` | `pay` | Current TCPView display bytes. When the producer reports `crypto=decrypted`, these are decrypted plaintext/beforedump bytes; for UAGame they may be narrowed to the decoded business body. |
+| `received` | `full_pay` | Complete original bytes received by the producer. For GCloud `0x4013` this is normally the incoming encrypted TGCP frame. |
+| `before` | `before_pay` | Original decrypted plaintext before a verified mutation/rebuild. It is absent on ordinary packets or when the producer did not supply before-state evidence. |
+| `forwarded` | `raw_pay` | Rebuilt/forwarded wire bytes after processing, when supplied. Treat it as proven sent-wire only when the summary/analysis includes `raw_pay_is_sent_wire=1` or equivalent backend evidence. |
+
+Do not infer a missing stage. Use `crypto=decrypted`, `beforedump=...`,
+`payload_modified=1`, `wire_rebuilt=1`, and `raw_pay_is_sent_wire=1` as the
+evidence markers for a packet. For TLS/WSS flows, mitmproxy already terminates
+TLS before TCPView receives the WebSocket payload, so `received` is not
+necessarily the original TLS ciphertext record.
+
 The installed Python client exposes the same contract without hand-building a
 URL:
 
