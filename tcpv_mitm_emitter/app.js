@@ -15,7 +15,7 @@ const state = {
   search: {
     active: false,
     text: "",
-    mode: "preview_contains",
+    mode: "full_contains",
     color: "#ffd166",
     rules: [],
     invalidCount: 0,
@@ -1429,10 +1429,10 @@ function prefetchEventPayload(account, eventId) {
 
 function loadRules() {
   const appliedSearchText = localStorage.getItem("tcpv_applied_rule_prefix") || "";
-  const appliedSearchMode = localStorage.getItem("tcpv_applied_highlight_mode") || "preview_contains";
+  const appliedSearchMode = "full_contains";
   const appliedSearchColor = localStorage.getItem("tcpv_applied_rule_color") || "#ffd166";
   const draftSearchText = localStorage.getItem("tcpv_rule_prefix");
-  const draftSearchMode = localStorage.getItem("tcpv_highlight_mode");
+  const draftSearchMode = "full_contains";
   const draftSearchColor = localStorage.getItem("tcpv_rule_color");
   const appliedFilterDir = localStorage.getItem("tcpv_applied_filter_dir") || "all";
   const appliedFilterMinLen = localStorage.getItem("tcpv_applied_filter_min_len") || "";
@@ -1520,7 +1520,7 @@ function loadRules() {
 function saveRules() {
   localStorage.setItem("tcpv_rule_prefix", (el.prefix.value || "").trim().toLowerCase());
   if (el.highlightMode) {
-    localStorage.setItem("tcpv_highlight_mode", el.highlightMode.value || "preview_contains");
+    localStorage.setItem("tcpv_highlight_mode", el.highlightMode.value || "full_contains");
   }
   localStorage.setItem("tcpv_rule_color", el.color.value);
   if (el.filterDir) {
@@ -1556,7 +1556,7 @@ function saveRules() {
 
 function saveAppliedSearch() {
   localStorage.setItem("tcpv_applied_rule_prefix", state.search.text || "");
-  localStorage.setItem("tcpv_applied_highlight_mode", state.search.mode || "preview_contains");
+  localStorage.setItem("tcpv_applied_highlight_mode", state.search.mode || "full_contains");
   localStorage.setItem("tcpv_applied_rule_color", state.search.color || "#ffd166");
 }
 
@@ -2288,7 +2288,7 @@ async function syncLatestEvents(options = {}) {
   state.loading = true;
 
   try {
-    const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
+    const modeSpec = parseHighlightMode(state.search.mode || "full_contains");
     const needPayloadInList = state.search.active && modeSpec.scope === "full";
     const includeAnalysisInList = false;
     let page = 0;
@@ -3071,7 +3071,7 @@ function parseHighlightMode(rawMode) {
     full_prefix: { key: "full_prefix", scope: "full", mode: "prefix" },
     full_exact: { key: "full_exact", scope: "full", mode: "exact" },
   };
-  return known[mode] || known.preview_contains;
+  return known[mode] || known.full_contains;
 }
 
 function parseHighlightPattern(rawInput) {
@@ -3186,16 +3186,16 @@ function buildAppliedSearchState(rawText, rawMode, rawColor) {
 function updateSearchDraftState() {
   const draft = buildAppliedSearchState(
     el.prefix ? el.prefix.value : "",
-    el.highlightMode ? el.highlightMode.value : "preview_contains",
+    el.highlightMode ? el.highlightMode.value : "full_contains",
     el.color ? el.color.value : "#ffd166",
   );
   if (el.prefix) {
     const invalid = draft.invalidCount > 0;
     el.prefix.classList.toggle("input-invalid", invalid);
     if (invalid) {
-      el.prefix.title = `Invalid rule count=${draft.invalidCount}. Use: 19 00 00 00 xx 00 00 00 00 xx; 33 66@#8ec5ff`;
+      el.prefix.title = "请输入完整的十六进制字节，例如 0a92 或 01 0a 00 13";
     } else {
-      el.prefix.title = "Rule format: pattern; pattern@#RRGGBB. Wildcard: xx/??/**. Press Enter or Search to apply.";
+      el.prefix.title = "搜索当前显示包的前 8KB；空格和 0x 可省略，按 Enter 开始";
     }
   }
   return draft;
@@ -15515,7 +15515,7 @@ async function applySearch(focusFirstHit = true) {
   state.hitCursor = focusFirstHit ? 0 : state.hitCursor;
   state.pendingHitScroll = focusFirstHit;
   saveAppliedSearch();
-  const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
+  const modeSpec = parseHighlightMode(state.search.mode || "full_contains");
   if (state.search.active && modeSpec.scope === "full") {
     state.events = [];
     state.afterId = null;
@@ -15696,7 +15696,7 @@ function renderEvents() {
   el.events.innerHTML = "";
   updateAceFilterUi();
   const hideAscii = el.hideAscii.value === "1";
-  const modeSpec = parseHighlightMode(state.search.mode || "preview_contains");
+  const modeSpec = parseHighlightMode(state.search.mode || "full_contains");
   const expandMode = getExpandMode();
   const highlightRules = state.search.active ? state.search.rules : [];
   const allowExpand = expandMode !== "off";

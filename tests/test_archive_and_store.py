@@ -259,6 +259,20 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn('"local_semantic_synthesis"', app_js)
         self.assertIn("compactSynthesisInsight(summaryText)", app_js)
 
+    def test_tcpview_frontend_uses_simple_current_payload_search(self):
+        root = Path(__file__).parents[1] / "tcpv_mitm_emitter"
+        web_html = (root / "web.py").read_text(encoding="utf-8")
+        app_js = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("搜索当前显示包：输入十六进制", web_html)
+        self.assertIn('id="highlightMode" type="hidden" value="full_contains"', web_html)
+        self.assertIn('id="ruleColor" type="hidden"', web_html)
+        self.assertIn("最多扫描每包前 8KB", web_html)
+        self.assertNotIn("xx通配；用;分多条", web_html)
+        self.assertNotIn("每条可加颜色", web_html)
+        self.assertIn('mode: "full_contains"', app_js)
+        self.assertIn('return known[mode] || known.full_contains;', app_js)
+
     def test_tcpview_frontend_shows_authoritative_tcp_lifecycle_times(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"

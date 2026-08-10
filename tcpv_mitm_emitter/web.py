@@ -2034,24 +2034,17 @@ INDEX_HTML = """
         </select>
       </div>
       <div class="filterbar">
-        <input id="prefixRule" list="ruleExamples" placeholder="输入十六进制规则：xx通配；用;分多条" />
+        <input id="prefixRule" list="ruleExamples" placeholder="搜索当前显示包：输入十六进制，如 0a92 或 3366" />
         <datalist id="ruleExamples">
           <option value="0a 92"></option>
-          <option value="19 00 00 00 xx 00 00 00 00 xx"></option>
-          <option value="33 66 00 0b@#8ec5ff; 40 13 xx 00@#ffd166"></option>
+          <option value="33 66 00 0b"></option>
+          <option value="01 0a 00 13"></option>
         </datalist>
-        <select id="highlightMode" title="Highlight mode and match scope.">
-          <option value="preview_contains">Preview 包含 (推荐)</option>
-          <option value="preview_prefix">Preview 前缀</option>
-          <option value="preview_exact">Preview 完全</option>
-          <option value="full_contains">全包 包含 (8KB)</option>
-          <option value="full_prefix">全包 前缀 (8KB)</option>
-          <option value="full_exact">全包 完全 (8KB)</option>
-        </select>
-        <input id="ruleColor" type="color" value="#ffd166" />
-        <button id="searchApplyBtn" title="Apply highlight search.">搜索</button>
-        <button id="searchPrevBtn" title="Jump to previous hit.">上一个</button>
-        <button id="searchNextBtn" title="Jump to next hit.">下一个</button>
+        <input id="highlightMode" type="hidden" value="full_contains" />
+        <input id="ruleColor" type="hidden" value="#ffd166" />
+        <button id="searchApplyBtn" title="搜索当前显示包">搜索</button>
+        <button id="searchPrevBtn" title="跳到上一个命中包">上一个</button>
+        <button id="searchNextBtn" title="跳到下一个命中包">下一个</button>
         <div id="searchHitStat" class="tool-stat" title="current hit / total hit">--/--</div>
         <select id="filterDir" title="Filter by request or response direction.">
           <option value="all">全部方向</option>
@@ -2067,7 +2060,7 @@ INDEX_HTML = """
         <button id="filterApplyBtn" title="Apply current filters.">过滤</button>
         <button id="filterClearBtn" title="Clear all filters.">清空</button>
       </div>
-      <div class="rule-guide">高亮规则: 16进制 + xx通配, 多规则用 ';', 每条可加颜色 '@#RRGGBB'。输入后点 Search 或按 Enter；Prev/Next 跳命中。Filter 可叠加方向 + 长度范围。ofs 可平移预览窗口做纵向对比。展开体会额外显示解密概览、字符串段和 XOR 猜测。</div>
+      <div class="rule-guide">搜索当前显示包（解密成功时就是解密后的内容）：输入一段十六进制，空格和 0x 可省略，按 Enter 搜索；最多扫描每包前 8KB。方向和长度可继续过滤。</div>
       <div class="status" id="status">__STATUS_BOOT__</div>
       <div id="events">__INITIAL_EVENTS__</div>
     </section>
