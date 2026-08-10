@@ -209,8 +209,10 @@ curl -fsS -G \
 Views are `compact`, `analysis`, `payload`, and `full`. Filters include
 `flow`, `flow_q`, `q`, `summary`, `cid`, `status`, `source_port`, `since`,
 `until`, `direction`, `min_len`, and `max_len`. Follow `cursor.next` to request
-the next older page. Every query is read-only and has explicit event, scan, and
-payload-byte limits.
+the next older page. The first three views omit legacy hex prefix fields;
+`payload` returns only the requested byte cap, while `full` keeps prefixes for
+focused compatibility checks. Every query is read-only and has explicit event,
+scan, and payload-byte limits.
 
 The installed Python client exposes the same contract without hand-building a
 URL:
