@@ -1708,18 +1708,47 @@ function formatFlowTimestamp(ts) {
   return `${formatTs(value)}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
-function isFlowOpen(item) {
+// TCPV_RECENT_FLOW_ACTIVITY_V1: blue means packets were seen recently.
+const FLOW_POST_CLOSE_ACTIVITY_GRACE_MS = 5 * 1000;
+const FLOW_ACTIVITY_FRESH_MS = 90 * 1000;
+
+function getFlowPacketActivity(item, nowMs = Date.now()) {
+  const lastPacketRaw = Number(item && (item.last_packet_ts || item.last_ts));
+  const lastPacketTs = Number.isFinite(lastPacketRaw) && lastPacketRaw > 0 ? lastPacketRaw : 0;
+  const tcpEndRaw = Number(item && item.tcp_end_ts);
+  const tcpEndTs = Number.isFinite(tcpEndRaw) && tcpEndRaw > 0 ? tcpEndRaw : 0;
+  const idleMs = lastPacketTs > 0 ? Math.max(0, Number(nowMs) - lastPacketTs) : Number.POSITIVE_INFINITY;
+  return {
+    lastPacketTs,
+    tcpEndTs,
+    idleMs,
+    fresh: lastPacketTs > 0 && idleMs <= FLOW_ACTIVITY_FRESH_MS,
+    postClose: tcpEndTs > 0 && lastPacketTs > tcpEndTs + FLOW_POST_CLOSE_ACTIVITY_GRACE_MS,
+  };
+}
+
+function isFlowOpen(item, nowMs = Date.now()) {
   if (!item || typeof item !== "object") return false;
-  const tcpEndTs = Number(item.tcp_end_ts || 0);
-  if (Number.isFinite(tcpEndTs) && tcpEndTs > 0) return false;
+  const activity = getFlowPacketActivity(item, nowMs);
+  // A reused flow id may keep an old tcp_end while a new socket is actively
+  // appending packets.  Treat it as active only while those writes are fresh;
+  // the grace window excludes normal background-writer tail packets.
+  if (activity.tcpEndTs > 0) return activity.postClose && activity.fresh;
+  let lifecycleOpen = false;
   if (typeof item.is_open === "boolean") {
-    return item.is_open;
+    lifecycleOpen = item.is_open;
+  } else {
+    const status = String(item.status || "").trim().toLowerCase();
+    if (status === "open") lifecycleOpen = true;
+    else if (status === "closed") lifecycleOpen = false;
+    else {
+      const endedTs = Number(item.ended_ts || 0);
+      lifecycleOpen = !Number.isFinite(endedTs) || endedTs <= 0;
+    }
   }
-  const status = String(item.status || "").trim().toLowerCase();
-  if (status === "open") return true;
-  if (status === "closed") return false;
-  const endedTs = Number(item.ended_ts || 0);
-  return !Number.isFinite(endedTs) || endedTs <= 0;
+  // A missing close event must not leave a ghost row blue forever.  If there
+  // is packet history, blue is reserved for activity within the last 90s.
+  return lifecycleOpen && (activity.lastPacketTs <= 0 || activity.fresh);
 }
 
 const FLOW_PAIR_START_GAP_MS = 15 * 1000;
@@ -1732,30 +1761,41 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
   const firstRaw = Number(item && (item.first_ts || item.last_ts));
   const legacyFirstTs = Number.isFinite(firstRaw) && firstRaw > 0 ? firstRaw : 0;
   const firstTs = tcpStartTs || legacyFirstTs || firstPacketTs;
-  const lastPacketRaw = Number(item && item.last_packet_ts);
-  const lastPacketTs = Number.isFinite(lastPacketRaw) && lastPacketRaw > 0 ? lastPacketRaw : 0;
+  const activity = getFlowPacketActivity(item, nowMs);
+  const lastPacketTs = activity.lastPacketTs;
   const lastRaw = Number(item && item.last_ts);
   const lastTs = Number.isFinite(lastRaw) && lastRaw > 0 ? lastRaw : firstTs;
-  const tcpEndRaw = Number(item && item.tcp_end_ts);
-  const tcpEndTs = Number.isFinite(tcpEndRaw) && tcpEndRaw > 0 ? tcpEndRaw : 0;
+  const tcpEndTs = activity.tcpEndTs;
   const endedRaw = Number(item && item.ended_ts);
   const endedTs = Number.isFinite(endedRaw) && endedRaw > 0 ? endedRaw : 0;
-  const open = tcpEndTs <= 0 && isFlowOpen(item);
-  const recordedEndTs = Math.max(firstTs, open ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs));
+  const open = isFlowOpen(item, nowMs);
+  const reopenedByActivity = open && activity.postClose;
+  const lifecycleSaysOpen = tcpEndTs <= 0 && (
+    item && (item.is_open === true || String(item.status || "").trim().toLowerCase() === "open")
+  );
+  const staleOpen = lifecycleSaysOpen && !open && activity.lastPacketTs > 0 && !activity.fresh;
+  const recordedEndTs = Math.max(
+    firstTs,
+    open ? (lastPacketTs || lastTs) : (reopenedByActivity ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs)),
+  );
   const displayEndTs = open ? Math.max(firstTs, Number(nowMs) || recordedEndTs) : recordedEndTs;
   const durationRaw = Number(item && item.duration_ms);
   const hasAuthoritativeDuration = Number.isFinite(durationRaw) && durationRaw >= 0;
   const fallbackDuration = hasAuthoritativeDuration ? durationRaw : 0;
   const durationMs = open
     ? (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : fallbackDuration)
-    : (hasAuthoritativeDuration
-      ? fallbackDuration
-      : (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : 0));
+    : (staleOpen && firstTs > 0
+      ? Math.max(recordedEndTs - firstTs, 0)
+      : (hasAuthoritativeDuration
+        ? fallbackDuration
+        : (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : 0)));
   const rawStatusSource = String(item && item.status_source || "").trim();
-  const statusSource = tcpEndTs > 0
-    ? "tcp_end"
-    : (!open && rawStatusSource) ? rawStatusSource
-      : tcpStartTs > 0 ? "tcp_start" : (rawStatusSource || "legacy");
+  const statusSource = reopenedByActivity
+    ? "post_tcp_end_activity"
+    : staleOpen ? "recent_activity_timeout"
+      : tcpEndTs > 0 ? "tcp_end"
+        : (!open && rawStatusSource) ? rawStatusSource
+          : tcpStartTs > 0 ? "tcp_start" : (rawStatusSource || "legacy");
   return {
     firstTs,
     recordedEndTs,
@@ -1767,12 +1807,20 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
     firstPacketTs,
     lastPacketTs,
     statusSource,
+    idleMs: activity.idleMs,
+    reopenedByActivity,
   };
 }
 
 function flowLifecycleStateText(time) {
-  if (time && time.open) return "仍连接（未收到 tcp_end）";
   const source = String(time && time.statusSource || "");
+  if (source === "post_tcp_end_activity") {
+    return "正在写入（旧 tcp_end 后仍收到新包）";
+  }
+  if (time && time.open) return "活跃（90秒内收到数据）";
+  if (source === "recent_activity_timeout") {
+    return "超过90秒没有新包，按非活跃显示";
+  }
   if (source === "tcp_end") return "tcp_end 已确认";
   if (source === "runtime_restart_last_packet") {
     return "MITM 重启时按末包收口（未收到 tcp_end）";
@@ -2055,9 +2103,33 @@ function resetEventStateForFlowChange() {
   clearPayloadCache();
 }
 
+// TCPV_LATEST_EVENT_CID_V1: aggregate rows use the newest event CID.
+async function hydrateAggregateFlowLatestCids(rows) {
+  const items = Array.isArray(rows) ? rows : [];
+  return Promise.all(items.map(async (item) => {
+    const flowId = String(item && item.account || "").trim();
+    const proxyUsername = String(item && item.proxy_username || "").trim();
+    // UUID socket rows already own an unambiguous CID.  Only legacy aggregate
+    // ids shared with the KeyProxy username need the extra read-only lookup.
+    if (!flowId || !proxyUsername || flowId !== proxyUsername) return item;
+    try {
+      const connections = await apiJson(
+        `/connections?account=${encodeURIComponent(flowId)}&recent=1`,
+      );
+      const latestCid = String(
+        Array.isArray(connections) && connections[0] && connections[0].cid || "",
+      ).trim();
+      if (!latestCid || latestCid === String(item.last_cid || "")) return item;
+      return { ...item, last_cid: latestCid, last_cid_source: "latest_stream_event" };
+    } catch (_error) {
+      return item;
+    }
+  }));
+}
+
 async function loadFlows(resetSelection = false, preferredFlowId = "") {
   const raw = await apiJson("/accounts");
-  const data = normalizeAccounts(raw);
+  const data = await hydrateAggregateFlowLatestCids(normalizeAccounts(raw));
   state.allFlows = data;
   const visible = data;
   const prev = state.flowId;
@@ -5113,9 +5185,26 @@ function parseFlexibleInt(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isGcloud65010Summary(summaryText = "") {
+function gcloudAuthoritativeAnalysis(ev) {
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  if (!analysis) return null;
+  return analysis.analysis_authoritative === true
+    && String(analysis.schema || "") === "tcpv.gcloud.analysis.v1"
+    ? analysis
+    : null;
+}
+
+function gcloudProducerTransport(ev) {
+  const analysis = gcloudAuthoritativeAnalysis(ev);
+  return analysis && analysis.transport && typeof analysis.transport === "object"
+    ? analysis.transport
+    : {};
+}
+
+function isGcloud65010Summary(summaryText = "", ev = null) {
   const raw = String(summaryText || "");
-  return /\btransport=tgcp65010\b/i.test(raw)
+  return !!gcloudAuthoritativeAnalysis(ev)
+    || /\btransport=tgcp65010\b/i.test(raw)
     || /\bbeforedump=gcloud_4013\b/i.test(raw)
     || (/\bcommand=0x(?:1001|1002|4013|9001)\b/i.test(raw) && /\b65010\b|tgcp/i.test(raw));
 }
@@ -5163,18 +5252,20 @@ function buildWssSummaryInsights(ev, summaryText = "") {
   return items.filter((item) => item && item.text);
 }
 
-function parseGcloud65010Summary(summaryText = "") {
+function parseGcloud65010Summary(summaryText = "", ev = null) {
   const raw = String(summaryText || "").trim();
   const commandText = readSummaryValue(raw, "command");
-  const command = parseFlexibleInt(commandText);
+  const producerTransport = gcloudProducerTransport(ev);
+  const producerCommandText = String(producerTransport.command || "");
+  const command = parseFlexibleInt(commandText || producerCommandText);
   return {
     raw,
-    transport: readSummaryValue(raw, "transport") || "tgcp65010",
+    transport: readSummaryValue(raw, "transport") || String(producerTransport.kind || "tgcp65010"),
     targetPort: readSummaryValue(raw, "target_port"),
     command,
-    commandText: command !== null ? formatHexValue(command, 4) : commandText,
-    direction: readSummaryValue(raw, "direction"),
-    seq: readSummaryValue(raw, "seq"),
+    commandText: command !== null ? formatHexValue(command, 4) : (commandText || producerCommandText),
+    direction: readSummaryValue(raw, "direction") || String(producerTransport.direction || ""),
+    seq: readSummaryValue(raw, "seq") || String(producerTransport.sequence ?? ""),
     crypto: readSummaryValue(raw, "crypto"),
     plainLen: readSummaryValue(raw, "plain_len"),
     padding: readSummaryValue(raw, "padding"),
@@ -5197,14 +5288,18 @@ function parseGcloud65010Summary(summaryText = "") {
 
 function isUagameGcloudMeta(meta) {
   if (!meta || typeof meta !== "object") return false;
-  return String(meta.gcloudProto || "").toLowerCase() === "uagame_message"
+  return String(meta.gcloudProto || "").toLowerCase().startsWith("uagame_")
     || String(meta.gcloudSchema || "").toLowerCase().startsWith("uagame_");
+}
+
+function isUagamePrivateFragmentMeta(meta) {
+  return String(meta && meta.gcloudProto || "").toLowerCase() === "uagame_private_frame";
 }
 
 function gcloudUagameOpcodeDisplay(meta) {
   if (!isUagameGcloudMeta(meta)) return "";
   const opcode = parseFlexibleInt(meta.gcloudOpcode);
-  return opcode === null ? "UAGame message" : `UAGame ${formatHexValue(opcode, 8)}`;
+  return opcode === null ? "" : `UAGame ${formatHexValue(opcode, 8)}`;
 }
 
 function gcloudUagameEnvelopeAnchorText() {
@@ -5212,45 +5307,193 @@ function gcloudUagameEnvelopeAnchorText() {
 }
 
 function gcloudUagame4013Insights(meta, commandName = "") {
-  if (!isUagameGcloudMeta(meta)) return [];
+  if (!isUagameGcloudMeta(meta) || isUagamePrivateFragmentMeta(meta)) return [];
   const opcodeDisplay = gcloudUagameOpcodeDisplay(meta);
   const name = String(commandName || "").trim();
-  const out = [
-    {
-      kind: "gcloud",
-      text: "4013 decrypted",
-      title: "UAGame 20001 · TGCP 4013 已解密；所有 opcode 均进入完整 body 展示。",
-    },
-    {
-      kind: "type",
-      text: opcodeDisplay,
-      title: "来自 UAGame 40-byte private header offset 0x04 的真实 opcode。",
-    },
-    {
-      kind: "gcloud",
-      text: "opcode@+0x04",
-      title: gcloudUagameEnvelopeAnchorText(),
-    },
-    {
-      kind: "gcloud",
-      text: "abab@+0x26",
-      title: "UAGame 自身 40-byte envelope marker；不是从 DFM/Valorant 移植的 marker。",
-    },
-  ];
-  if (name && name !== opcodeDisplay) {
-    out.push({
-      kind: "gcloud",
-      text: name,
-      title: "该名称仅在 UAGame 自身映射已有实证时显示；未知 opcode 不套用其他游戏名称。",
-    });
-  }
-  return out;
+  const label = name && name !== opcodeDisplay
+    ? name
+    : opcodeDisplay.replace(/^UAGame\s+/i, "");
+  if (!label) return [];
+  return [{
+    kind: name && name !== opcodeDisplay ? "gcloud" : "type",
+    text: label,
+    title: `${opcodeDisplay || "UAGame 20001"} · 4013 decrypted · ${gcloudUagameEnvelopeAnchorText()}`,
+  }];
 }
 
 function gcloudEventPayloadStatusText(proto, meta) {
   if (proto && proto.ok) return "protobuf ok";
+  if (isUagamePrivateFragmentMeta(meta)) return "private fragment";
   if (isUagameGcloudMeta(meta)) return "UAGame body";
   return "proto fragment";
+}
+
+function analyzeUagamePrivateFragment(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const markerOffsets = [];
+  for (let index = 0; index + 1 < bytes.length; index += 1) {
+    if (bytes[index] === 0xab && bytes[index + 1] === 0xab) markerOffsets.push(index);
+    if (markerOffsets.length >= 4) break;
+  }
+  const markerOffset = markerOffsets.length > 0 ? markerOffsets[0] : null;
+  const prefix = bytes.slice(0, 4).map(childHexByteText).join("");
+  const family = prefix.startsWith("f402") ? "f4" : prefix.startsWith("f802") ? "f8" : "private";
+  const payloadStart = markerOffset === null ? null : markerOffset + 2;
+  const payloadPrefix = payloadStart === null ? "" : gcloudHexBytes(bytes.slice(payloadStart, payloadStart + 16), 16);
+  return { family, prefix, markerOffset, markerOffsets, payloadStart, payloadPrefix, totalLen: bytes.length };
+}
+
+function parseGcloudHandshakeWire(bytes) {
+  const raw = Array.isArray(bytes) ? bytes : [];
+  if (raw.length < 24 || raw[0] !== 0x33 || raw[1] !== 0x66) return null;
+  const command = ((raw[6] & 0xff) << 8) | (raw[7] & 0xff);
+  if (command !== 0x1001 && command !== 0x1002) return null;
+  const headerLen = (
+    ((raw[13] & 0xff) * 0x1000000)
+    + ((raw[14] & 0xff) << 16)
+    + ((raw[15] & 0xff) << 8)
+    + (raw[16] & 0xff)
+  ) >>> 0;
+  const payloadLen = (
+    ((raw[17] & 0xff) * 0x1000000)
+    + ((raw[18] & 0xff) << 16)
+    + ((raw[19] & 0xff) << 8)
+    + (raw[20] & 0xff)
+  ) >>> 0;
+  const method = raw[21] & 0xff;
+  if (method !== 3) {
+    return {
+      command,
+      method,
+      keyLength: null,
+      keyHex: "",
+      headerLen,
+      payloadLen,
+      frameLen: raw.length,
+      valid: true,
+      reason: "non_method3",
+    };
+  }
+  const keyLength = ((raw[22] & 0xff) << 8) | (raw[23] & 0xff);
+  const keyStart = 24;
+  const keyEnd = keyStart + keyLength;
+  const keyInNativeRange = keyLength >= 1 && keyLength <= 64;
+  const keyComplete = keyEnd <= raw.length && keyEnd <= headerLen;
+  const frameBoundaryValid = headerLen >= keyEnd
+    && headerLen <= raw.length
+    && headerLen + payloadLen === raw.length;
+  const keyBytes = keyComplete ? raw.slice(keyStart, keyEnd) : [];
+  return {
+    command,
+    method,
+    keyLength,
+    keyHex: keyBytes.map((byte) => (byte & 0xff).toString(16).padStart(2, "0")).join(""),
+    headerLen,
+    payloadLen,
+    frameLen: raw.length,
+    valid: keyInNativeRange && keyComplete && frameBoundaryValid,
+    keyInNativeRange,
+    keyComplete,
+    frameBoundaryValid,
+    reason: !keyInNativeRange
+      ? "method3_key_length_out_of_range"
+      : !keyComplete
+        ? "method3_key_truncated"
+        : !frameBoundaryValid
+          ? "tgcp_frame_boundary_mismatch"
+          : "native_variable_length_method3",
+  };
+}
+
+function gcloudWireHandshakeEvidence(ev) {
+  const sources = [
+    ["forwarded", "raw_pay"],
+    ["received", "full_pay"],
+    ["current", "pay"],
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const [label, key] of sources) {
+    const encoded = String(ev && ev[key] ? ev[key] : "");
+    if (!encoded || seen.has(encoded)) continue;
+    seen.add(encoded);
+    const parsed = parseGcloudHandshakeWire(b64ToBytes(encoded));
+    if (parsed) out.push({ ...parsed, source: label, sourceField: key });
+  }
+  return out;
+}
+
+function gcloudProducerHandshakeDiagnostics(ev) {
+  const analysis = gcloudAuthoritativeAnalysis(ev) || {};
+  const transport = gcloudProducerTransport(ev);
+  const mitm = analysis.mitm && typeof analysis.mitm === "object" ? analysis.mitm : {};
+  const validation = analysis.validation && typeof analysis.validation === "object" ? analysis.validation : {};
+  const first = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
+  return {
+    command: first(transport.command, mitm.command),
+    direction: first(transport.direction, mitm.direction, analysis.direction),
+    method: first(transport.key_method, mitm.key_method, mitm.method),
+    keyLength: first(transport.key_length, mitm.key_length),
+    headerLen: first(transport.header_len, mitm.header_len),
+    frameLen: first(transport.frame_len, mitm.frame_len),
+    rewriteBefore: first(transport.rewrite_before_length, mitm.rewrite_before_length),
+    rewriteAfter: first(transport.rewrite_after_length, mitm.rewrite_after_length),
+    sessionStage: first(transport.session_stage, mitm.session_stage),
+    keysReady: first(transport.keys_ready, mitm.keys_ready),
+    fallbackReason: first(transport.fallback_reason, mitm.fallback_reason, validation.fallback_reason),
+    handshakeFailedAfterRewrite: first(
+      transport.handshake_failed_after_rewrite,
+      mitm.handshake_failed_after_rewrite,
+      validation.handshake_failed_after_rewrite,
+    ),
+  };
+}
+
+function gcloudHandshakeDiagnosticRows(ev, evidence = null) {
+  const wires = Array.isArray(evidence) ? evidence : gcloudWireHandshakeEvidence(ev);
+  const producer = gcloudProducerHandshakeDiagnostics(ev);
+  const rows = [];
+  const producerCore = [
+    producer.command ? `command=${producer.command}` : "",
+    producer.direction ? `direction=${producer.direction}` : "",
+    producer.method !== undefined ? `method=${producer.method}` : "",
+    producer.keyLength !== undefined ? `key_length=${producer.keyLength}` : "",
+    producer.headerLen !== undefined ? `header_len=${producer.headerLen}` : "",
+    producer.frameLen !== undefined ? `frame_len=${producer.frameLen}` : "",
+  ].filter(Boolean);
+  if (producerCore.length > 0) rows.push({ label: "Producer handshake", value: producerCore.join(" · ") });
+  for (const wire of wires) {
+    const label = wire.source === "received" ? "Wire key (received/original)" : wire.source === "forwarded" ? "Wire key (forwarded)" : "Wire key (current)";
+    if (wire.method === 3) {
+      rows.push({
+        label,
+        value: `method=3 · key_len=${wire.keyLength} · header_len=${wire.headerLen} · frame_len=${wire.frameLen} · valid=${wire.valid ? "yes" : "no"} · key=${wire.keyHex || "<truncated>"}`,
+      });
+    } else {
+      rows.push({ label, value: `method=${wire.method} · header_len=${wire.headerLen} · frame_len=${wire.frameLen}` });
+    }
+  }
+  const rewrite = [
+    producer.rewriteBefore !== undefined ? `before_len=${producer.rewriteBefore}` : "",
+    producer.rewriteAfter !== undefined ? `after_len=${producer.rewriteAfter}` : "",
+  ].filter(Boolean);
+  if (rewrite.length > 0) rows.push({ label: "Rewrite", value: rewrite.join(" · ") });
+  const state = [
+    producer.sessionStage !== undefined ? `session_stage=${producer.sessionStage}` : "",
+    producer.keysReady !== undefined ? `keys_ready=${producer.keysReady}` : "",
+    producer.handshakeFailedAfterRewrite !== undefined
+      ? `handshake_failed_after_rewrite=${producer.handshakeFailedAfterRewrite}`
+      : "",
+  ].filter(Boolean);
+  if (state.length > 0) rows.push({ label: "Session", value: state.join(" · ") });
+  const failure = [
+    producer.fallbackReason ? `fallback_reason=${producer.fallbackReason}` : "",
+    producer.handshakeFailedAfterRewrite === true
+      ? "fail_closed_after_one_sided_rewrite"
+      : "",
+  ].filter(Boolean);
+  if (failure.length > 0) rows.push({ label: "Handshake failure", value: failure.join(" · ") });
+  return rows;
 }
 
 function getGcloudPreviewBytes(ev, maxBytes = 384) {
@@ -5379,8 +5622,8 @@ function getGcloud9001PairIndex() {
   const events = Array.isArray(state.events) ? state.events : [];
   events.forEach((candidate, index) => {
     const summary = String(candidate && candidate.summary ? candidate.summary : "");
-    if (!isGcloud65010Summary(summary)) return;
-    const meta = parseGcloud65010Summary(summary);
+    if (!isGcloud65010Summary(summary, candidate)) return;
+    const meta = parseGcloud65010Summary(summary, candidate);
     if (meta.command !== 0x9001) return;
     const preview = getGcloudPreviewBytes(candidate, 64);
     const frame = parseGcloudTgcpFrame(preview.bytes);
@@ -5493,6 +5736,14 @@ function isGcloudVisibleString(text) {
   return true;
 }
 
+function gcloudOpaqueBinaryCarrierKind(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length >= 3 && bytes[0] === 0x5a && bytes[1] === 0x49 && bytes[2] === 0x50) return "ZIP carrier";
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) return "ZIP archive";
+  if (bytes.length >= 2 && bytes[0] === 0x78 && (((bytes[0] << 8) | bytes[1]) % 31) === 0) return "zlib stream";
+  return "";
+}
+
 function parseGcloudProtoNodes(bytes, start = 0, end = null, depth = 0, maxNodes = 120) {
   const limit = Math.min(Array.isArray(bytes) ? bytes.length : 0, end === null ? bytes.length : Number(end || 0));
   let pos = Math.max(0, Number(start || 0));
@@ -5574,8 +5825,11 @@ function parseGcloudProtoNodes(bytes, start = 0, end = null, depth = 0, maxNodes
       }
       const valueBytes = bytes.slice(valueStart, valueEnd);
       const text = gcloudBytesToUtf8(valueBytes);
+      const opaqueBinaryCarrier = gcloudOpaqueBinaryCarrierKind(valueBytes);
       if (text && isGcloudVisibleString(text)) {
         node.string = text;
+      } else if (opaqueBinaryCarrier) {
+        node.binaryCarrier = opaqueBinaryCarrier;
       } else if (depth < 6 && lengthInfo.value >= 2) {
         const child = parseGcloudProtoNodes(bytes, valueStart, valueEnd, depth + 1, maxNodes - nodes.length);
         if (child.nodes.length > 0) {
@@ -5846,6 +6100,7 @@ function gcloudNodeValueText(node) {
   if (node.truncated) {
     return `len=${Number(node.len || 0)} available=${Number(node.available || 0)} fragment`;
   }
+  if (node.binaryCarrier) return `${node.binaryCarrier} · len=${Number(node.len || 0)}`;
   if (node.string) return `string "${shortenText(node.string, 120)}"`;
   if (Number(node.wire) === 0 && node.value !== undefined) {
     const valueText = String(node.valueText || node.value);
@@ -5899,6 +6154,9 @@ function gcloudStringContentAlias(text) {
 
 function gcloudProtoFieldAlias(path, node, proto) {
   const key = gcloudPathKey(path);
+  // UAGame 20001 body has no DFM/Valorant CS-command header.  Preserve raw
+  // f1/f2 paths until UAGame descriptors or registration tables prove names.
+  if (proto && proto.uagameBody) return "";
   const generic = {
     "1": "header",
     "1.3": "call_id",
@@ -6497,6 +6755,10 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
     facts.push({ label, value: text, className });
   };
   const valueBytes = gcloudNodeValueBytes(node, bytes);
+  if (node.binaryCarrier) {
+    add("carrier", `${node.binaryCarrier} · ${valueBytes.length}B · protobuf recursion stopped`, "gcloud-tree-fact-source");
+    return facts;
+  }
   if (Number(node.wire) === 0 && node.value !== undefined) {
     const epoch = gcloudEpochScalarInfo(node.valueText || node.value);
     if (epoch) add("time?", `${epoch.text} (${epoch.unit})`, "gcloud-tree-fact-time");
@@ -6533,6 +6795,7 @@ function gcloudNodeInspectFacts(node, bytes, meaning = "", pathText = "") {
 function gcloudProtoTreeValueText(node) {
   if (!node) return "";
   if (node.truncated) return `len=${Number(node.len || 0)} available=${Number(node.available || 0)}`;
+  if (node.binaryCarrier) return `${node.binaryCarrier} · len=${Number(node.len || 0)}`;
   if (node.string) {
     const hexInfo = gcloudAnalyzeHexString(node.string);
     if (hexInfo) return hexInfo.summary;
@@ -6585,6 +6848,7 @@ function appendGcloudTreeValue(valueEl, node, bytes, meaning = "", pathText = ""
 
 function gcloudTreeRowTone(node, alias = "") {
   const meaning = String(alias || "").toLowerCase();
+  if (node && node.binaryCarrier) return "gcloud-tree-tone-binary";
   if (node && node.string) {
     if (gcloudAnalyzeHexString(node.string)) return "gcloud-tree-tone-binary";
     if (gcloudAnalyzeBase64String(node.string)) return "gcloud-tree-tone-binary";
@@ -6610,6 +6874,13 @@ function appendGcloudTreeRaw(rawEl, node, bytes) {
     const childCount = Array.isArray(node.children) ? node.children.length : 0;
     rawEl.textContent = `outer proto · ${Number(node.len || 0)}B -> decoded child`;
     rawEl.title = `Parent value contains ${childCount} protobuf child row${childCount === 1 ? "" : "s"}; decoded payload bytes are shown on the child row.`;
+    rawEl.classList.add("gcloud-tree-raw-container");
+    return;
+  }
+  if (node && node.binaryCarrier) {
+    const valueBytes = gcloudNodeValueBytes(node, bytes);
+    rawEl.textContent = `${node.binaryCarrier} · ${valueBytes.length}B · ${gcloudHexBytes(valueBytes, 64)}`;
+    rawEl.title = `${node.binaryCarrier}; opaque payload is intentionally not decoded as protobuf`;
     rawEl.classList.add("gcloud-tree-raw-container");
     return;
   }
@@ -6944,7 +7215,7 @@ function gcloudNumericEnvelopeFromProto(proto) {
 
 function gcloudNumericCommandInfo(ev, proto = null, summaryText = "") {
   const summary = String(summaryText || (ev && ev.summary) || "");
-  const meta = parseGcloud65010Summary(summary);
+  const meta = parseGcloud65010Summary(summary, ev);
   const flow = getCurrentFlowMeta();
   const targetPort = gcloudTargetPortFromText(
     ev && ev.cid,
@@ -7129,8 +7400,8 @@ function gcloudCommandNameForEvent(ev, summaryText = "") {
     return ev.__tcpvGcloudCommandCache.value;
   }
   let value = "";
-  if (isGcloud65010Summary(summary)) {
-    const meta = parseGcloud65010Summary(summary);
+  if (isGcloud65010Summary(summary, ev)) {
+    const meta = parseGcloud65010Summary(summary, ev);
     if (meta.gcloudType) {
       value = String(meta.gcloudType || "");
       ev.__tcpvGcloudCommandCache = { signature, value };
@@ -7159,7 +7430,7 @@ function gcloudCommandNameForEvent(ev, summaryText = "") {
 function gcloudEventClass(ev) {
   if (!ev || typeof ev !== "object") return "other";
   const summary = String(ev.summary || "");
-  if (!isGcloud65010Summary(summary)) return "other";
+  if (!isGcloud65010Summary(summary, ev)) return "other";
   const name = gcloudCommandNameForEvent(ev, summary);
   if (/^CSAccountLogin(?:Req|Res)/i.test(name)) return "account_login";
   const aceKind = gcloudAceCommandKind(name);
@@ -7168,7 +7439,7 @@ function gcloudEventClass(ev) {
   if (tssKind) return tssKind;
   if (/^GCloudHeartbeat(?:Req|Res)/i.test(name)) return "gcloud_heartbeat";
   if (/^GCloudNetworkStatus(?:Req|Res)/i.test(name)) return "gcloud_network";
-  const meta = parseGcloud65010Summary(summary);
+  const meta = parseGcloud65010Summary(summary, ev);
   if (meta.command === 0x4013) return "gcloud_4013";
   return "tgcp_control";
 }
@@ -7327,8 +7598,8 @@ function analyzeGcloudGatewayKickCommand(proto, commandName) {
 }
 
 function analyzeGcloudEvent(ev, summaryText = "") {
-  if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return null;
-  const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary));
+  if (!isGcloud65010Summary(summaryText || (ev && ev.summary), ev)) return null;
+  const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary), ev);
   const preview = getGcloudPreviewBytes(ev);
   const bytes = preview.bytes;
   const frame = parseGcloudTgcpFrame(bytes);
@@ -7377,7 +7648,38 @@ function analyzeGcloudEvent(ev, summaryText = "") {
   }
 
   if (command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted") {
+    if (isUagamePrivateFragmentMeta(meta)) {
+      const fragment = analyzeUagamePrivateFragment(bytes);
+      const markerText = fragment.markerOffset === null
+        ? "marker 未加载"
+        : `abab@+${formatHexValue(fragment.markerOffset, 2)}`;
+      return {
+        kind: "uagame_private_fragment",
+        meta,
+        bytes,
+        fragment,
+        title: `UAGame private fragment · ${fragment.family}`,
+        chips: [
+          `fragment ${fragment.family}`,
+          markerText,
+          normalizeGcloudDirection(ev, meta),
+        ].filter(Boolean),
+        rows: [
+          { label: "分片族", value: `${fragment.family} · prefix=${fragment.prefix || "-"} · total=${fragment.totalLen}B` },
+          { label: "Fragment anchor", value: `${markerText}${fragment.payloadStart === null ? "" : ` · payload@+${formatHexValue(fragment.payloadStart, 2)}`}` },
+          { label: "片段前缀", value: fragment.payloadPrefix || "当前 preview 未包含 marker 后载荷" },
+          { label: "识别边界", value: "这是 UAGame f4/f8 private/segmented frame；marker offset 动态，marker 后不是完整 protobuf。不得把 +0x04 当 opcode，也不生成伪 child tree。" },
+        ],
+        nodeRows: [],
+      };
+    }
     const proto = getGcloudBusinessProtoCached(ev, bytes, preview.complete);
+    if (proto && isUagameGcloudMeta(meta)) {
+      proto.uagameBody = true;
+      // Command/header aliases belong to the 65010 CS envelope, not to the
+      // already-extracted UAGame business body.
+      if (!meta.gcloudType) proto.commandDisplay = "";
+    }
     const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
     const compression = proto && proto.compression ? proto.compression : null;
     const numeric = gcloudNumericCommandInfo(ev, proto, summaryText || (ev && ev.summary));
@@ -7400,7 +7702,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     const title = effectiveCommandDisplay
       ? `GCloud 明文 ${effectiveCommandDisplay}`
       : "GCloud 4013 明文";
-    const bodyNode = proto && proto.bodyNode ? proto.bodyNode : null;
+    const bodyNode = proto && !proto.uagameBody && proto.bodyNode ? proto.bodyNode : null;
     const profileRows = gcloudProtoProfileRows(proto, ev);
     const timeRows = gcloudProtoTimeRows(proto);
     const gatewayKick = effectiveCommandDisplay
@@ -7522,8 +7824,9 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       proto,
       title,
       chips: [
-        ...(isUagameGcloudMeta(meta) ? ["4013 decrypted", gcloudUagameOpcodeDisplay(meta)] : []),
-        effectiveCommandDisplay || "4013 decrypted",
+        ...(isUagameGcloudMeta(meta)
+          ? [effectiveCommandDisplay || gcloudUagameOpcodeDisplay(meta), proto ? gcloudEventPayloadStatusText(proto, meta) : "UAGame body"]
+          : [effectiveCommandDisplay || "4013 decrypted"]),
         numeric ? `msg_id=${formatHexValue(numeric.messageId)}` : "",
         numeric && Number.isFinite(numeric.messageSeq) ? `msg_seq=${numeric.messageSeq}` : "",
         numeric ? `confidence=${numeric.confidence}` : "",
@@ -7533,7 +7836,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         proto && proto.module ? `module=${proto.module}` : "",
         proto && proto.language ? proto.language : "",
         compression && compression.kind === "lz4-block" ? "LZ4已解压" : "",
-        proto ? gcloudEventPayloadStatusText(proto, meta) : (isUagameGcloudMeta(meta) ? "UAGame body" : ""),
+        !isUagameGcloudMeta(meta) && proto ? gcloudEventPayloadStatusText(proto, meta) : "",
       ].filter(Boolean),
       rows: [
         ...(isUagameGcloudMeta(meta) ? [{
@@ -7560,7 +7863,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
             : (isUagameGcloudMeta(meta) ? "UAGame body" : "payload 未加载"),
         },
         { label: "Lead", value: proto && Number(proto.start || 0) > 0 ? `${Number(proto.start)} byte (${protoBytes.slice(0, proto.start).map(childHexByteText).join(" ")})` : "0 byte" },
-        { label: "Body", value: bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 body (field[2])" },
+        { label: isUagameGcloudMeta(meta) ? "Root" : "Body", value: isUagameGcloudMeta(meta) ? "UAGame business protobuf；字段按原始 fN 路径展示" : (bodyNode ? gcloudNodeValueText(bodyNode) : "当前片段未见顶层 body (field[2])") },
         ...timeRows,
         ...profileRows,
         ...(compression ? [{ label: "压缩", value: `LZ4 raw block 解压 ${compression.inputLength} -> ${compression.outputLength} byte` }] : []),
@@ -7570,20 +7873,30 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     };
   }
 
+  const handshakeEvidence = gcloudWireHandshakeEvidence(ev);
+  const handshakeRows = gcloudHandshakeDiagnosticRows(ev, handshakeEvidence);
+  const currentHandshake = handshakeEvidence.find((item) => item.source === "forwarded")
+    || handshakeEvidence.find((item) => item.source === "current")
+    || handshakeEvidence[0]
+    || null;
   return {
     kind: "raw",
     meta,
     bytes,
     frame,
+    handshakeEvidence,
     title: command !== null ? `TGCP ${formatHexValue(command, 4)}` : `TGCP ${meta.targetPort || "GCloud"}`,
     chips: [
       command !== null ? formatHexValue(command, 4) : "",
       meta.direction ? `dir=${meta.direction}` : "",
       meta.crypto || "",
+      currentHandshake && currentHandshake.method !== null ? `method=${currentHandshake.method}` : "",
+      currentHandshake && currentHandshake.method === 3 ? `wire key_len=${currentHandshake.keyLength}` : "",
     ].filter(Boolean),
     rows: [
       { label: "说明", value: "当前帧不是已解密的 4013 业务明文，按 TGCP 原始帧观察。" },
       { label: "Header", value: frame ? `header_len=${frame.headerLen ?? "-"} payload_len=${frame.payloadLen ?? "-"}` : "raw preview 未加载" },
+      ...handshakeRows,
     ],
     nodeRows: [],
   };
@@ -7636,7 +7949,7 @@ function gcloudValidationSummaryInsights(ev) {
 }
 
 function buildGcloudSummaryInsights(ev, summaryText = "") {
-  if (!isGcloud65010Summary(summaryText || (ev && ev.summary))) return [];
+  if (!isGcloud65010Summary(summaryText || (ev && ev.summary), ev)) return [];
   const info = analyzeGcloudEvent(ev, summaryText);
   if (!info) return [];
   const out = [];
@@ -7662,10 +7975,25 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     }
     return out.concat(validationInsights);
   }
+  if (info.kind === "uagame_private_fragment" && info.fragment) {
+    const fragment = info.fragment;
+    const markerText = fragment.markerOffset === null
+      ? "marker?"
+      : `abab@+${formatHexValue(fragment.markerOffset, 2)}`;
+    return [{
+      kind: "proto",
+      text: `fragment ${fragment.family} · ${markerText}`,
+      title: "UAGame private/segmented frame；marker offset 动态，未把 +0x04 误认成 opcode，未对不完整片段生成 protobuf child tree。",
+    }].concat(validationInsights);
+  }
   if (info.kind === "ace" && info.ace) {
     const ace = info.ace;
     const carrier = ace.carrier || {};
     out.push(...gcloudUagame4013Insights(info.meta, ace.commandName));
+    if (isUagameGcloudMeta(info.meta)) {
+      if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
+      return out.concat(validationInsights);
+    }
     out.push({ kind: "ace", text: ace.label, title: ace.commandName });
     out.push({ kind: "carrier", text: carrier.mode || "ACE carrier", title: carrier.chain || carrier.mode || "" });
     if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
@@ -8334,7 +8662,7 @@ function semanticTierLabel(value) {
   const labels = {
     confirmed: "确定",
     observed: "观察",
-    approximate: "近似",
+    approximate: "推测",
     unknown: "未知",
     high: "高置信",
   };
@@ -8343,27 +8671,47 @@ function semanticTierLabel(value) {
 }
 
 function summarizeStructuredChildSemantics(children) {
-  const counts = new Map();
+  // UAGAME_COMPACT_SUMMARY_V2: compact rows and human-readable child details.
+  const items = Array.isArray(children) ? children.filter((item) => item && typeof item === "object") : [];
+  if (items.length <= 0) return null;
+  const distribution = new Map();
+  const concrete = new Map();
+  let confirmed = 0;
   let approximate = 0;
   let unknown = 0;
-  for (const child of Array.isArray(children) ? children : []) {
-    if (!child || typeof child !== "object") continue;
-    const label = String(child.semantic_label_zh || child.semantic_role || "未解析记录");
-    counts.set(label, (counts.get(label) || 0) + 1);
+  for (const child of items) {
+    const label = String(child.semantic_label_zh || child.semantic_role || "未解析记录").trim();
+    distribution.set(label, (distribution.get(label) || 0) + 1);
     const tier = String(child.semantic_tier || child.semantic_role_confidence || "unknown").toLowerCase();
-    if (tier === "approximate") approximate += 1;
-    if (tier === "unknown") unknown += 1;
+    const exact = child.semantic_exact_meaning === true || tier === "confirmed" || tier === "observed";
+    if (exact) confirmed += 1;
+    else if (tier === "approximate") approximate += 1;
+    else unknown += 1;
+    const generic = /(?:候选|待证|未解析|未知|unresolved|unknown|shape\s*未完整)/i.test(label);
+    if (!generic) concrete.set(label, (concrete.get(label) || 0) + 1);
   }
-  if (counts.size <= 0) return null;
-  const text = Array.from(counts.entries())
+  const countBits = [`子项${items.length}`];
+  if (confirmed > 0) countBits.push(`确定${confirmed}`);
+  if (approximate > 0) countBits.push(`推测${approximate}`);
+  if (unknown > 0) countBits.push(`未知${unknown}`);
+  const concreteBits = Array.from(concrete.entries())
     .sort((left, right) => Number(right[1]) - Number(left[1]))
-    .slice(0, 4)
+    .slice(0, 2)
+    .map(([label, count]) => `${label}${count > 1 ? `×${count}` : ""}`);
+  const fullDistribution = Array.from(distribution.entries())
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
     .map(([label, count]) => `${label}×${count}`)
     .join(" / ");
   return {
     kind: "child",
-    text,
-    title: `child 语义分布；近似=${approximate}，真正未知=${unknown}`,
+    text: [...countBits, ...concreteBits].join(" · "),
+    countText: countBits.join(" · "),
+    title: `child 语义分布：${fullDistribution}`,
+    total: items.length,
+    confirmed,
+    approximate,
+    unknown,
+    genericOnly: concreteBits.length <= 0,
   };
 }
 
@@ -8375,33 +8723,52 @@ function compactStructuredSemanticInsights(ev) {
   const firstAction = semanticActions.find((item) => (
     item && item.source_seq !== undefined && item.source_seq !== null
   )) || semanticActions[0] || {};
-  const payloadRole = packet.semantic_label_zh
-    || packet.semantic_role
-    || (packet.shape && packet.shape.semantic_role)
-    || packet.role
-    || "未知角色";
-  const tierText = semanticTierLabel(packet.semantic_tier || packet.semantic_role_confidence || "unknown");
-  const phase = String(semantic.state_phase || "unknown");
-  const rolePhase = [payloadRole, tierText, phase !== "unknown" ? phase : ""].filter(Boolean).join(" / ");
-  const sourceBits = [];
-  if (firstAction.source_seq !== undefined && firstAction.source_seq !== null) {
-    sourceBits.push(`8091#${firstAction.source_seq}`);
-  }
-  if (Number.isFinite(Number(semantic.source_age_ms))) {
-    sourceBits.push(`${Number(semantic.source_age_ms)}ms`);
-  }
-  if (firstAction.shape_match) sourceBits.push(String(firstAction.shape_match));
-  sourceBits.push(String(semantic.action || (semanticActions.length ? "观察动作" : "只读解析")));
-  const out = [
-    { kind: "state", text: rolePhase, title: `report=${packet.report_code || "-"} family=${packet.report_family || "-"}` },
-    { kind: "semantic", text: sourceBits.join(" → "), title: String(semantic.reason || "") },
-  ];
+  const reportCode = String(packet.report_code || "").trim();
+  const rawRole = String(
+    packet.semantic_label_zh
+      || packet.semantic_role
+      || (packet.shape && packet.shape.semantic_role)
+      || packet.role
+      || "未知角色"
+  ).trim();
+  const isParent = /(?:^|0x)010a001b$/i.test(reportCode)
+    || String(packet.semantic_role || packet.role || "") === "parent_container";
+  const payloadRole = isParent ? "父容器" : rawRole;
+  const tier = String(packet.semantic_tier || packet.semantic_role_confidence || "unknown").toLowerCase();
+  const tierText = tier === "confirmed" || tier === "observed" ? "" : semanticTierLabel(tier);
   const childSummary = summarizeStructuredChildSemantics(packet.children);
-  if (childSummary) out.splice(1, 0, childSummary);
+  const stateBits = [reportCode, payloadRole, tierText].filter(Boolean);
+  if (isParent && childSummary) stateBits.push(childSummary.countText);
+  const out = [{
+    kind: "state",
+    text: stateBits.join(" · "),
+    title: [
+      `report=${reportCode || "-"}`,
+      `family=${packet.report_family || "-"}`,
+      childSummary ? childSummary.title : "",
+    ].filter(Boolean).join(" | "),
+  }];
+  if (childSummary && !isParent && !childSummary.genericOnly) out.push(childSummary);
+
+  const actionText = String(semantic.action || "").trim();
+  const boringAction = /^(?:只读解析|观察动作|observe_only|read_only|原包透传)$/i.test(actionText);
+  if (semanticActions.length > 0 || (actionText && !boringAction)) {
+    const sourceBits = [];
+    if (firstAction.source_seq !== undefined && firstAction.source_seq !== null) {
+      sourceBits.push(`8091#${firstAction.source_seq}`);
+    }
+    if (Number.isFinite(Number(semantic.source_age_ms))) {
+      sourceBits.push(`${Number(semantic.source_age_ms)}ms`);
+    }
+    if (firstAction.shape_match) sourceBits.push(String(firstAction.shape_match));
+    sourceBits.push(actionText || "动作");
+    out.push({ kind: "semantic", text: sourceBits.join(" → "), title: String(semantic.reason || "") });
+  }
+
   const correlation = semantic.response_correlation && typeof semantic.response_correlation === "object"
     ? semantic.response_correlation
     : null;
-  if (correlation && correlation.status && correlation.status !== "request_anchor") {
+  if (correlation && correlation.status && !["request_anchor", "unresolved"].includes(String(correlation.status))) {
     const responseText = [
       correlation.response_report_code || packet.report_code || "response",
       correlation.request_seq ? `← req#${correlation.request_seq}` : correlation.status,
@@ -8564,34 +8931,49 @@ function buildSummaryInsightStrip(ev, summaryText) {
   const hasStructuredSemantic = !!(
     ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
   );
-  const isGcloud = isGcloud65010Summary(summaryText);
+  const isGcloud = isGcloud65010Summary(summaryText, ev);
   const isWssJson = isWssJsonSummary(summaryText, ev);
   if (!isDecodedFlowEvent(ev, summaryText) && !hasStructuredSemantic && !isGcloud && !isWssJson) return null;
   const candidates = isGcloud
     ? buildGcloudSummaryInsights(ev, summaryText).filter(Boolean)
     : isWssJson
       ? buildWssSummaryInsights(ev, summaryText).filter(Boolean)
-      : [
-      compactOpaqueInsight(summaryText),
-      compactSynthesisInsight(summaryText),
-      ...compactStructuredSemanticInsights(ev),
-      compactPacketSemanticInsight(ev),
-      ...compactPacketTextInsights(ev, summaryText),
-      compactChildInsight(summaryText),
-      compactTypeInsight(summaryText),
-      compactTimeInsight(summaryText),
-    ].filter(Boolean);
+      : hasStructuredSemantic
+        ? [
+          compactOpaqueInsight(summaryText),
+          compactSynthesisInsight(summaryText),
+          ...compactStructuredSemanticInsights(ev),
+          compactPacketSemanticInsight(ev),
+          ...compactPacketTextInsights(ev, summaryText),
+          compactTimeInsight(summaryText),
+        ].filter(Boolean)
+        : [
+          compactOpaqueInsight(summaryText),
+          compactSynthesisInsight(summaryText),
+          compactPacketSemanticInsight(ev),
+          ...compactPacketTextInsights(ev, summaryText),
+          compactChildInsight(summaryText),
+          compactTypeInsight(summaryText),
+          compactTimeInsight(summaryText),
+        ].filter(Boolean);
   if (candidates.length <= 0) return null;
   const strip = document.createElement("span");
   strip.className = "summary-insights";
-  for (const item of candidates.slice(0, 5)) {
+  const seen = new Set();
+  const maxItems = hasStructuredSemantic ? 4 : 5;
+  for (const item of candidates) {
+    const text = String(item && item.text || "").trim();
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
     const chip = document.createElement("span");
     chip.className = `summary-insight-chip${item.kind ? ` summary-insight-${item.kind}` : ""}`;
-    chip.textContent = item.text;
-    chip.title = item.title || item.text;
+    chip.textContent = text;
+    chip.title = item.title || text;
     strip.appendChild(chip);
+    if (seen.size >= maxItems) break;
   }
-  return strip;
+  return strip.childElementCount > 0 ? strip : null;
 }
 
 function syncSummaryInsightStrip(summaryNode, ev, summaryText = "") {
@@ -10233,20 +10615,80 @@ function childActionLabel(action, result = null) {
   const value = String(action || "").trim();
   const diff = result && result.diff ? result.diff : null;
   const labels = {
-    SL: "同长复制",
-    FS: "强制同类",
-    VL: diff && Number(diff.lenDelta || 0) === 0 ? "同长替换" : "变长替换",
-    F11: "兜底010a0011",
-    CR: "跨类型",
-    BLK: "黑名单安全替换",
-    ND: "非设备安全替换",
-    R11: "稀有叶子",
-    REQ11: "0x11标志修补",
-    KEEP: "保留目标",
-    CLEAN: "兜底清理",
-    DROP: "删除目标",
+    SL: "同长替换",
+    FS: "同类替换",
+    VL: diff && Number(diff.lenDelta || 0) === 0 ? "同长替换" : "替换（长度有变化）",
+    F11: "使用备用样本",
+    CR: "跨类型替换",
+    BLK: "替换风险项",
+    ND: "替换普通项",
+    R11: "替换少见项",
+    REQ11: "修正请求标志",
+    KEEP: "保持原样",
+    CLEAN: "清理风险内容",
+    DROP: "删除",
   };
   return labels[value] || value || "-";
+}
+
+function humanChildSemanticLabel(value) {
+  let text = String(value || "").trim()
+    .replace(/\s*\[(?:近似|推测|确定|观察|未知)\]\s*/g, " ")
+    .replace(/\s+category=[^\s]+/g, "")
+    .trim();
+  const mappings = [
+    [/动态库\/Framework 路径探测(?:\s*\[观察\])?/i, "可能包含动态库/Framework 路径"],
+    [/模块\/动态库路径探测（近似）/i, "可能包含模块/动态库路径"],
+    [/稳定二进制探测\/遥测（字段待证）/i, "固定格式的二进制数据"],
+    [/能力掩码\/运行时状态候选/i, "可能是运行状态"],
+    [/运行时指标\/完整性向量候选/i, "可能是运行指标"],
+    [/定型二进制环境探测候选/i, "固定格式的环境数据"],
+    [/内存区间\/进程布局候选/i, "可能是内存/进程信息"],
+    [/结构化元数据（具体子项待证）/i, "结构化数据"],
+    [/探测遥测叶子（具体字段待证）/i, "遥测数据"],
+  ];
+  for (const [pattern, replacement] of mappings) {
+    if (pattern.test(text)) return replacement;
+  }
+  return text
+    .replace(/（(?:字段|具体字段|具体子项)待证）/g, "")
+    .replace(/候选/g, "可能是")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactChildShapeText(value) {
+  const text = String(value || "");
+  const inner = text.match(/\binner_type=(0x[0-9a-f]+)/i);
+  const len = text.match(/\blen=(\d+)/i);
+  return [
+    inner ? `类型 ${inner[1]}` : "",
+    len ? `长度 ${len[1]}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function isUsefulChildDecodedText(value) {
+  const text = String(value || "").trim();
+  if (!text || text.length < 6) return false;
+  if (compactSemanticSignal(text)) return true;
+  if (/\s/.test(text) && /[a-z\u4e00-\u9fff]{3}/i.test(text)) return true;
+  const compact = text.replace(/[^a-z0-9]/gi, "");
+  const unique = new Set(compact.toLowerCase()).size;
+  return compact.length >= 10 && unique >= 5 && /[aeiou]/i.test(compact);
+}
+
+function humanChildRuleSummary(action, result) {
+  const kind = childActionKind(action && action.action, action && action.reason);
+  if (kind === "replace") {
+    const source = action && action.source && action.source !== "-" ? compactReportToDisplay(action.source) : "";
+    return source ? `已用录制样本 ${source} 替换` : "已用录制样本替换";
+  }
+  if (kind === "patch") return "已修正请求标志";
+  if (kind === "clean") return "没有匹配样本，已清理风险内容";
+  if (kind === "keep") return "命中保护规则，保持原样";
+  if (kind === "drop") return "规则要求删除该项";
+  if (kind === "neutral") return "已经是清理后的内容，无需修改";
+  return result && result.label ? result.label : "仅查看，未修改";
 }
 
 function compactReportToDisplay(value) {
@@ -10342,57 +10784,45 @@ function splitChildSemanticRows(child) {
   const xorSignal = compactSemanticSignal(child && child.xorCommonPreview ? child.xorCommonPreview : "");
   for (const line of childSemanticLines(child)) {
     if (line.startsWith("semantic=")) {
-      primaryRows.push(["近似语义", semanticValueText(line, "semantic="), "child-card-line-long child-card-semantic"]);
+      const raw = semanticValueText(line, "semantic=");
+      primaryRows.push(["用途", humanChildSemanticLabel(raw), "child-card-line-long child-card-semantic"]);
+      debugLines.push(line);
       continue;
     }
     if (line.startsWith("shape=")) {
-      primaryRows.push(["完整 shape", semanticValueText(line, "shape="), "child-card-line-long child-card-shape"]);
+      const raw = semanticValueText(line, "shape=");
+      const compact = compactChildShapeText(raw);
+      if (compact) primaryRows.push(["结构", compact, "child-card-line-long child-card-shape"]);
+      debugLines.push(line);
       continue;
     }
     if (line.startsWith("body=")) {
-      primaryRows.push(["Body布局", semanticValueText(line, "body="), "child-card-line-long child-card-layout"]);
+      debugLines.push(line);
       continue;
     }
     if (line.startsWith("clock=")) {
-      primaryRows.push(["运行时钟", semanticValueText(line, "clock="), "child-card-line-long child-card-layout"]);
+      primaryRows.push(["运行时间", semanticValueText(line, "clock="), "child-card-line-long child-card-layout"]);
       continue;
     }
-    if (line.startsWith("probes=")) {
-      primaryRows.push(["探测分组", semanticValueText(line, "probes="), "child-card-line-long child-card-layout"]);
-      continue;
-    }
-    if (line.startsWith("typed_values=")) {
-      primaryRows.push(["Typed值", semanticValueText(line, "typed_values="), "child-card-line-long child-card-layout"]);
-      continue;
-    }
-    if (line.startsWith("words=")) {
-      primaryRows.push(["字段槽", semanticValueText(line, "words="), "child-card-line-long child-card-layout"]);
+    if (line.startsWith("probes=") || line.startsWith("typed_values=") || line.startsWith("words=")) {
+      debugLines.push(line);
       continue;
     }
     if (line.startsWith("value=")) {
-      const value = semanticValueText(line, "value=");
-      if (value.startsWith("xor:")) {
-        const xorValue = value.slice(4);
-        if (isDisplayableDecodedRun(xorValue, inferStringKind(xorValue))) {
-          primaryRows.push(["可打印XOR", xorValue, "child-card-line-long child-card-parse"]);
-        }
-      } else {
-        if (!xorSignal || isDisplayableDecodedRun(value, inferStringKind(value))) {
-          primaryRows.push(["解析", value, "child-card-line-long child-card-parse"]);
-        }
-      }
+      const value = semanticValueText(line, "value=").replace(/^xor:/i, "");
+      const signal = compactSemanticSignal(value);
+      if (signal) primaryRows.push(["发现", signal, "child-card-line-long child-card-parse"]);
+      else if (isUsefulChildDecodedText(value)) primaryRows.push(["文本", compactText(value, 80), "child-card-line-long child-card-parse"]);
+      else debugLines.push(line);
       continue;
     }
     if (line.startsWith("timestamps=")) {
-      primaryRows.push(["时间戳", semanticValueText(line, "timestamps="), "child-card-line-long child-card-parse"]);
+      primaryRows.push(["时间", semanticValueText(line, "timestamps="), "child-card-line-long child-card-parse"]);
       continue;
     }
     if (line.startsWith("xor=")) {
       const signal = compactSemanticSignal(semanticValueText(line, "xor="));
-      if (signal) {
-        const label = /dylib|framework|usr\/lib|privateframework|\.so\b/i.test(signal) ? "路径候选" : "XOR命中";
-        primaryRows.push([label, signal, "child-card-line-long child-card-parse"]);
-      }
+      if (signal) primaryRows.push(["发现", signal, "child-card-line-long child-card-parse"]);
       debugLines.push(line);
       continue;
     }
@@ -10516,14 +10946,13 @@ function compactText(text, maxLen = 90) {
 }
 
 function childDecisionText(kind, result) {
-  const resultText = result && result.label ? result.label : "";
-  if (kind === "replace") return `找到 source，执行安全替换${resultText ? ` / ${resultText}` : ""}`;
-  if (kind === "patch") return `本地规则修补${resultText ? ` / ${resultText}` : ""}`;
-  if (kind === "clean") return `未找到安全 source，执行兜底清理${resultText ? ` / ${resultText}` : ""}`;
-  if (kind === "keep") return `保护保留${resultText ? ` / ${resultText}` : ""}`;
-  if (kind === "drop") return "删除该 child";
-  if (kind === "neutral") return "已是中和形态";
-  return resultText || "观察";
+  if (kind === "replace") return "已用录制样本替换";
+  if (kind === "patch") return "已修正请求标志";
+  if (kind === "clean") return "没有匹配样本，已清理";
+  if (kind === "keep") return "保持原样";
+  if (kind === "drop") return "已删除";
+  if (kind === "neutral") return "无需修改";
+  return result && result.label ? result.label : "仅查看";
 }
 
 function compactRuleText(ruleText) {
@@ -10557,16 +10986,7 @@ function childActionKind(actionCode, reason = "") {
 }
 
 function childActionObservation(action, result) {
-  const actionCode = action && action.action;
-  const kind = childActionKind(actionCode, action && action.reason);
-  const resultText = result && result.label ? result.label : "";
-  if (kind === "neutral") return `观察：目标已是中和/清理形态，before/after ${resultText || "一致"}，不需要重复修改`;
-  if (kind === "keep") return `观察：命中保护/白名单，保留目标；字节结果 ${resultText || "未变化"}`;
-  if (kind === "patch") return `观察：0102000a 运行态叶子执行请求标志 0x11->0x01 修补；字节结果 ${resultText || "已处理"}`;
-  if (kind === "clean") return `观察：命中清理/兜底规则，已清理高风险字段；字节结果 ${resultText || "已处理"}`;
-  if (kind === "drop") return "观察：规则判断为删除该 child";
-  if (kind === "replace") return `观察：命中可用录制源，执行替换/重组；字节结果 ${resultText || "已处理"}`;
-  return resultText ? `观察：${resultText}` : "";
+  return humanChildRuleSummary(action, result);
 }
 
 function childActionBadgeText(action, result) {
@@ -11605,13 +12025,13 @@ function childUiTerm(term) {
 
 function childUiShortTerm(term) {
   const labels = {
-    idx: "idx",
-    report: "report",
-    type: "type",
-    ID: "id",
-    len: "len",
-    diff: "diff",
-    offset: "off",
+    idx: "序号",
+    report: "消息",
+    type: "用途",
+    ID: "ID",
+    len: "长度",
+    diff: "变化",
+    offset: "位置",
   };
   return labels[term] || term;
 }
@@ -12544,24 +12964,15 @@ function childRichTypeText(child) {
   if (!child || child.truncated) return "-";
   const report = parseReportCodeNumber(child.reportCode);
   const rawType = String(child.className || "").trim();
-  const role = childSemanticRoleText(child);
-  if (child.semanticLabel) return role;
-  if (Number(report) === 0x0102000a) {
-    return role || "0102000a / typed leaf shell（shape-specific）";
-  }
-  if (Number(report) === 0x010a0011) return "010a0011 / 服务器确认型子请求（不可删除）";
-  if (Number(report) === 0x010a0010) return "010a0010 / 0011 回执（leaf_id 回显）";
-  if (Number(report) === 0x010a001b) return "010a001b / 父容器";
-  if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) {
-    return role || (Math.floor(Number(report || 0) / 0x100) === 0x011223
-      ? `011223xx / 动态 metadata subtype=0x${(Number(report) & 0xff).toString(16).padStart(2, "0")}`
-      : "0112xxxx / 结构化元数据叶子");
-  }
-  if (rawType === "text/binary-leaf") return "文本混合叶子 / ASCII+二进制";
-  if (rawType === "binary-like-leaf") return "二进制叶子 / 不透明运行态字段";
-  if (rawType === "binary-like") return "二进制块 / 未解析结构";
-  if (rawType === "structured") return "结构化记录";
-  if (rawType === "structured-metadata") return "结构化元数据";
+  if (child.semanticLabel) return humanChildSemanticLabel(child.semanticLabel);
+  if (Number(report) === 0x0102000a) return "分类数据项";
+  if (Number(report) === 0x010a0011) return "需保留的子请求";
+  if (Number(report) === 0x010a0010) return "子请求回执";
+  if (Number(report) === 0x010a001b) return "父容器";
+  if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) return "结构化数据";
+  if (rawType === "text/binary-leaf") return "文本和二进制混合数据";
+  if (rawType === "binary-like-leaf" || rawType === "binary-like") return "二进制数据";
+  if (rawType === "structured" || rawType === "structured-metadata") return "结构化数据";
   return rawType || reportBusinessLabel(report) || "-";
 }
 
@@ -12581,8 +12992,8 @@ function childFullMetaLine(child) {
 function childCompactMetaLine(child) {
   if (!child || child.truncated) return "";
   const parts = [
-    Number.isFinite(child.len) ? `len ${child.len}` : "",
-    childOffsetText(child) && childOffsetText(child) !== "-" ? `off ${childOffsetText(child)}` : "",
+    Number.isFinite(child.len) ? `长度 ${child.len}` : "",
+    childOffsetText(child) && childOffsetText(child) !== "-" ? `位置 ${childOffsetText(child)}` : "",
   ].filter(Boolean);
   return parts.join(" | ");
 }
@@ -12618,12 +13029,12 @@ function childPreviewRichLines(child, childBytes, options = {}) {
 
 function childPreviewSegmentKind(label, fallbackClass = "") {
   const value = String(label || "").trim().toLowerCase();
-  if (value === "动作") return "action";
+  if (value === "动作" || value === "处理") return "action";
   if (value === "原因") return "reason";
   if (value === "source(来源)" || value === "source" || value === "来源") return "source";
   if (value === "规则") return "rule";
-  if (value === "风险") return "risk";
-  if (value === "解析") return "parse";
+  if (value === "风险" || value === "注意") return "risk";
+  if (["解析", "用途", "结构", "发现", "文本"].includes(value)) return "parse";
   if (["body布局", "运行时钟", "探测分组", "typed值", "字段槽"].includes(value)) return "parse";
   if (value === "可打印xor") return "xor";
   if (value === "时间戳" || value === "候选时间戳") return "time";
@@ -12636,6 +13047,12 @@ function childPreviewSegmentParts(rawSegment, fallbackClass = "") {
   const raw = String(rawSegment || "").trim();
   if (!raw) return null;
   const labels = [
+    "处理",
+    "注意",
+    "用途",
+    "结构",
+    "发现",
+    "文本",
     "source(来源)",
     "可打印XOR",
     "Body布局",
@@ -12650,6 +13067,8 @@ function childPreviewSegmentParts(rawSegment, fallbackClass = "") {
     "规则",
     "风险",
     "解析",
+    "长度",
+    "位置",
     "len",
     "off",
   ];
@@ -12821,14 +13240,9 @@ function makeChildPreviewRow(beforeChild, afterChild, labelBase = "child", befor
   }));
   const afterExtra = [];
   if (action && (action.action || action.reason || action.source)) {
-    const actionParts = [];
-    if (action.action) actionParts.push(`动作 ${childActionLabel(action.action, result)}`);
-    if (action.reason) actionParts.push(`原因 ${translatedReasonText(action.reason) || action.reason}`);
-    if (action.source && action.source !== "-") actionParts.push(`${childUiTerm("source")} ${compactReportToDisplay(action.source)}`);
-    if (actionParts.length) afterExtra.push(actionParts.join(" | "));
+    afterExtra.push(`处理 ${humanChildRuleSummary(action, result)}`);
   }
-  if (risk && risk.text) afterExtra.push({ text: `风险 高：${risk.text}`, className: "child-preview-line-risk" });
-  if (ruleCompact) afterExtra.push(`规则 ${ruleCompact}`);
+  if (risk && risk.text) afterExtra.push({ text: `注意 ${risk.text}`, className: "child-preview-line-risk" });
   row.appendChild(makeChildPreviewBox(afterChild, `${labelBase} 修改后`, "after", afterBytes, {
     extraLines: afterExtra,
     changedOffsets,
@@ -12954,44 +13368,27 @@ function childIdText(child) {
 
 function childDiffText(diff) {
   if (!diff) return "-";
-  if (Number(diff.lenDelta || 0) === 0) {
-    return `${diff.changed}/${diff.commonLen}`;
-  }
-  const sign = diff.lenDelta > 0 ? "+" : "";
-  return `${diff.changed}/${diff.commonLen} 长度${sign}${diff.lenDelta}`;
+  const changed = Number(diff.changed || 0);
+  const delta = Number(diff.lenDelta || 0);
+  if (delta === 0) return `改了 ${changed} 字节`;
+  return `改了 ${changed} 字节，${delta > 0 ? "增加" : "减少"} ${Math.abs(delta)} 字节`;
 }
 
 function childReplacementRisk(beforeChild, afterChild, beforeBytes, afterBytes, action, result) {
   const kind = childActionKind(action && action.action, action && action.reason);
   if (kind !== "replace") return null;
-  const reasons = [];
   const diff = result && result.diff ? result.diff : countChangedBytes(beforeBytes, afterBytes);
   const beforeType = childRichTypeText(beforeChild);
   const afterType = childRichTypeText(afterChild);
-  const beforeReport = childReportText(beforeChild);
-  const afterReport = childReportText(afterChild);
-  const reason = String(action && action.reason ? action.reason : "");
-  const actionCode = String(action && action.action ? action.action : "");
-  const lenDelta = Number(diff && diff.lenDelta || 0);
-
-  if ((actionCode === "VL" || /variable_length_source/i.test(reason)) && lenDelta !== 0) {
-    reasons.push("变长 source 替换");
-  }
-  if (diff && lenDelta !== 0) {
-    const sign = lenDelta > 0 ? "+" : "";
-    reasons.push(`长度变化 ${diff.leftLen} -> ${diff.rightLen} (${sign}${lenDelta})`);
-  }
-  if (beforeType && afterType && beforeType !== "-" && afterType !== "-" && beforeType !== afterType) {
-    reasons.push(`语义类型变化 ${beforeType} -> ${afterType}`);
-  }
-  if (beforeReport && afterReport && beforeReport === afterReport && beforeType !== afterType) {
-    reasons.push("同 report 不代表同语义");
-  }
-
-  if (!reasons.length) return null;
+  const lengthChanged = Number(diff && diff.lenDelta || 0) !== 0;
+  const typeChanged = beforeType && afterType && beforeType !== "-" && afterType !== "-" && beforeType !== afterType;
+  if (!lengthChanged && !typeChanged) return null;
+  const parts = [];
+  if (lengthChanged) parts.push(`长度 ${diff.leftLen} → ${diff.rightLen}`);
+  if (typeChanged) parts.push("用途不同");
   return {
-    level: "high",
-    text: reasons.join("；"),
+    level: "review",
+    text: `${parts.join("，")}，请确认录制样本是否匹配`,
   };
 }
 
@@ -13070,7 +13467,7 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   if (risk) {
     const riskBadge = document.createElement("span");
     riskBadge.className = "child-risk-badge";
-    riskBadge.textContent = "高风险";
+    riskBadge.textContent = "变化较大";
     riskBadge.title = risk.text;
     badges.appendChild(riskBadge);
   }
@@ -13081,7 +13478,7 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
     const copy = document.createElement("div");
     copy.className = "child-rail-copy";
     copy.title = [childDecisionText(kind, result), risk && risk.text, ruleCompact, observation].filter(Boolean).join("；");
-    copy.textContent = risk ? `高风险：${risk.text}` : childDecisionText(kind, result);
+    copy.textContent = risk ? `${childDecisionText(kind, result)}；${risk.text}` : childDecisionText(kind, result);
     title.appendChild(copy);
   }
 
@@ -14336,7 +14733,7 @@ function buildEventReadableSummary(ev, summaryText) {
   const primary = document.createElement("div");
   primary.className = "event-summary-primary";
   const semantic = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
-  const isGcloud = isGcloud65010Summary(summaryText);
+  const isGcloud = isGcloud65010Summary(summaryText, ev);
   const isWssJson = isWssJsonSummary(summaryText, ev);
   if (isGcloud) {
     for (const item of buildGcloudSummaryInsights(ev, summaryText).slice(0, 6)) {
@@ -14441,7 +14838,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
 
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
-  const isGcloudEvent = isGcloud65010Summary(summaryText);
+  const isGcloudEvent = isGcloud65010Summary(summaryText, ev);
   const isWssJsonEvent = isWssJsonSummary(summaryText, ev);
   body.appendChild(buildEventReadableSummary(ev, summaryText));
   const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
@@ -14870,7 +15267,7 @@ async function ensureEventPayload(ev, account, eventId) {
         && currentFlowLooksLikePort8092(ev, summaryText)
       )
       || (
-        isGcloud65010Summary(summaryText)
+        isGcloud65010Summary(summaryText, ev)
         && gcloudSummaryHasSentWireChange(summaryText)
       )
     )

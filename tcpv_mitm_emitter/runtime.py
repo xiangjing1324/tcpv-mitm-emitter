@@ -470,6 +470,57 @@ class TcpvRuntime:
                 event["raw_pay"] = ""
         return events, last_id, has_more
 
+    def query_events(
+        self,
+        account: str,
+        *,
+        before_id: str | None = None,
+        limit: int = 100,
+        scan_limit: int = 5000,
+        since_ts: int | None = None,
+        until_ts: int | None = None,
+        direction: int | None = None,
+        min_len: int | None = None,
+        max_len: int | None = None,
+        summary_contains: str = "",
+        cid_contains: str = "",
+        query: str = "",
+        include_payload: bool = False,
+        include_analysis: bool = False,
+    ) -> tuple[list[dict[str, Any]], str | None, bool, int]:
+        store = self.store
+        if store is None:
+            return [], before_id, False, 0
+        decode_payload = include_payload or include_analysis
+        events, next_cursor, has_more, scanned = store.query_events(
+            account=account,
+            before_id=before_id,
+            limit=limit,
+            scan_limit=scan_limit,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            direction=direction,
+            min_len=min_len,
+            max_len=max_len,
+            summary_contains=summary_contains,
+            cid_contains=cid_contains,
+            query=query,
+            include_payload=decode_payload,
+            include_analysis=include_analysis,
+        )
+        if include_analysis:
+            for event in events:
+                if analysis_needs_upgrade(event.get("analysis")):
+                    event["analysis"] = analysis_from_event(event)
+            correlate_events(events)
+        if not include_payload:
+            for event in events:
+                event["pay"] = ""
+                event["full_pay"] = ""
+                event["before_pay"] = ""
+                event["raw_pay"] = ""
+        return events, next_cursor, has_more, scanned
+
     def export_flow(self, account: str) -> tuple[Path, dict[str, Any]]:
         account = str(account or "").strip()
         if not account:

@@ -1,0 +1,2630 @@
+{
+  "input": "/Users/jinger/Downloads/Payload/tersafe_report_analysis/data/reportcode_matrix.json",
+  "input_kind": "historical_reportcode_matrix",
+  "source": "historical-matrix",
+  "flow": {
+    "account": "historical-baseline",
+    "last_cid": "-"
+  },
+  "event_count": 88150,
+  "report_counts": {
+    "0x0102000a": 81330,
+    "0x010a0011": 2203,
+    "0x01122342": 1067,
+    "0x0112232e": 886,
+    "0x01122388": 371,
+    "0x0112237a": 231,
+    "0x010a0056": 186,
+    "0x0112236c": 152,
+    "0x01020002": 125,
+    "0x010a0036": 108,
+    "0x0112234d": 95,
+    "0x0112234c": 84,
+    "0x01122389": 77,
+    "0x01122338": 73,
+    "0x01122362": 59,
+    "0x01122386": 55,
+    "0x0112232d": 53,
+    "0x01122334": 50,
+    "0x01122380": 49,
+    "0x01122329": 47,
+    "0x01122337": 45,
+    "0x01122358": 41,
+    "0x01122383": 34,
+    "0x01122335": 33,
+    "0x01122354": 32,
+    "0x01122361": 32,
+    "0x0112237d": 31,
+    "0x0112233c": 31,
+    "0x0112233a": 31,
+    "0x0112233f": 31,
+    "0x01122348": 29,
+    "0x01122355": 28,
+    "0x0112238b": 26,
+    "0x01122343": 25,
+    "0x0112232f": 25,
+    "0x010a0043": 24,
+    "0x01122384": 24,
+    "0x01122336": 23,
+    "0x01122339": 21,
+    "0x01122341": 19,
+    "0x0112238a": 18,
+    "0x0112234a": 15,
+    "0x01122357": 14,
+    "0x01122350": 14,
+    "0x01122340": 14,
+    "0x01122346": 13,
+    "0x01122371": 12,
+    "0x01122373": 11,
+    "0x01122360": 10,
+    "0x01122365": 10,
+    "0x0112235d": 10,
+    "0x0112232c": 9,
+    "0x0112234e": 9,
+    "0x01122349": 8,
+    "0x0112232a": 8,
+    "0x01122366": 7,
+    "0x01122385": 7,
+    "0x01122374": 6,
+    "0x0112234f": 6,
+    "0x0112234b": 5,
+    "0x01122367": 4,
+    "0x0112235f": 4,
+    "0x01122369": 4,
+    "0x0112233e": 3,
+    "0x01122378": 3,
+    "0x0112235a": 3,
+    "0x0112237f": 3,
+    "0x01122377": 3,
+    "0x01122375": 2,
+    "0x0112233b": 2,
+    "0x0112232b": 2,
+    "0x01122372": 2,
+    "0x0112236d": 2,
+    "0x01122353": 2,
+    "0x01122347": 2,
+    "0x01122364": 2,
+    "0x01122330": 2,
+    "0x01122331": 1,
+    "0x01122332": 1,
+    "0x01122328": 1,
+    "0x01122387": 1,
+    "0x0112235b": 1,
+    "0x0112233d": 1,
+    "0x01122368": 1,
+    "0x0112236b": 1,
+    "0x0112236e": 1,
+    "0x01122381": 1,
+    "0x01122351": 1,
+    "0x0112235e": 1,
+    "0x01122344": 1
+  },
+  "inner_type_counts": {},
+  "parent_roster": {
+    "layout_counts": {},
+    "child_count_histogram": {}
+  },
+  "bucket_count": 0,
+  "buckets": [],
+  "deep": {
+    "schema": "tersafe.semantic.v1",
+    "reports": [
+      {
+        "report_code": "0x0102000a",
+        "family": "0x0102000a",
+        "dynamic_subtype": null,
+        "observations": 81330,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 81330
+        },
+        "roles": {
+          "typed leaf shell；含义由完整 shape 判定": 81330
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（壳结构）；子语义分型",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [],
+        "meaning": "typed leaf shell；含义由完整 shape 判定",
+        "historical_observation": "typed telemetry 壳；按 inner_type/selector/field/body 再分型"
+      },
+      {
+        "report_code": "0x010a0011",
+        "family": "0x010a0011",
+        "dynamic_subtype": null,
+        "observations": 2203,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2203
+        },
+        "roles": {
+          "配对/保护上下文（观察）": 2203
+        },
+        "confidence": "observed",
+        "source_confidence": "高",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [],
+        "meaning": "配对/保护上下文（观察）",
+        "historical_observation": "短请求标签：CRC32(IEEE) + `hi_%d`（不是检测结论）"
+      },
+      {
+        "report_code": "0x01122342",
+        "family": "0x011223xx",
+        "dynamic_subtype": 66,
+        "observations": 1067,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1067
+        },
+        "roles": {
+          "device_profile": 782
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:129;obf_id:129",
+          "/model:iPad13,6;ver:14.50;inc_id:131;obf_id:131",
+          "/model:iPad13,6;ver:14.50;inc_id:132;obf_id:132"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×782"
+      },
+      {
+        "report_code": "0x0112232e",
+        "family": "0x011223xx",
+        "dynamic_subtype": 46,
+        "observations": 886,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 886
+        },
+        "roles": {
+          "device_profile": 527,
+          "account_metadata": 85,
+          "file_reference": 16,
+          "state_snapshot": 2,
+          "state_counter": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "-model:iPad13,6;ver:14.50;inc_id:87;obf_id:87",
+          "-model:iPad13,6;ver:14.50;inc_id:91;obf_id:91",
+          "-model:iPad13,6;ver:14.50;inc_id:92;obf_id:92"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×527; 账号上下文 + inc/obf 序号×85; 资源文件名引用（非文件内容）×16; 状态快照（cs/ob/state/r/p）×2; 状态计数/序号×1"
+      },
+      {
+        "report_code": "0x01122388",
+        "family": "0x011223xx",
+        "dynamic_subtype": 136,
+        "observations": 371,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 371
+        },
+        "roles": {
+          "device_profile": 263,
+          "state_snapshot": 59,
+          "account_metadata": 4,
+          "opaque_token_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "cs:<redacted>,ob:<redacted>;model:iPad13,6;ver:14.50;inc_id:85;obf_id:85",
+          "cs:<redacted>,ob:<redacted>;model:iPad13,6;ver:14.50;inc_id:89;obf_id:89",
+          "cs:<redacted>,ob:<redacted>;model:iPad13,6;ver:14.50;inc_id:90;obf_id:90"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×263; 状态快照（cs/ob/state/r/p）×59; 账号上下文 + inc/obf 序号×4; 不透明 token 元数据×1"
+      },
+      {
+        "report_code": "0x0112237a",
+        "family": "0x011223xx",
+        "dynamic_subtype": 122,
+        "observations": 231,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 231
+        },
+        "roles": {
+          "device_profile": 154,
+          "account_metadata": 16
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "-model:iPad13,6;ver:14.50;inc_id:88;obf_id:88",
+          "-model:iPad13,6;ver:14.50;inc_id:93;obf_id:93",
+          "model:iPad13,6;ver:14.50;inc_id:104;obf_id:104"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×154; 账号上下文 + inc/obf 序号×16"
+      },
+      {
+        "report_code": "0x010a0056",
+        "family": "0x010a0056",
+        "dynamic_subtype": null,
+        "observations": 186,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 186
+        },
+        "roles": {
+          "目前不能证明含义": 186
+        },
+        "confidence": "unknown",
+        "source_confidence": "高（家族）；值枚举中",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [],
+        "meaning": "目前不能证明含义",
+        "historical_observation": "`sav_req`/同步控制状态；单字节值至少观察到 1、2"
+      },
+      {
+        "report_code": "0x0112236c",
+        "family": "0x011223xx",
+        "dynamic_subtype": 108,
+        "observations": 152,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 152
+        },
+        "roles": {
+          "device_profile": 123
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "-model:iPad13,6;ver:14.50;inc_id:86;obf_id:86",
+          "model:iPad13,6;ver:14.50;inc_id:102;obf_id:102",
+          "/model:iPad13,6;ver:14.50;inc_id:102;obf_id:102"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×123"
+      },
+      {
+        "report_code": "0x01020002",
+        "family": "0x01020002",
+        "dynamic_subtype": null,
+        "observations": 125,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 125
+        },
+        "roles": {
+          "目前不能证明含义": 125
+        },
+        "confidence": "unknown",
+        "source_confidence": "中",
+        "source_evidence": "history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [],
+        "meaning": "目前不能证明含义",
+        "historical_observation": "固定 28 字节的最小数值/控制 telemetry；具体枚举未命名"
+      },
+      {
+        "report_code": "0x010a0036",
+        "family": "0x010a0036",
+        "dynamic_subtype": null,
+        "observations": 108,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 108
+        },
+        "roles": {
+          "目前不能证明含义": 108
+        },
+        "confidence": "unknown",
+        "source_confidence": "高",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [],
+        "meaning": "目前不能证明含义",
+        "historical_observation": "资源/同步文件 marker：名称、类型/状态及附加数据"
+      },
+      {
+        "report_code": "0x0112234d",
+        "family": "0x011223xx",
+        "dynamic_subtype": 77,
+        "observations": 95,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 95
+        },
+        "roles": {
+          "device_profile": 52,
+          "account_metadata": 6
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "*model:iPad7,3;ver:16.10;inc_id:1;obf_id:1",
+          ";inc_id:3;obf_id:3",
+          ";inc_id:6;obf_id:6"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×52; 账号上下文 + inc/obf 序号×6"
+      },
+      {
+        "report_code": "0x0112234c",
+        "family": "0x011223xx",
+        "dynamic_subtype": 76,
+        "observations": 84,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 84
+        },
+        "roles": {
+          "device_profile": 44
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:14;obf_id:14",
+          ",model:iPad7,3;ver:16.40;inc_id:15;obf_id:15",
+          ",model:iPad7,3;ver:16.40;inc_id:16;obf_id:16"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×44"
+      },
+      {
+        "report_code": "0x01122389",
+        "family": "0x011223xx",
+        "dynamic_subtype": 137,
+        "observations": 77,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 77
+        },
+        "roles": {
+          "device_profile": 59
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:44;obf_id:44",
+          "sC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPad7,3;ver:16.40;inc_id:46;obf_id:46",
+          ",model:iPad7,3;ver:16.40;inc_id:48;obf_id:48"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×59"
+      },
+      {
+        "report_code": "0x01122338",
+        "family": "0x011223xx",
+        "dynamic_subtype": 56,
+        "observations": 73,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 73
+        },
+        "roles": {
+          "device_profile": 33,
+          "account_metadata": 5
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "*model:iPad7,3;ver:16.40;inc_id:1;obf_id:1",
+          ";inc_id:4;obf_id:4",
+          "a:1,r:0,cnt:1;inc_id:1;obf_id:1"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×33; 账号上下文 + inc/obf 序号×5"
+      },
+      {
+        "report_code": "0x01122362",
+        "family": "0x011223xx",
+        "dynamic_subtype": 98,
+        "observations": 59,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 59
+        },
+        "roles": {
+          "device_profile": 44,
+          "state_snapshot": 7
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "cs:<redacted>,ob:<redacted>;model:iPad13,6;ver:14.50;inc_id:94;obf_id:94",
+          "cs:<redacted>,ob:<redacted>;model:iPad13,6;ver:14.50;inc_id:95;obf_id:95",
+          "cs:<redacted>,ob:<redacted>;model:iPad13,6;ver:14.50;inc_id:100;obf_id:100"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×44; 状态快照（cs/ob/state/r/p）×7"
+      },
+      {
+        "report_code": "0x01122386",
+        "family": "0x011223xx",
+        "dynamic_subtype": 134,
+        "observations": 55,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 55
+        },
+        "roles": {
+          "device_profile": 40,
+          "state_snapshot": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "BiTeamID:6H9S4KQ3C9;model:iPad13,6;ver:14.50;inc_id:306;obf_id:306",
+          "BiTeamID:6H9S4KQ3C9;model:iPad13,6;ver:14.50;inc_id:391;obf_id:391",
+          "?iTeamID:6H9S4KQ3C9;model:iPad7,3;ver:16.10;inc_id:29;obf_id:29"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×40; 状态快照（cs/ob/state/r/p）×1"
+      },
+      {
+        "report_code": "0x0112232d",
+        "family": "0x011223xx",
+        "dynamic_subtype": 45,
+        "observations": 53,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 53
+        },
+        "roles": {
+          "device_profile": 29
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:14;obf_id:14",
+          ",model:iPad7,3;ver:16.40;inc_id:22;obf_id:22",
+          ",model:iPad7,3;ver:16.40;inc_id:23;obf_id:23"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×29"
+      },
+      {
+        "report_code": "0x01122334",
+        "family": "0x011223xx",
+        "dynamic_subtype": 52,
+        "observations": 50,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 50
+        },
+        "roles": {
+          "device_profile": 40,
+          "account_metadata": 6
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,3;ver:16.40;inc_id:67;obf_id:67",
+          "model:iPad7,3;ver:16.10;inc_id:51;obf_id:51",
+          "/model:iPhone10,1;ver:16.40;inc_id:53;obf_id:53"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×40; 账号上下文 + inc/obf 序号×6"
+      },
+      {
+        "report_code": "0x01122380",
+        "family": "0x011223xx",
+        "dynamic_subtype": 128,
+        "observations": 49,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 49
+        },
+        "roles": {
+          "device_profile": 42,
+          "state_snapshot": 2,
+          "opaque_token_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:130;obf_id:130",
+          "/model:iPad13,6;ver:14.50;inc_id:133;obf_id:133",
+          "/model:iPad13,6;ver:14.50;inc_id:142;obf_id:142"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×42; 状态快照（cs/ob/state/r/p）×2; 不透明 token 元数据×1"
+      },
+      {
+        "report_code": "0x01122329",
+        "family": "0x011223xx",
+        "dynamic_subtype": 41,
+        "observations": 47,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 47
+        },
+        "roles": {
+          "device_profile": 32
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:213;obf_id:213",
+          "/model:iPad13,6;ver:14.50;inc_id:298;obf_id:298",
+          "/model:iPad13,6;ver:14.50;inc_id:468;obf_id:468"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×32"
+      },
+      {
+        "report_code": "0x01122337",
+        "family": "0x011223xx",
+        "dynamic_subtype": 55,
+        "observations": 45,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 45
+        },
+        "roles": {
+          "device_profile": 34
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:137;obf_id:137",
+          "/model:iPad13,6;ver:14.50;inc_id:222;obf_id:222",
+          "/model:iPad13,6;ver:14.50;inc_id:477;obf_id:477"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×34"
+      },
+      {
+        "report_code": "0x01122358",
+        "family": "0x011223xx",
+        "dynamic_subtype": 88,
+        "observations": 41,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 41
+        },
+        "roles": {
+          "device_profile": 14,
+          "account_metadata": 11
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "a:1,r:0,cnt:1;inc_id:2;obf_id:2",
+          ";inc_id:4;obf_id:4",
+          ";inc_id:7;obf_id:7"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×14; 账号上下文 + inc/obf 序号×11"
+      },
+      {
+        "report_code": "0x01122383",
+        "family": "0x011223xx",
+        "dynamic_subtype": 131,
+        "observations": 34,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 34
+        },
+        "roles": {
+          "device_profile": 25
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:11;obf_id:11",
+          "+model:iPad13,6;ver:16.40;inc_id:9;obf_id:9",
+          "*model:iPad7,3;ver:16.40;inc_id:8;obf_id:8"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×25"
+      },
+      {
+        "report_code": "0x01122335",
+        "family": "0x011223xx",
+        "dynamic_subtype": 53,
+        "observations": 33,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 33
+        },
+        "roles": {
+          "device_profile": 16,
+          "account_metadata": 1,
+          "state_snapshot": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ";inc_id:9;obf_id:9",
+          "model:iPad7,3;ver:16.10;inc_id:59;obf_id:59",
+          "model:iPad7,3;ver:16.10;inc_id:76;obf_id:76"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×16; 账号上下文 + inc/obf 序号×1; 状态快照（cs/ob/state/r/p）×1"
+      },
+      {
+        "report_code": "0x01122354",
+        "family": "0x011223xx",
+        "dynamic_subtype": 84,
+        "observations": 32,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 32
+        },
+        "roles": {
+          "device_profile": 28
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "-model:iPad13,6;ver:14.50;inc_id:99;obf_id:99",
+          "/model:iPad13,6;ver:14.50;inc_id:115;obf_id:115",
+          "/model:iPad13,6;ver:14.50;inc_id:121;obf_id:121"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×28"
+      },
+      {
+        "report_code": "0x01122361",
+        "family": "0x011223xx",
+        "dynamic_subtype": 97,
+        "observations": 32,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 32
+        },
+        "roles": {
+          "device_profile": 15
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:13;obf_id:13",
+          ",model:iPad7,3;ver:16.10;inc_id:14;obf_id:14",
+          ",model:iPad7,3;ver:16.10;inc_id:15;obf_id:15"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×15"
+      },
+      {
+        "report_code": "0x0112233a",
+        "family": "0x011223xx",
+        "dynamic_subtype": 58,
+        "observations": 31,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 31
+        },
+        "roles": {
+          "device_profile": 31
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPhone9,1;ver:15.60;inc_id:13;obf_id:13",
+          "1model:iPhone11,6;ver:16.30;inc_id:805;obf_id:805",
+          "1model:iPhone11,6;ver:16.30;inc_id:806;obf_id:806"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×31"
+      },
+      {
+        "report_code": "0x0112233c",
+        "family": "0x011223xx",
+        "dynamic_subtype": 60,
+        "observations": 31,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 31
+        },
+        "roles": {
+          "device_profile": 25
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:41;obf_id:41",
+          "-model:iPad13,6;ver:16.40;inc_id:42;obf_id:42",
+          ",model:iPad7,3;ver:16.40;inc_id:44;obf_id:44"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×25"
+      },
+      {
+        "report_code": "0x0112233f",
+        "family": "0x011223xx",
+        "dynamic_subtype": 63,
+        "observations": 31,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 31
+        },
+        "roles": {
+          "device_profile": 28,
+          "account_metadata": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPhone10,1;ver:16.40;inc_id:15;obf_id:15",
+          "/model:iPhone10,1;ver:16.40;inc_id:20;obf_id:20",
+          "/model:iPhone10,1;ver:16.40;inc_id:23;obf_id:23"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×28; 账号上下文 + inc/obf 序号×3"
+      },
+      {
+        "report_code": "0x0112237d",
+        "family": "0x011223xx",
+        "dynamic_subtype": 125,
+        "observations": 31,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 31
+        },
+        "roles": {
+          "device_profile": 29
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:95;obf_id:95",
+          "model:iPad7,3;ver:16.40;inc_id:101;obf_id:101",
+          "model:iPad7,2;ver:15.60;inc_id:53;obf_id:53"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×29"
+      },
+      {
+        "report_code": "0x01122348",
+        "family": "0x011223xx",
+        "dynamic_subtype": 72,
+        "observations": 29,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 29
+        },
+        "roles": {
+          "device_profile": 29
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ".model:iPhone9,1;ver:15.60;inc_id:14;obf_id:14",
+          ".model:iPhone9,1;ver:15.60;inc_id:17;obf_id:17",
+          ".model:iPhone9,1;ver:15.60;inc_id:19;obf_id:19"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×29"
+      },
+      {
+        "report_code": "0x01122355",
+        "family": "0x011223xx",
+        "dynamic_subtype": 85,
+        "observations": 28,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 28
+        },
+        "roles": {
+          "device_profile": 26
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:44;obf_id:44",
+          ",model:iPad7,3;ver:16.40;inc_id:17;obf_id:17",
+          ",model:iPad7,3;ver:16.40;inc_id:23;obf_id:23"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×26"
+      },
+      {
+        "report_code": "0x0112238b",
+        "family": "0x011223xx",
+        "dynamic_subtype": 139,
+        "observations": 26,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 26
+        },
+        "roles": {
+          "device_profile": 25
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:45;obf_id:45",
+          ",model:iPad7,2;ver:15.60;inc_id:16;obf_id:16",
+          ",model:iPad7,2;ver:15.60;inc_id:18;obf_id:18"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×25"
+      },
+      {
+        "report_code": "0x0112232f",
+        "family": "0x011223xx",
+        "dynamic_subtype": 47,
+        "observations": 25,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 25
+        },
+        "roles": {
+          "device_profile": 20,
+          "state_snapshot": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "sC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPad7,3;ver:16.40;inc_id:43;obf_id:43",
+          ",model:iPad7,3;ver:16.40;inc_id:48;obf_id:48",
+          ".model:iPhone9,1;ver:15.60;inc_id:12;obf_id:12"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×20; 状态快照（cs/ob/state/r/p）×2"
+      },
+      {
+        "report_code": "0x01122343",
+        "family": "0x011223xx",
+        "dynamic_subtype": 67,
+        "observations": 25,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 25
+        },
+        "roles": {
+          "device_profile": 19,
+          "state_snapshot": 2,
+          "account_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "cs:<redacted>,ob:<redacted>;model:iPad7,3;ver:16.10;inc_id:56;obf_id:56",
+          "cs:<redacted>,ob:<redacted>;model:iPad7,3;ver:16.10;inc_id:60;obf_id:60",
+          "cs:<redacted>,ob:<redacted>;model:iPad7,3;ver:16.10;inc_id:79;obf_id:79"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×19; 状态快照（cs/ob/state/r/p）×2; 账号上下文 + inc/obf 序号×1"
+      },
+      {
+        "report_code": "0x010a0043",
+        "family": "0x010a0043",
+        "dynamic_subtype": null,
+        "observations": 24,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 24
+        },
+        "roles": {
+          "目前不能证明含义": 24
+        },
+        "confidence": "unknown",
+        "source_confidence": "中",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [],
+        "meaning": "目前不能证明含义",
+        "historical_observation": "4 字节标量控制记录；字段名/枚举仍未知"
+      },
+      {
+        "report_code": "0x01122384",
+        "family": "0x011223xx",
+        "dynamic_subtype": 132,
+        "observations": 24,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 24
+        },
+        "roles": {
+          "device_profile": 12
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:82;obf_id:82",
+          ",model:iPad7,3;ver:16.40;inc_id:81;obf_id:81",
+          ".model:iPad7,3;ver:16.40;inc_id:119;obf_id:119"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×12"
+      },
+      {
+        "report_code": "0x01122336",
+        "family": "0x011223xx",
+        "dynamic_subtype": 54,
+        "observations": 23,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 23
+        },
+        "roles": {
+          "device_profile": 18,
+          "account_metadata": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:47;obf_id:47",
+          "-model:iPad13,6;ver:16.40;inc_id:44;obf_id:44",
+          ".model:iPhone9,1;ver:15.60;inc_id:46;obf_id:46"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×18; 账号上下文 + inc/obf 序号×3"
+      },
+      {
+        "report_code": "0x01122339",
+        "family": "0x011223xx",
+        "dynamic_subtype": 57,
+        "observations": 21,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 21
+        },
+        "roles": {
+          "device_profile": 21
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPhone10,1;ver:16.40;inc_id:46;obf_id:46",
+          "model:iPad7,3;ver:16.40;inc_id:45;obf_id:45",
+          ",model:iPad7,3;ver:16.10;inc_id:60;obf_id:60"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×21"
+      },
+      {
+        "report_code": "0x01122341",
+        "family": "0x011223xx",
+        "dynamic_subtype": 65,
+        "observations": 19,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 19
+        },
+        "roles": {
+          "device_profile": 7,
+          "account_metadata": 7
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ".model:iPad7,3;ver:16.40;inc_id:226;obf_id:226",
+          ".model:iPad7,3;ver:16.40;inc_id:314;obf_id:314",
+          ";inc_id:12;obf_id:12"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×7; 账号上下文 + inc/obf 序号×7"
+      },
+      {
+        "report_code": "0x0112238a",
+        "family": "0x011223xx",
+        "dynamic_subtype": 138,
+        "observations": 18,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 18
+        },
+        "roles": {
+          "device_profile": 5,
+          "account_metadata": 5,
+          "file_reference": 4,
+          "state_counter": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPhone11,6;ver:16.30;inc_id:1;obf_id:1",
+          "a:1,r:0,cnt:1;inc_id:2;obf_id:2",
+          ";inc_id:5;obf_id:5"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×5; 账号上下文 + inc/obf 序号×5; 资源文件名引用（非文件内容）×4; 状态计数/序号×1"
+      },
+      {
+        "report_code": "0x0112234a",
+        "family": "0x011223xx",
+        "dynamic_subtype": 74,
+        "observations": 15,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 15
+        },
+        "roles": {
+          "device_profile": 14
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:16;obf_id:16",
+          ",model:iPad7,3;ver:16.40;inc_id:18;obf_id:18",
+          ",model:iPad7,3;ver:16.40;inc_id:24;obf_id:24"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×14"
+      },
+      {
+        "report_code": "0x01122340",
+        "family": "0x011223xx",
+        "dynamic_subtype": 64,
+        "observations": 14,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 14
+        },
+        "roles": {
+          "device_profile": 10,
+          "account_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:44;obf_id:44",
+          "model:iPhone9,1;ver:15.60;inc_id:76;obf_id:76",
+          ";inc_id:9;obf_id:9"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×10; 账号上下文 + inc/obf 序号×1"
+      },
+      {
+        "report_code": "0x01122350",
+        "family": "0x011223xx",
+        "dynamic_subtype": 80,
+        "observations": 14,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 14
+        },
+        "roles": {
+          "device_profile": 10,
+          "account_metadata": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,3;ver:16.10;inc_id:50;obf_id:50",
+          "model:iPhone9,1;ver:15.60;inc_id:81;obf_id:81",
+          ".model:iPhone9,1;ver:15.60;inc_id:60;obf_id:60"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×10; 账号上下文 + inc/obf 序号×2"
+      },
+      {
+        "report_code": "0x01122357",
+        "family": "0x011223xx",
+        "dynamic_subtype": 87,
+        "observations": 14,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 14
+        },
+        "roles": {
+          "device_profile": 11
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:141;obf_id:141",
+          "/model:iPad13,6;ver:14.50;inc_id:226;obf_id:226",
+          "/model:iPad13,6;ver:14.50;inc_id:396;obf_id:396"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×11"
+      },
+      {
+        "report_code": "0x01122346",
+        "family": "0x011223xx",
+        "dynamic_subtype": 70,
+        "observations": 13,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 13
+        },
+        "roles": {
+          "device_profile": 10
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:42;obf_id:42",
+          ".model:iPhone9,1;ver:15.60;inc_id:57;obf_id:57",
+          ".model:iPhone9,1;ver:15.60;inc_id:59;obf_id:59"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×10"
+      },
+      {
+        "report_code": "0x01122371",
+        "family": "0x011223xx",
+        "dynamic_subtype": 113,
+        "observations": 12,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 12
+        },
+        "roles": {
+          "device_profile": 11
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "?iTeamID:6H9S4KQ3C9;model:iPad7,3;ver:16.40;inc_id:32;obf_id:32",
+          "/model:iPhone11,6;ver:16.30;inc_id:19;obf_id:19",
+          "/model:iPhone11,6;ver:16.30;inc_id:22;obf_id:22"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×11"
+      },
+      {
+        "report_code": "0x01122373",
+        "family": "0x011223xx",
+        "dynamic_subtype": 115,
+        "observations": 11,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 11
+        },
+        "roles": {
+          "device_profile": 7,
+          "state_snapshot": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "80DBA21F0011…2204B0300…2025C0003…2038B680E240A5A19C5467…1011a38649519a035a2e9000…0000ff1a1a0e00768d6c6c;model:iPad7,3;ver:16.40;inc_id:76;obf_id:76",
+          "cs:<redacted>,ob:<redacted>;model:iPad7,3;ver:16.40;inc_id:82;obf_id:82",
+          "cs:<redacted>,ob:<redacted>;model:iPad7,3;ver:16.40;inc_id:83;obf_id:83"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×7; 状态快照（cs/ob/state/r/p）×1"
+      },
+      {
+        "report_code": "0x0112235d",
+        "family": "0x011223xx",
+        "dynamic_subtype": 93,
+        "observations": 10,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 10
+        },
+        "roles": {
+          "device_profile": 10
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPhone11,6;ver:16.30;inc_id:55;obf_id:55",
+          "model:iPhone11,6;ver:16.30;inc_id:56;obf_id:56",
+          "model:iPhone11,6;ver:16.30;inc_id:68;obf_id:68"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×10"
+      },
+      {
+        "report_code": "0x01122360",
+        "family": "0x011223xx",
+        "dynamic_subtype": 96,
+        "observations": 10,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 10
+        },
+        "roles": {
+          "device_profile": 7
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "BiTeamID:6H9S4KQ3C9;model:iPad13,6;ver:14.50;inc_id:136;obf_id:136",
+          "BiTeamID:6H9S4KQ3C9;model:iPad13,6;ver:14.50;inc_id:221;obf_id:221",
+          "BiTeamID:6H9S4KQ3C9;model:iPad13,6;ver:14.50;inc_id:476;obf_id:476"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×7"
+      },
+      {
+        "report_code": "0x01122365",
+        "family": "0x011223xx",
+        "dynamic_subtype": 101,
+        "observations": 10,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 10
+        },
+        "roles": {
+          "device_profile": 5
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:80;obf_id:80",
+          "model:iPad7,3;ver:16.40;inc_id:86;obf_id:86",
+          ",model:iPad7,3;ver:16.40;inc_id:97;obf_id:97"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×5"
+      },
+      {
+        "report_code": "0x0112232c",
+        "family": "0x011223xx",
+        "dynamic_subtype": 44,
+        "observations": 9,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 9
+        },
+        "roles": {
+          "account_metadata": 4,
+          "device_profile": 2,
+          "state_snapshot": 1,
+          "opaque_token_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "?iTeamID:6H9S4KQ3C9;model:iPad7,3;ver:16.40;inc_id:29;obf_id:29",
+          "a:1,r:0,cnt:1;inc_id:1;obf_id:1",
+          ";inc_id:5;obf_id:5"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：账号上下文 + inc/obf 序号×4; 设备/运行环境画像×2; 状态快照（cs/ob/state/r/p）×1; 不透明 token 元数据×1"
+      },
+      {
+        "report_code": "0x0112234e",
+        "family": "0x011223xx",
+        "dynamic_subtype": 78,
+        "observations": 9,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 9
+        },
+        "roles": {
+          "device_profile": 6,
+          "state_snapshot": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "cs:<redacted>,ob:<redacted>;inc_id:10;obf_id:10",
+          "80DAA21F0011…2000AA015C001000A2010FC6EB3F0F0A6BD94141712d141101010dfa4405…5694a5000…0000ff0c0c0700673937e7;model:iPad7,3;ver:16.10;inc_id:52;obf_id:52",
+          "80DB823B0001…3004E002312F4402D0A49A66341712d1411000001fa4405…5694a5000…0000ff0000…6537e7;model:iPad7,3;ver:16.10;inc_id:42;obf_id:42"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×6; 状态快照（cs/ob/state/r/p）×3"
+      },
+      {
+        "report_code": "0x0112232a",
+        "family": "0x011223xx",
+        "dynamic_subtype": 42,
+        "observations": 8,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 8
+        },
+        "roles": {
+          "device_profile": 6
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "cs:<redacted>,ob:<redacted>;model:iPhone9,1;ver:15.60;inc_id:80;obf_id:80",
+          "cs:<redacted>,ob:<redacted>;model:iPhone9,1;ver:15.60;inc_id:251;obf_id:251",
+          "cs:<redacted>,ob:<redacted>;model:iPhone9,1;ver:15.60;inc_id:258;obf_id:258"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×6"
+      },
+      {
+        "report_code": "0x01122349",
+        "family": "0x011223xx",
+        "dynamic_subtype": 73,
+        "observations": 8,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 8
+        },
+        "roles": {
+          "device_profile": 5
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:38;obf_id:38",
+          "sC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPad7,3;ver:16.10;inc_id:40;obf_id:40",
+          ",model:iPad7,3;ver:16.10;inc_id:42;obf_id:42"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×5"
+      },
+      {
+        "report_code": "0x01122366",
+        "family": "0x011223xx",
+        "dynamic_subtype": 102,
+        "observations": 7,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 7
+        },
+        "roles": {
+          "device_profile": 4
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:24;obf_id:24",
+          "main_module_path:/private/var/containers/Bundle/Application/2B44E3B3-77F3-412A-82B7-3F8AFFF9A47D/DeltaForceClient.app/DeltaForceClient;model:iPad7,3;ver:16.10;inc_id:29;obf_id:29",
+          ",model:iPad7,3;ver:16.10;inc_id:34;obf_id:34"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×4"
+      },
+      {
+        "report_code": "0x01122385",
+        "family": "0x011223xx",
+        "dynamic_subtype": 133,
+        "observations": 7,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 7
+        },
+        "roles": {
+          "device_profile": 7
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,2;ver:15.60;inc_id:45;obf_id:45",
+          "model:iPhone11,6;ver:16.30;inc_id:804;obf_id:804",
+          "model:iPhone11,6;ver:16.30;inc_id:13;obf_id:13"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×7"
+      },
+      {
+        "report_code": "0x0112234f",
+        "family": "0x011223xx",
+        "dynamic_subtype": 79,
+        "observations": 6,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 6
+        },
+        "roles": {
+          "device_profile": 5
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "1model:iPhone11,6;ver:16.30;inc_id:829;obf_id:829",
+          ",model:iPad7,3;ver:16.10;inc_id:40;obf_id:40",
+          "sC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPad7,3;ver:16.10;inc_id:43;obf_id:43"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×5"
+      },
+      {
+        "report_code": "0x01122374",
+        "family": "0x011223xx",
+        "dynamic_subtype": 116,
+        "observations": 6,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 6
+        },
+        "roles": {
+          "device_profile": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "-model:iPad13,6;ver:16.40;inc_id:41;obf_id:41",
+          "tC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPad13,6;ver:16.40;inc_id:43;obf_id:43",
+          "-model:iPad13,6;ver:16.40;inc_id:45;obf_id:45"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×3"
+      },
+      {
+        "report_code": "0x0112234b",
+        "family": "0x011223xx",
+        "dynamic_subtype": 75,
+        "observations": 5,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 5
+        },
+        "roles": {
+          "device_profile": 5
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPhone10,1;ver:16.40;inc_id:60;obf_id:60",
+          "/model:iPhone10,1;ver:16.40;inc_id:61;obf_id:61",
+          "/model:iPhone10,1;ver:16.40;inc_id:62;obf_id:62"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×5"
+      },
+      {
+        "report_code": "0x0112235f",
+        "family": "0x011223xx",
+        "dynamic_subtype": 95,
+        "observations": 4,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 4
+        },
+        "roles": {
+          "device_profile": 3,
+          "state_snapshot": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,2;ver:15.60;inc_id:67;obf_id:67",
+          "model:iPad7,3;ver:16.40;inc_id:38;obf_id:38",
+          "cs:<redacted>,ob:<redacted>;model:iPad7,3;ver:16.40;inc_id:79;obf_id:79"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×3; 状态快照（cs/ob/state/r/p）×1"
+      },
+      {
+        "report_code": "0x01122367",
+        "family": "0x011223xx",
+        "dynamic_subtype": 103,
+        "observations": 4,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 4
+        },
+        "roles": {
+          "device_profile": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:128;obf_id:128",
+          "/model:iPad13,6;ver:14.50;inc_id:383;obf_id:383"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×3"
+      },
+      {
+        "report_code": "0x01122369",
+        "family": "0x011223xx",
+        "dynamic_subtype": 105,
+        "observations": 4,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 4
+        },
+        "roles": {
+          "device_profile": 4
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,3;ver:16.40;inc_id:71;obf_id:71",
+          "model:iPad7,3;ver:16.40;inc_id:77;obf_id:77",
+          "model:iPad7,3;ver:16.40;inc_id:78;obf_id:78"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×4"
+      },
+      {
+        "report_code": "0x0112233e",
+        "family": "0x011223xx",
+        "dynamic_subtype": 62,
+        "observations": 3,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 3
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:11;obf_id:11",
+          "model:iPad7,3;ver:16.40;inc_id:67;obf_id:67"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x0112235a",
+        "family": "0x011223xx",
+        "dynamic_subtype": 90,
+        "observations": 3,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 3
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:41;obf_id:41",
+          ",model:iPad7,3;ver:16.40;inc_id:15;obf_id:15"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x01122377",
+        "family": "0x011223xx",
+        "dynamic_subtype": 119,
+        "observations": 3,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 3
+        },
+        "roles": {
+          "device_profile": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,2;ver:15.60;inc_id:57;obf_id:57",
+          "model:iPad7,2;ver:15.60;inc_id:58;obf_id:58",
+          "model:iPad7,2;ver:15.60;inc_id:62;obf_id:62"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×3"
+      },
+      {
+        "report_code": "0x01122378",
+        "family": "0x011223xx",
+        "dynamic_subtype": 120,
+        "observations": 3,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 3
+        },
+        "roles": {
+          "device_profile": 1,
+          "account_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "-model:iPad13,6;ver:16.40;inc_id:10;obf_id:10",
+          ";inc_id:9;obf_id:9"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1; 账号上下文 + inc/obf 序号×1"
+      },
+      {
+        "report_code": "0x0112237f",
+        "family": "0x011223xx",
+        "dynamic_subtype": 127,
+        "observations": 3,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 3
+        },
+        "roles": {
+          "device_profile": 3
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,2;ver:15.60;inc_id:47;obf_id:47",
+          ",model:iPad7,2;ver:15.60;inc_id:47;obf_id:47",
+          "/model:iPhone11,6;ver:16.30;inc_id:49;obf_id:49"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×3"
+      },
+      {
+        "report_code": "0x0112232b",
+        "family": "0x011223xx",
+        "dynamic_subtype": 43,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ".model:iPhone9,1;ver:15.60;inc_id:47;obf_id:47",
+          "model:iPad7,3;ver:16.40;inc_id:72;obf_id:72"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x01122330",
+        "family": "0x011223xx",
+        "dynamic_subtype": 48,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "sC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPad7,3;ver:16.10;inc_id:43;obf_id:43",
+          ",model:iPad7,3;ver:16.10;inc_id:45;obf_id:45"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x0112233b",
+        "family": "0x011223xx",
+        "dynamic_subtype": 59,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,3;ver:16.40;inc_id:66;obf_id:66"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122347",
+        "family": "0x011223xx",
+        "dynamic_subtype": 71,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.10;inc_id:41;obf_id:41"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122353",
+        "family": "0x011223xx",
+        "dynamic_subtype": 83,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "80DBA21F0011…0005A0003…0022A19714380A42939041712d1411000001fa4405…5694a5000…0000ff00000100aba9fb2b;model:iPhone11,6;ver:16.30;inc_id:51;obf_id:51",
+          ",model:iPad7,3;ver:16.10;inc_id:12;obf_id:12"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x01122364",
+        "family": "0x011223xx",
+        "dynamic_subtype": 100,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,3;ver:16.40;inc_id:13;obf_id:13",
+          ",model:iPad7,3;ver:16.40;inc_id:16;obf_id:16"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x0112236d",
+        "family": "0x011223xx",
+        "dynamic_subtype": 109,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "80DB821B0001…3005D00030057002A23436C640A5D8FFA41712d1411000001fa4405…5694a5000…0000ff00000100efedbf6f;model:iPad7,2;ver:15.60;inc_id:45;obf_id:45",
+          "80DBA21F0011…0010F4B3D6C640A5D8FFA41712d141101010dfa4405…5694a5000…0000ff0c0c0700670637e7;model:iPad7,2;ver:15.60;inc_id:55;obf_id:55"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x01122372",
+        "family": "0x011223xx",
+        "dynamic_subtype": 114,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 1,
+          "account_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,2;ver:15.60;inc_id:12;obf_id:12",
+          ";inc_id:9;obf_id:9"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1; 账号上下文 + inc/obf 序号×1"
+      },
+      {
+        "report_code": "0x01122375",
+        "family": "0x011223xx",
+        "dynamic_subtype": 117,
+        "observations": 2,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 2
+        },
+        "roles": {
+          "device_profile": 2
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:307;obf_id:307",
+          "/model:iPad13,6;ver:14.50;inc_id:392;obf_id:392"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×2"
+      },
+      {
+        "report_code": "0x01122328",
+        "family": "0x011223xx",
+        "dynamic_subtype": 40,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "account_metadata": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ";inc_id:8;obf_id:8"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：账号上下文 + inc/obf 序号×1"
+      },
+      {
+        "report_code": "0x01122331",
+        "family": "0x011223xx",
+        "dynamic_subtype": 49,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "/model:iPad13,6;ver:14.50;inc_id:311;obf_id:311"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122332",
+        "family": "0x011223xx",
+        "dynamic_subtype": 50,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPhone10,1;ver:16.40;inc_id:59;obf_id:59"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x0112233d",
+        "family": "0x011223xx",
+        "dynamic_subtype": 61,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "0model:iPhone9,1;ver:15.60;inc_id:133;obf_id:133"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122344",
+        "family": "0x011223xx",
+        "dynamic_subtype": 68,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,3;ver:16.40;inc_id:45;obf_id:45"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122351",
+        "family": "0x011223xx",
+        "dynamic_subtype": 81,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "BiTeamID:6H9S4KQ3C9;model:iPhone11,6;ver:16.30;inc_id:32;obf_id:32"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x0112235b",
+        "family": "0x011223xx",
+        "dynamic_subtype": 91,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPhone9,1;ver:15.60;inc_id:69;obf_id:69"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x0112235e",
+        "family": "0x011223xx",
+        "dynamic_subtype": 94,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,3;ver:16.10;inc_id:51;obf_id:51"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122368",
+        "family": "0x011223xx",
+        "dynamic_subtype": 104,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ",model:iPad7,2;ver:15.60;inc_id:11;obf_id:11"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x0112236b",
+        "family": "0x011223xx",
+        "dynamic_subtype": 107,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "?iTeamID:6H9S4KQ3C9;model:iPad7,2;ver:15.60;inc_id:32;obf_id:32"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x0112236e",
+        "family": "0x011223xx",
+        "dynamic_subtype": 110,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "model:iPad7,2;ver:15.60;inc_id:44;obf_id:44"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122381",
+        "family": "0x011223xx",
+        "dynamic_subtype": 129,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          "xC=US, O=Apple Inc., OU=Apple Certification Authority, CN=Apple Root CA;model:iPhone11,6;ver:16.30;inc_id:837;obf_id:837"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      },
+      {
+        "report_code": "0x01122387",
+        "family": "0x011223xx",
+        "dynamic_subtype": 135,
+        "observations": 1,
+        "counts": {
+          "request": 0,
+          "response": 0,
+          "direction_unknown": 1
+        },
+        "roles": {
+          "device_profile": 1
+        },
+        "confidence": "confirmed",
+        "source_confidence": "高（结构）；角色为观察值",
+        "source_evidence": "static+history",
+        "shapes": {},
+        "fields": {},
+        "correlations": {},
+        "samples": [
+          ".model:iPhone9,1;ver:15.60;inc_id:12;obf_id:12"
+        ],
+        "meaning": "动态 metadata event family；低字节仅为 subtype",
+        "historical_observation": "动态 metadata；本地唯一载荷角色：设备/运行环境画像×1"
+      }
+    ],
+    "dynamic_011223_subtypes": {
+      "0x42": 1067,
+      "0x2e": 886,
+      "0x88": 371,
+      "0x7a": 231,
+      "0x6c": 152,
+      "0x4d": 95,
+      "0x4c": 84,
+      "0x89": 77,
+      "0x38": 73,
+      "0x62": 59,
+      "0x86": 55,
+      "0x2d": 53,
+      "0x34": 50,
+      "0x80": 49,
+      "0x29": 47,
+      "0x37": 45,
+      "0x58": 41,
+      "0x83": 34,
+      "0x35": 33,
+      "0x54": 32,
+      "0x61": 32,
+      "0x7d": 31,
+      "0x3c": 31,
+      "0x3a": 31,
+      "0x3f": 31,
+      "0x48": 29,
+      "0x55": 28,
+      "0x8b": 26,
+      "0x43": 25,
+      "0x2f": 25,
+      "0x84": 24,
+      "0x36": 23,
+      "0x39": 21,
+      "0x41": 19,
+      "0x8a": 18,
+      "0x4a": 15,
+      "0x57": 14,
+      "0x50": 14,
+      "0x40": 14,
+      "0x46": 13,
+      "0x71": 12,
+      "0x73": 11,
+      "0x60": 10,
+      "0x65": 10,
+      "0x5d": 10,
+      "0x2c": 9,
+      "0x4e": 9,
+      "0x49": 8,
+      "0x2a": 8,
+      "0x66": 7,
+      "0x85": 7,
+      "0x74": 6,
+      "0x4f": 6,
+      "0x4b": 5,
+      "0x67": 4,
+      "0x5f": 4,
+      "0x69": 4,
+      "0x3e": 3,
+      "0x78": 3,
+      "0x5a": 3,
+      "0x7f": 3,
+      "0x77": 3,
+      "0x75": 2,
+      "0x3b": 2,
+      "0x2b": 2,
+      "0x72": 2,
+      "0x6d": 2,
+      "0x53": 2,
+      "0x47": 2,
+      "0x64": 2,
+      "0x30": 2,
+      "0x31": 1,
+      "0x32": 1,
+      "0x28": 1,
+      "0x87": 1,
+      "0x5b": 1,
+      "0x3d": 1,
+      "0x68": 1,
+      "0x6b": 1,
+      "0x6e": 1,
+      "0x81": 1,
+      "0x51": 1,
+      "0x5e": 1,
+      "0x44": 1
+    },
+    "traffic": {
+      "requests": 0,
+      "responses": 0,
+      "direction_unknown": 88150,
+      "response_request_ratio": null
+    },
+    "response_bursts": {
+      "max_per_request_2s": {},
+      "requests_over_3": {}
+    },
+    "mirror": {
+      "state_phases": {},
+      "actions": {},
+      "reasons": {},
+      "average_consistency": null,
+      "max_source_age_ms": null
+    },
+    "connection_65010": {
+      "observed": false,
+      "status": "not_available_in_matrix"
+    },
+    "unknown_reports": [
+      "0x010a0056",
+      "0x01020002",
+      "0x010a0036",
+      "0x010a0043"
+    ],
+    "unknown_note": "历史矩阵没有方向/时序关联；未知项目前不能证明含义，不把旧标签升级为确定协议语义。"
+  }
+}

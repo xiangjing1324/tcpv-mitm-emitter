@@ -15,6 +15,18 @@ from urllib.parse import parse_qs, quote, unquote
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
+from .agent_api import (
+    AGENT_API_PREFIX,
+    AGENT_MAX_EVENTS,
+    AGENT_MAX_PAYLOAD_BYTES,
+    AGENT_SCHEMA,
+    capabilities as agent_capabilities,
+    filter_flows as agent_filter_flows,
+    parse_direction as agent_parse_direction,
+    parse_time_value as agent_parse_time_value,
+    resolve_flow as agent_resolve_flow,
+    shape_event as agent_shape_event,
+)
 from .web import INDEX_HTML
 
 
@@ -54,6 +66,19 @@ def _auth_password() -> str:
         or str(os.getenv("TCPV_PASSWORD", "") or "").strip()
         or _mitmweb_setting("web_password")
     )
+
+
+def _agent_token() -> str:
+    return str(os.getenv("TCPV_AGENT_TOKEN", "") or "").strip()
+
+
+def _check_agent_token(request: Request, token: str) -> bool:
+    if not token:
+        return False
+    authorization = str(request.headers.get("authorization", "") or "").strip()
+    supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    supplied = supplied or str(request.headers.get("x-tcpv-agent-token", "") or "").strip()
+    return bool(supplied) and secrets.compare_digest(supplied, token)
 
 
 def _auth_secret(password: str) -> bytes:
@@ -101,6 +126,7 @@ def create_app(runtime) -> FastAPI:
     app = FastAPI(title="tcpv-mitm-emitter", version="0.1.0")
     app_js_path = Path(__file__).with_name("app.js")
     auth_password = _auth_password()
+    agent_token = _agent_token()
     auth_max_age = _env_int("TCPV_AUTH_MAX_AGE", AUTH_COOKIE_MAX_AGE, min_value=60)
     auth_cookie_secure = _env_bool("TCPV_AUTH_COOKIE_SECURE", False)
 
@@ -111,8 +137,18 @@ def create_app(runtime) -> FastAPI:
 
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
-        if not auth_password or request.url.path in {"/login", "/logout"} or is_authenticated(request):
-            return await call_next(request)
+        agent_request = request.url.path.startswith(f"{AGENT_API_PREFIX}/")
+        if (
+            not auth_password
+            or request.url.path in {"/login", "/logout"}
+            or is_authenticated(request)
+            or (agent_request and _check_agent_token(request, agent_token))
+        ):
+            response = await call_next(request)
+            if agent_request:
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["X-TCPV-Agent-Schema"] = AGENT_SCHEMA
+            return response
         accept = str(request.headers.get("accept", "") or "").lower()
         if request.method == "GET" and ("text/html" in accept or "*/*" in accept):
             target = quote(str(request.url.path) + (f"?{request.url.query}" if request.url.query else ""), safe="")
@@ -217,6 +253,184 @@ def create_app(runtime) -> FastAPI:
             "ok": True,
             "enabled": runtime.enabled,
             "instance_id": runtime.instance_id,
+        }
+
+    @app.get(f"{AGENT_API_PREFIX}/capabilities")
+    def machine_capabilities() -> dict:
+        return agent_capabilities(
+            instance_id=str(runtime.instance_id or ""),
+            token_configured=bool(agent_token),
+        )
+
+    @app.get(f"{AGENT_API_PREFIX}/flows")
+    def machine_flows(
+        q: str = Query("", max_length=512),
+        status: str = Query("", max_length=32),
+        source_port: str = Query("", max_length=32),
+        since: str = Query("", max_length=64),
+        limit: int = Query(50, ge=1, le=200),
+    ) -> dict:
+        now_ms = int(time.time() * 1000)
+        try:
+            since_ts = agent_parse_time_value(since, now_ms=now_ms, relative=True)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid since: {exc}") from exc
+        items = agent_filter_flows(
+            runtime.get_accounts(),
+            query=q,
+            status=status,
+            source_port=source_port,
+            since_ts=since_ts,
+            limit=limit,
+        )
+        return {
+            "schema": "tcpv.agent.flows.v1",
+            "instance_id": str(runtime.instance_id or ""),
+            "server_time_ms": now_ms,
+            "query": {"q": q, "status": status, "source_port": source_port, "since": since},
+            "count": len(items),
+            "flows": items,
+        }
+
+    @app.get(f"{AGENT_API_PREFIX}/query")
+    def machine_query(
+        flow: str = Query("latest", max_length=1024),
+        flow_q: str = Query("", max_length=512),
+        q: str = Query("", max_length=2048),
+        summary: str = Query("", max_length=2048),
+        cid: str = Query("", max_length=2048),
+        status: str = Query("", max_length=32),
+        source_port: str = Query("", max_length=32),
+        since: str = Query("", max_length=64),
+        until: str = Query("", max_length=64),
+        direction: str = Query("all", max_length=32),
+        min_len: int | None = Query(None, ge=0),
+        max_len: int | None = Query(None, ge=0),
+        cursor: str | None = Query(None, max_length=128),
+        limit: int = Query(100, ge=1, le=AGENT_MAX_EVENTS),
+        scan_limit: int = Query(5000, ge=1, le=50000),
+        view: str = Query("compact", pattern="^(compact|analysis|payload|full)$"),
+        payload_bytes: int = Query(256, ge=0, le=AGENT_MAX_PAYLOAD_BYTES),
+        payload_encoding: str = Query("hex", pattern="^(hex|base64)$"),
+    ) -> dict:
+        now_ms = int(time.time() * 1000)
+        try:
+            since_ts = agent_parse_time_value(since, now_ms=now_ms, relative=True)
+            until_ts = agent_parse_time_value(until, now_ms=now_ms, relative=False)
+            wanted_direction = agent_parse_direction(direction)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if min_len is not None and max_len is not None and min_len > max_len:
+            raise HTTPException(status_code=400, detail="min_len must not exceed max_len")
+
+        matched_flows = agent_filter_flows(
+            runtime.get_accounts(),
+            query=flow_q,
+            status=status,
+            source_port=source_port,
+            since_ts=since_ts,
+            limit=200,
+        )
+        selected = agent_resolve_flow(matched_flows, flow)
+        base = {
+            "schema": AGENT_SCHEMA,
+            "instance_id": str(runtime.instance_id or ""),
+            "server_time_ms": now_ms,
+            "read_only": True,
+            "query": {
+                "flow": flow,
+                "flow_q": flow_q,
+                "q": q,
+                "summary": summary,
+                "cid": cid,
+                "status": status,
+                "source_port": source_port,
+                "since": since,
+                "until": until,
+                "direction": direction,
+                "min_len": min_len,
+                "max_len": max_len,
+                "cursor": cursor,
+                "limit": limit,
+                "scan_limit": scan_limit,
+                "view": view,
+                "payload_bytes": payload_bytes,
+                "payload_encoding": payload_encoding,
+            },
+        }
+        if selected is None:
+            base.update(
+                {
+                    "selection_required": len(matched_flows) > 1,
+                    "reason": "flow not found or selector is ambiguous",
+                    "flow_count": len(matched_flows),
+                    "flows": matched_flows[:20],
+                    "events": [],
+                    "cursor": {"next": cursor, "has_more": False},
+                }
+            )
+            return base
+
+        include_payload = view in {"payload", "full"}
+        include_analysis = view in {"analysis", "full"}
+        events, next_cursor, has_more, scanned = runtime.query_events(
+            account=str(selected.get("account") or ""),
+            before_id=cursor,
+            limit=limit,
+            scan_limit=scan_limit,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            direction=wanted_direction,
+            min_len=min_len,
+            max_len=max_len,
+            summary_contains=summary,
+            cid_contains=cid,
+            query=q,
+            include_payload=include_payload,
+            include_analysis=include_analysis,
+        )
+        shaped = [
+            agent_shape_event(
+                event,
+                view=view,
+                payload_bytes=payload_bytes,
+                payload_encoding=payload_encoding,
+            )
+            for event in events
+        ]
+        base.update(
+            {
+                "selection_required": False,
+                "flow": selected,
+                "event_count": len(shaped),
+                "scanned": scanned,
+                "events": shaped,
+                "cursor": {"next": next_cursor, "has_more": has_more, "order": "newest_first"},
+            }
+        )
+        return base
+
+    @app.get(f"{AGENT_API_PREFIX}/event")
+    def machine_event(
+        flow: str = Query(..., min_length=1, max_length=1024),
+        id: str = Query(..., min_length=1, max_length=128),
+        view: str = Query("full", pattern="^(compact|analysis|payload|full)$"),
+        payload_bytes: int = Query(4096, ge=0, le=AGENT_MAX_PAYLOAD_BYTES),
+        payload_encoding: str = Query("hex", pattern="^(hex|base64)$"),
+    ) -> dict:
+        item = runtime.get_event(account=flow, event_id=id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        return {
+            "schema": "tcpv.agent.event.v1",
+            "instance_id": str(runtime.instance_id or ""),
+            "flow": flow,
+            "event": agent_shape_event(
+                item,
+                view=view,
+                payload_bytes=payload_bytes,
+                payload_encoding=payload_encoding,
+            ),
         }
 
     @app.get("/accounts")

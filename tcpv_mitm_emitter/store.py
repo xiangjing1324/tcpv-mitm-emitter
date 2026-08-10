@@ -454,6 +454,113 @@ class TcpvEventStore:
         last_id = events[-1]["id"] if events else after_id
         return events, last_id, has_more
 
+    def query_events(
+        self,
+        account: str,
+        *,
+        before_id: str | None = None,
+        limit: int = 100,
+        scan_limit: int = 5000,
+        since_ts: int | None = None,
+        until_ts: int | None = None,
+        direction: int | None = None,
+        min_len: int | None = None,
+        max_len: int | None = None,
+        summary_contains: str = "",
+        cid_contains: str = "",
+        query: str = "",
+        include_payload: bool = False,
+        include_analysis: bool = False,
+    ) -> tuple[list[dict[str, Any]], str | None, bool, int]:
+        """Return a bounded newest-first event page for machine consumers.
+
+        This path is deliberately read-only. ``scan_limit`` bounds Redis work
+        even when filters match no packet, while ``before_id`` provides a
+        stable reverse cursor for follow-up calls.
+        """
+
+        full_key = self.stream_key(account)
+        full_count = self._to_int(self.r.xlen(full_key), 0)
+        if full_count <= 0:
+            return [], before_id, False, 0
+
+        stream_key = full_key
+        if not include_payload and not include_analysis and not str(query or "").strip():
+            compact_key = self.compact_stream_key(account)
+            if self._to_int(self.r.xlen(compact_key), 0) == full_count:
+                stream_key = compact_key
+
+        result_limit = max(1, min(int(limit), min(self.api_max_limit, 2000)))
+        bounded_scan = max(result_limit, min(int(scan_limit), min(self.api_max_limit, 50_000)))
+        max_id = f"({before_id}" if before_id else "+"
+        rows = self.r.xrevrange(stream_key, max=max_id, min="-", count=bounded_scan + 1)
+        fetched_more = len(rows) > bounded_scan
+        if fetched_more:
+            rows = rows[:bounded_scan]
+
+        summary_needle = str(summary_contains or "").casefold()
+        cid_needle = str(cid_contains or "").casefold()
+        query_needle = str(query or "").casefold()
+        events: list[dict[str, Any]] = []
+        scanned = 0
+        next_cursor = before_id
+        stopped_on_limit = False
+
+        for entry_id, fields in rows:
+            scanned += 1
+            next_cursor = self._to_str(entry_id)
+            decoded = {self._to_str(key): self._to_str(value) for key, value in fields.items()}
+            event_ts = self._to_int(decoded.get("ts"), 0)
+            event_dir = self._to_int(decoded.get("dir"), 0)
+            event_len = self._to_int(decoded.get("len"), 0)
+            summary_text = decoded.get("sm", "")
+            cid_text = decoded.get("cid", "")
+
+            if since_ts is not None and event_ts < int(since_ts):
+                # Reverse-ordered rows can stop as soon as they cross since.
+                break
+            if until_ts is not None and event_ts > int(until_ts):
+                continue
+            if direction is not None and event_dir != int(direction):
+                continue
+            if min_len is not None and event_len < int(min_len):
+                continue
+            if max_len is not None and event_len > int(max_len):
+                continue
+            if summary_needle and summary_needle not in summary_text.casefold():
+                continue
+            if cid_needle and cid_needle not in cid_text.casefold():
+                continue
+            if query_needle:
+                haystack = "\n".join(
+                    (
+                        summary_text,
+                        cid_text,
+                        decoded.get("kp", ""),
+                        decoded.get("lbl", ""),
+                        decoded.get("src", ""),
+                        decoded.get("pfx", ""),
+                        decoded.get("ana", ""),
+                    )
+                ).casefold()
+                if query_needle not in haystack:
+                    continue
+
+            events.append(
+                self._decode_row(
+                    entry_id,
+                    fields,
+                    include_payload=include_payload,
+                    include_analysis=include_analysis,
+                )
+            )
+            if len(events) >= result_limit:
+                stopped_on_limit = True
+                break
+
+        has_more = fetched_more or stopped_on_limit or scanned < len(rows)
+        return events, next_cursor, has_more, scanned
+
     def iter_events(
         self,
         account: str,

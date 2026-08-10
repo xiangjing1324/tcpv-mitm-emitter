@@ -14,7 +14,12 @@ from tcpv_mitm_emitter.archive import parse_txt_capture, read_flow_archive_bytes
 from tcpv_mitm_emitter.config import runtime_config
 from tcpv_mitm_emitter.runtime import TcpvRuntime
 from tcpv_mitm_emitter.store import TcpvEventStore
-from tcpv_mitm_emitter.semantic import analysis_from_event, analyze_payload, correlate_events
+from tcpv_mitm_emitter.semantic import (
+    analysis_from_event,
+    analysis_needs_upgrade,
+    analyze_payload,
+    correlate_events,
+)
 from tcpv_mitm_emitter.shape_summary import render_markdown, summarize_events, summarize_input
 
 
@@ -130,6 +135,13 @@ class FakeRedis:
 
     def xrevrange(self, key, max="+", min="-", count=None):
         rows = list(reversed(self.streams.get(key, [])))
+        if max and str(max).startswith("("):
+            before = int(str(max)[1:].split("-", 1)[0])
+            rows = [
+                (entry_id, fields)
+                for entry_id, fields in rows
+                if int(str(entry_id).split("-", 1)[0]) < before
+            ]
         if count is not None:
             rows = rows[: int(count)]
         return rows
@@ -298,17 +310,21 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn('directTssRecord ? `UAGame body -> TSS record ${payload.length}B`', app_js)
         self.assertIn('["ascii_hex", "tss_record"].includes(carrierMode)', app_js)
         self.assertIn("function gcloudUagame4013Insights(meta, commandName", app_js)
-        self.assertIn('text: "4013 decrypted"', app_js)
-        self.assertIn("所有 opcode 均进入完整 body 展示", app_js)
-        self.assertIn("来自 UAGame 40-byte private header offset 0x04", app_js)
         self.assertIn('label: "UAGame 4013"', app_js)
         self.assertIn("function gcloudUagameEnvelopeAnchorText()", app_js)
-        self.assertIn('text: "opcode@+0x04"', app_js)
-        self.assertIn('text: "abab@+0x26"', app_js)
         self.assertIn('label: "Identity anchor"', app_js)
         self.assertIn('label: "识别边界"', app_js)
         self.assertIn('"1.3": "call_id"', app_js)
         self.assertIn('label: "消息关联 ID"', app_js)
+        self.assertIn("function isUagamePrivateFragmentMeta(meta)", app_js)
+        self.assertIn("function analyzeUagamePrivateFragment(byteValues)", app_js)
+        self.assertIn('kind: "uagame_private_fragment"', app_js)
+        self.assertIn("marker offset 动态", app_js)
+        self.assertIn("function gcloudOpaqueBinaryCarrierKind(byteValues)", app_js)
+        self.assertIn('return "ZIP carrier"', app_js)
+        self.assertIn("protobuf recursion stopped", app_js)
+        self.assertIn("if (proto && proto.uagameBody) return \"\";", app_js)
+        self.assertIn("UAGame business protobuf；字段按原始 fN 路径展示", app_js)
 
     def test_tcpview_frontend_renders_lobby_wss_feature_resource_without_cross_flow_claim(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
@@ -376,7 +392,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("function gcloudSummaryHasSentWireChange", app_js)
         self.assertIn("wire_header_modified=1|wire_changed=1|report_010a005f=outer_header_only|outer_header_0x15=01->00", app_js)
         self.assertIn("实际发送修改成功", app_js)
-        self.assertIn("isGcloud65010Summary(summaryText)", app_js)
+        self.assertIn("isGcloud65010Summary(summaryText, ev)", app_js)
         self.assertIn("gcloudSummaryHasSentWireChange(summaryText)", app_js)
         self.assertIn("rawWireChangedOffsets", app_js)
         self.assertIn("修改后解密 [after/rebuilt]", app_js)
@@ -1145,6 +1161,26 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertFalse(any(key.startswith("tcpv:lifecycle:") for key in redis_client.hashes))
         self.assertFalse(any(key.startswith("tcpv:lifecycle:") for key in redis_client.streams))
 
+    def test_cleanup_all_instances_unlinks_only_tcpview_namespace(self):
+        redis_client = mock.Mock()
+        redis_client.scan.side_effect = [
+            (7, [b"tcpv:old-a:events:1", b"tcpv:old-b:meta:2"]),
+            (0, [b"tcpv:new-c:accounts"]),
+        ]
+        redis_client.execute_command.side_effect = [2, 1]
+        store = TcpvEventStore(redis_client, "current", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+
+        deleted = store.cleanup_all_instances()
+
+        self.assertEqual(deleted, 3)
+        self.assertEqual(
+            redis_client.execute_command.call_args_list,
+            [
+                mock.call("UNLINK", "tcpv:old-a:events:1", "tcpv:old-b:meta:2"),
+                mock.call("UNLINK", "tcpv:new-c:accounts"),
+            ],
+        )
+
     def test_runtime_backfills_old_analysis_even_for_compact_event_lists(self):
         record = _metadata_record(0x0112237A, b"state:00300015,r:0/0/0,p:1/1,0\x00")
         store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
@@ -1162,6 +1198,83 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["pay"], "")
         self.assertEqual(events[0]["analysis"]["schema"], "tersafe.semantic.v1")
         self.assertEqual(events[0]["analysis"]["packet"]["dynamic_subtype"], 0x7A)
+
+    def test_runtime_trusts_authoritative_gcloud_handoff_without_reparse(self):
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        runtime = TcpvRuntime()
+        handoff = {
+            "schema": "tcpv.gcloud.analysis.v1",
+            "analysis_authoritative": True,
+            "analysis_source": "producer_handoff",
+            "packet": {
+                "semantic_category": "security.ace.antidata",
+                "semantic_role": "ace_antidata",
+            },
+            "mutation": {
+                "modified": True,
+                "labels": ["rust_pe_gcloud_antidata_rewrite=1"],
+            },
+        }
+        item = {
+            "account": "acct",
+            "cid": "client->server:17500",
+            "dir": 0,
+            "payload": b"decoded-after",
+            "packet_len": len(b"decoded-after"),
+            "full_payload": b"\x33\x66encrypted-before",
+            "full_packet_len": len(b"\x33\x66encrypted-before"),
+            "before_payload": b"decoded-before",
+            "before_packet_len": len(b"decoded-before"),
+            "raw_payload": b"\x33\x66encrypted-after",
+            "raw_packet_len": len(b"\x33\x66encrypted-after"),
+            "proxy_username": "",
+            "summary": "transport=tgcp65010 command=0x4013 crypto=decrypted",
+            "analysis": handoff,
+            "ts_ms": 1000,
+            "msg_idx": 1,
+            "chunk_idx": 0,
+        }
+
+        with mock.patch("tcpv_mitm_emitter.runtime.analyze_payload") as analyze:
+            runtime._append_store_event(store, item)
+
+        analyze.assert_not_called()
+        event = store.get_event("acct", "1")
+        self.assertEqual(event["analysis"], handoff)
+        self.assertEqual(event["before_pay"], base64.b64encode(b"decoded-before").decode("ascii"))
+        self.assertEqual(event["raw_pfx"], b"\x33\x66encrypted-after".hex())
+        self.assertEqual(runtime.get_stats()["producer_analysis_count"], 1)
+        self.assertEqual(runtime.get_stats()["semantic_parse_count"], 0)
+        self.assertEqual(runtime.get_stats()["semantic_skipped_payload_count"], 4)
+
+    def test_authoritative_gcloud_handoff_is_not_marked_for_tss_upgrade(self):
+        analysis = {
+            "schema": "tcpv.gcloud.analysis.v1",
+            "analysis_authoritative": True,
+            "packet": {"semantic_category": "transport.gcloud.application"},
+        }
+        self.assertFalse(analysis_needs_upgrade(analysis))
+
+    def test_analysis_from_event_returns_authoritative_gcloud_handoff_verbatim(self):
+        analysis = {
+            "schema": "tcpv.gcloud.analysis.v1",
+            "analysis_authoritative": True,
+            "packet": {"semantic_category": "security.ace.antidata"},
+        }
+        event = {
+            "analysis": analysis,
+            "pay": base64.b64encode(b"decoded-after").decode("ascii"),
+            "before_pay": base64.b64encode(b"decoded-before").decode("ascii"),
+            "full_pay": base64.b64encode(b"encrypted-before").decode("ascii"),
+            "raw_pay": base64.b64encode(b"encrypted-after").decode("ascii"),
+            "dir": 0,
+        }
+
+        with mock.patch("tcpv_mitm_emitter.semantic.analyze_payload") as analyze:
+            result = analysis_from_event(event)
+
+        analyze.assert_not_called()
+        self.assertIs(result, analysis)
 
     def test_runtime_can_omit_analysis_for_lightweight_event_lists(self):
         record = _metadata_record(0x0112237A, b"state:00300015,r:0/0/0,p:1/1,0\x00")

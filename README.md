@@ -164,6 +164,68 @@ When initialized, FastAPI viewer endpoints are exposed on `bind_host:bind_port`:
 - `POST /archives/replay?name=...`
 - `GET /`
 
+## AI / Agent Fast Query API
+
+AI tools should use the read-only, bounded `/api/agent/v1/*` interface instead
+of screenshots or downloading an entire flow. Discover the live contract first:
+
+```bash
+export TCPV_AGENT_URL=http://1.12.226.238:18092
+export TCPV_AGENT_TOKEN='<read from the local private agent config>'
+
+curl -fsS \
+  -H "Authorization: Bearer $TCPV_AGENT_TOKEN" \
+  "$TCPV_AGENT_URL/api/agent/v1/capabilities"
+```
+
+One call returns the latest matching flow and a newest-first packet page:
+
+```bash
+curl -fsS -G \
+  -H "Authorization: Bearer $TCPV_AGENT_TOKEN" \
+  --data-urlencode 'flow=latest' \
+  --data-urlencode 'since=5m' \
+  --data-urlencode 'direction=all' \
+  --data-urlencode 'view=analysis' \
+  --data-urlencode 'limit=100' \
+  "$TCPV_AGENT_URL/api/agent/v1/query"
+```
+
+For payload bytes, request a bounded structured preview. This avoids returning
+unbounded Base64 fields and reports both truncation and the stored SHA-256:
+
+```bash
+curl -fsS -G \
+  -H "Authorization: Bearer $TCPV_AGENT_TOKEN" \
+  --data-urlencode 'flow=latest' \
+  --data-urlencode 'summary=command=0x4013' \
+  --data-urlencode 'view=payload' \
+  --data-urlencode 'payload_bytes=1024' \
+  --data-urlencode 'payload_encoding=hex' \
+  --data-urlencode 'limit=50' \
+  "$TCPV_AGENT_URL/api/agent/v1/query"
+```
+
+Views are `compact`, `analysis`, `payload`, and `full`. Filters include
+`flow`, `flow_q`, `q`, `summary`, `cid`, `status`, `source_port`, `since`,
+`until`, `direction`, `min_len`, and `max_len`. Follow `cursor.next` to request
+the next older page. Every query is read-only and has explicit event, scan, and
+payload-byte limits.
+
+The installed Python client exposes the same contract without hand-building a
+URL:
+
+```bash
+python -m tcpv_mitm_emitter.agent_client \
+  --base-url "$TCPV_AGENT_URL" \
+  query --flow latest --since 5m --view analysis --limit 100
+```
+
+Set `TCPV_AGENT_TOKEN` on the TCPView process to enable bearer-token access when
+the browser UI uses `TCPV_AUTH_PASSWORD`. The token is accepted through either
+`Authorization: Bearer ...` or `X-TCPV-Agent-Token`; never commit it to Git or
+put it in reports/logs.
+
 ## Import / Replay / Save
 
 TCPV can import existing mitm txt captures and its own archive files.
