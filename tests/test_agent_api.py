@@ -102,6 +102,8 @@ class AgentApiTests(unittest.TestCase):
                 "id": "1",
                 "dir": 0,
                 "len": 6,
+                "pfx": "616263646566",
+                "full_pfx": "616263646566",
                 "pay": base64.b64encode(b"abcdef").decode("ascii"),
                 "full_pay": "",
                 "before_pay": "",
@@ -115,7 +117,23 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(shaped["payloads"]["display"]["data"], b"abc".hex())
         self.assertTrue(shaped["payloads"]["display"]["truncated"])
         self.assertNotIn("analysis", shaped)
+        self.assertNotIn("pfx", shaped)
+        self.assertNotIn("full_pfx", shaped)
         self.assertEqual(shaped["direction"], "request")
+
+        full = shape_event(
+            {
+                "id": "1",
+                "dir": 0,
+                "len": 6,
+                "pfx": "616263646566",
+                "pay": base64.b64encode(b"abcdef").decode("ascii"),
+            },
+            view="full",
+            payload_bytes=3,
+            payload_encoding="hex",
+        )
+        self.assertEqual(full["pfx"], "616263646566")
 
     def test_fastapi_exposes_one_call_query_and_capability_discovery(self) -> None:
         runtime = self._runtime()

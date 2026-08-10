@@ -161,6 +161,13 @@ def shape_event(
         "before": (str(item.pop("before_pay", "") or ""), int(item.get("before_len") or 0)),
         "forwarded": (str(item.pop("raw_pay", "") or ""), int(item.get("raw_len") or 0)),
     }
+    # Prefix previews are useful for an exact, focused inspection but dominate
+    # compact multi-event responses.  Keep byte material exclusive to the
+    # bounded payload/full views so the default path remains genuinely cheap
+    # for agents to read.
+    if mode != "full":
+        for key in ("pfx", "full_pfx", "before_pfx", "raw_pfx"):
+            item.pop(key, None)
     if mode not in {"analysis", "full"}:
         item.pop("analysis", None)
     if mode in {"payload", "full"}:
