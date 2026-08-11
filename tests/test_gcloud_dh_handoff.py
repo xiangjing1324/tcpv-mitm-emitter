@@ -243,6 +243,59 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(rendered["fallback"], "CSMallGetRecycleGoodsReq")
         self.assertEqual(rendered["readable"], "UAGameActivityDetail")
 
+    def test_frontend_adds_chinese_labels_to_65010_commands(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("const GCLOUD_CS_COMMAND_STEM_LABELS")
+        end = source.index("\nfunction gcloudUagameOpcodeInfo(", start)
+        functions = source[start:end]
+        script = f"""
+{functions}
+process.stdout.write(JSON.stringify({{
+  auction: gcloudCommandDisplay('CSAuctionAutoLoadGuidePriceReqB'),
+  recycle: gcloudCommandDisplay('CSMallGetRecycleGoodsRes'),
+  hero: gcloudCommandDisplay('CSHeroGrowLineRewardViewReq'),
+  heartbeat: gcloudCommandDisplay('CSOnlineHeartbeatRes'),
+  ace: gcloudCommandDisplay('CSAceSendAntiDataNtf'),
+  generic: gcloudCommandDisplay('CSMarketGetPlayerInfoReq'),
+  network: gcloudCommandDisplay('GCloudNetworkStatusRes'),
+}}));
+"""
+        completed = subprocess.run(
+            ["node", "--eval", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rendered = json.loads(completed.stdout)
+        self.assertEqual(
+            rendered["auction"],
+            "拍卖行自动加载指导价请求 · CSAuctionAutoLoadGuidePriceReq",
+        )
+        self.assertEqual(
+            rendered["recycle"],
+            "获取商城回收商品响应 · CSMallGetRecycleGoodsRes",
+        )
+        self.assertEqual(
+            rendered["hero"],
+            "查看英雄成长线奖励请求 · CSHeroGrowLineRewardViewReq",
+        )
+        self.assertEqual(
+            rendered["heartbeat"],
+            "在线心跳响应 · CSOnlineHeartbeatRes",
+        )
+        self.assertEqual(
+            rendered["ace"],
+            "ACE 反作弊数据上报通知 · CSAceSendAntiDataNtf",
+        )
+        self.assertEqual(
+            rendered["generic"],
+            "市场获取玩家信息请求 · CSMarketGetPlayerInfoReq",
+        )
+        self.assertEqual(
+            rendered["network"],
+            "GCloud 网络状态响应 · GCloudNetworkStatusRes",
+        )
+
     def test_frontend_promotes_producer_business_strings(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         producer = _extract_js_function(source, "gcloudProducerPacket")

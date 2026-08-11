@@ -5361,12 +5361,156 @@ const GCLOUD_UAGAME_OPCODE_NAMES = new Map([
   [0x34000110, { name: "UAGameServerTuple", label: "服务器地址元组" }],
 ]);
 
+// 65010 的 command 本身就是稳定的业务类型名。这里保留英文原名作为
+// 协议锚点，同时为常见命令提供人工校正的中文业务短语；其余命令再按
+// CamelCase 词元翻译。这样新出现的 CS* 命令也能立即得到可读中文，且
+// 不会把中文标签反写进原始 payload 或破坏请求/响应配对。
+const GCLOUD_CS_COMMAND_STEM_LABELS = new Map([
+  ["AccountLogin", "账号登录"],
+  ["AccountGetPlayerProfile", "获取账号玩家资料"],
+  ["AceSendAntiData", "ACE 反作弊数据上报"],
+  ["AceSendLightFeatureData", "ACE 轻量特征数据上报"],
+  ["AceAntiDataTransfer", "ACE 反作弊数据传输"],
+  ["AceAntiData", "ACE 反作弊数据"],
+  ["TssHeartbeat", "TSS 心跳"],
+  ["TssLoadReportConfig", "TSS 加载上报配置"],
+  ["TSSPlayerQueryScnLimit", "TSS 玩家场景限制查询"],
+  ["OnlineHeartbeat", "在线心跳"],
+  ["HeroGrowLineRewardView", "查看英雄成长线奖励"],
+  ["GetBoxInfo", "获取宝箱信息"],
+  ["MallGetRecycleGoods", "获取商城回收商品"],
+  ["SeasonGetInfo", "获取赛季信息"],
+  ["SeasonGetTotalData", "获取赛季汇总数据"],
+  ["AuctionAutoLoadGuidePrice", "拍卖行自动加载指导价"],
+  ["PlayerPromptGet", "获取玩家提示"],
+  ["SettingGetValueByKey", "按键获取设置值"],
+  ["SwitchLoadModuleStatus", "加载功能模块状态"],
+  ["ShopGetGameItemConfig", "获取商店游戏物品配置"],
+  ["PlayerCheckGameCenterSubscriptionStatus", "检查玩家游戏中心订阅状态"],
+  ["FriendList", "好友列表"],
+  ["TeamMemberChangeT", "队伍成员变更"],
+  ["TeamInfoT", "队伍信息"],
+  ["StateGetInfo", "获取状态信息"],
+  ["DepositGetExtensionProps", "获取仓库扩展属性"],
+  ["ShopGetLotteryInfo", "获取商店抽奖信息"],
+  ["WAssemblySkinInfoGet", "获取武器装配皮肤信息"],
+  ["PrepareTDMMapBoard", "备战团队竞技地图面板"],
+  ["PlayerInfoGetMarkProps", "获取玩家标记属性"],
+  ["SettingPutKeyValue", "写入设置键值"],
+  ["GuideGetMatchCount", "获取引导匹配次数"],
+  ["ShopGetClickedRedDot", "获取商店已点击红点"],
+  ["MallGetBuyGoods", "获取商城可购买商品"],
+  ["ActivityGet", "获取活动"],
+  ["WAssemblyGetDesign", "获取武器装配方案"],
+  ["TeamEquipPositionChangeT", "队伍装备位置变更"],
+  ["ReportIDC", "上报 IDC"],
+  ["PlayerInfoAddButtonHasBeenClicked", "记录玩家信息按钮已点击"],
+  ["GatewayKickPlayer", "网关强制玩家下线"],
+]);
+
+const GCLOUD_CS_COMMAND_TOKEN_LABELS = new Map([
+  ["Get", "获取"], ["Set", "设置"], ["Put", "写入"], ["Load", "加载"],
+  ["Send", "发送"], ["Check", "检查"], ["Query", "查询"], ["Add", "添加"],
+  ["Update", "更新"], ["Change", "变更"], ["Take", "领取"], ["Receive", "领取"],
+  ["Withdraw", "撤单"], ["Transfer", "传输"], ["Unlock", "解锁"], ["Reconnect", "重连"],
+  ["Info", "信息"], ["Data", "数据"], ["Config", "配置"], ["Cfg", "配置"],
+  ["Status", "状态"], ["List", "列表"], ["Type", "类型"], ["Value", "值"],
+  ["Values", "多个值"], ["Key", "键"], ["Record", "记录"], ["Records", "记录"],
+  ["Count", "次数"], ["Version", "版本"], ["Detail", "详情"], ["Profile", "资料"],
+  ["Player", "玩家"], ["Account", "账号"], ["Friend", "好友"], ["Team", "队伍"],
+  ["Member", "成员"], ["Hero", "英雄"], ["Role", "角色"], ["Guide", "引导"],
+  ["Shop", "商店"], ["Mall", "商城"], ["Auction", "拍卖行"], ["Market", "市场"],
+  ["Deposit", "仓库"], ["Collection", "收藏品"], ["Armory", "军械库"], ["Safehouse", "安全屋"],
+  ["Season", "赛季"], ["Activity", "活动"], ["Quest", "任务"], ["Rank", "排行"],
+  ["Tournament", "锦标赛"], ["Battle", "战斗"], ["Pass", "通行证"], ["Bp", "战斗通行证"],
+  ["Reward", "奖励"], ["Rewards", "奖励"], ["Award", "奖励"], ["Goods", "商品"],
+  ["Item", "物品"], ["Items", "物品"], ["Props", "属性"], ["Attr", "属性"],
+  ["Attribute", "属性"], ["Quality", "品质"], ["Price", "价格"], ["Currency", "货币"],
+  ["Game", "游戏"],
+  ["Exchange", "兑换"], ["Buy", "购买"], ["Sell", "出售"], ["Order", "订单"],
+  ["Pre", "预购"], ["Daily", "每日"], ["Limit", "限制"], ["Total", "汇总"],
+  ["Skin", "皮肤"], ["Gun", "枪械"], ["Equip", "装备"], ["Outfit", "装扮"],
+  ["Assembly", "装配"], ["W", "武器"], ["Design", "方案"], ["Position", "位置"],
+  ["Map", "地图"], ["Board", "面板"], ["Room", "房间"], ["Match", "匹配"],
+  ["TDM", "团队竞技"], ["Tdm", "团队竞技"], ["Raid", "突袭"], ["Settlement", "结算"],
+  ["Mandel", "曼德尔"], ["Brick", "金砖"], ["Vehicle", "载具"], ["Prepare", "备战"],
+  ["Switch", "功能开关"], ["Module", "模块"], ["System", "系统"], ["Func", "功能"],
+  ["Setting", "设置"], ["State", "状态"], ["Online", "在线"], ["Heartbeat", "心跳"],
+  ["Prompt", "提示"], ["Red", "红"], ["Dot", "点"], ["Clicked", "已点击"],
+  ["Localization", "本地化"], ["Text", "文本"], ["Patch", "补丁"], ["Quick", "快速"],
+  ["Report", "上报"], ["Log", "日志"], ["History", "历史"], ["Historical", "历史"],
+  ["Moment", "动态"], ["Apply", "申请"], ["Recommend", "推荐"], ["Black", "黑"],
+  ["Basic", "基础"], ["Base", "基础"], ["Extension", "扩展"], ["Recovery", "找回"],
+  ["Amount", "数量"], ["Mark", "标记"], ["Share", "分享"], ["Distribution", "分发"],
+  ["Auto", "自动"], ["Retro", "补发"], ["Peak", "巅峰"], ["Accumulate", "累计"],
+  ["Line", "线"], ["Grow", "成长"], ["View", "查看"], ["Show", "展示"],
+  ["Mystical", "神秘"], ["Mystery", "神秘"], ["Lucky", "幸运"], ["Nest", "巢"],
+  ["Lottery", "抽奖"], ["Guess", "竞猜"], ["Schedule", "赛程"], ["Country", "地区"],
+  ["Zone", "分区"], ["Percentage", "百分比"], ["Aux", "辅助"], ["Badge", "徽章"],
+  ["Pendant", "挂饰"], ["Avatars", "头像"], ["Styles", "样式"], ["Unlocked", "已解锁"],
+  ["Merchants", "商人"], ["Presets", "预设"], ["Box", "宝箱"], ["Label", "标签"],
+  ["No", "编号"], ["Media", "媒体"], ["Mapping", "映射"], ["Theme", "主题"],
+  ["Bundle", "礼包"], ["Time", "时间"], ["Video", "视频"], ["Inspect", "巡查"],
+  ["Mail", "邮件"], ["Lobby", "大厅"], ["Ad", "广告"], ["Live", "直播"],
+  ["Pay", "支付"], ["Creator", "创作者"], ["Hub", "中心"], ["Code", "码"],
+  ["Recharge", "充值"], ["Reputation", "声望"], ["Jump", "跳转"], ["Back", "回归"],
+  ["Level", "等级"], ["Second", "二级"], ["Pwd", "密码"], ["Join", "加入"],
+  ["Ds", "DS"], ["Center", "中心"], ["Subscription", "订阅"], ["Struct", "结构"],
+  ["Trigger", "触发"], ["Extra", "额外"], ["Scn", "场景"], ["Chat", "聊天"],
+  ["Light", "轻量"], ["Feature", "特征"], ["Anti", "反作弊"], ["Ace", "ACE"],
+  ["Tss", "TSS"], ["TSS", "TSS"], ["IDC", "IDC"], ["CDN", "CDN"],
+  ["SKU", "SKU"], ["SOL", "SOL"], ["MP", "多人模式"], ["ID", "ID"], ["Id", "ID"],
+  ["New", "新版"], ["All", "全部"], ["Is", "是否"], ["And", "并"], ["By", "按"],
+  ["Login", "登录"], ["Roll", "轮换"], ["Chall", "挑战"], ["Roundtrip", "往返"],
+  ["Dir", "方向"], ["Armedforce", "武装力量"], ["Stu", "学生"], ["Priv", "权益"],
+  ["Tlog", "TLog"], ["Tglog", "TGLog"], ["Agent", "代理"], ["Mossai", "Mossai"],
+]);
+
+const GCLOUD_COMMAND_FULL_LABELS = new Map([
+  ["GCloudHeartbeatReq", "GCloud 心跳请求"],
+  ["GCloudHeartbeatRes", "GCloud 心跳响应"],
+  ["GCloudNetworkStatusReq", "GCloud 网络状态请求"],
+  ["GCloudNetworkStatusRes", "GCloud 网络状态响应"],
+]);
+
 function gcloudReadableTypeName(value) {
   return String(value || "")
     .replace(/Candidate\b/g, "")
     .replace(/((?:Req|Res|Rsp|Ntf))B$/i, "$1")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+function gcloudCommandChineseLabel(value) {
+  const name = gcloudReadableTypeName(value);
+  if (!name) return "";
+  if (GCLOUD_COMMAND_FULL_LABELS.has(name)) return GCLOUD_COMMAND_FULL_LABELS.get(name);
+  if (!/^CS[A-Za-z0-9_]+$/.test(name)) return "";
+  let stem = name.slice(2);
+  let suffix = "";
+  const suffixMatch = stem.match(/(Req|Res|Rsp|Ntf|Ack)$/);
+  if (suffixMatch) {
+    stem = stem.slice(0, -suffixMatch[1].length);
+    suffix = ({ Req: "请求", Res: "响应", Rsp: "响应", Ntf: "通知", Ack: "确认" })[suffixMatch[1]] || "";
+  }
+  const exact = GCLOUD_CS_COMMAND_STEM_LABELS.get(stem);
+  if (exact) return `${exact}${suffix}`;
+  const words = stem.match(/[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+/g) || [];
+  const translated = words.map((word) => {
+    if (word === "T") return "";
+    return GCLOUD_CS_COMMAND_TOKEN_LABELS.get(word) || word;
+  }).join("")
+    .replace(/战斗通行证战斗通行证/g, "战斗通行证")
+    .replace(/黑列表/g, "黑名单")
+    .trim();
+  return /[\u3400-\u9fff]/u.test(translated) ? `${translated}${suffix}` : "";
+}
+
+function gcloudCommandDisplay(value) {
+  const name = gcloudReadableTypeName(value);
+  if (!name) return "";
+  const label = gcloudCommandChineseLabel(name);
+  return label ? `${label} · ${name}` : name;
 }
 
 function gcloudUagameOpcodeInfo(meta) {
@@ -7301,6 +7445,9 @@ function gcloudProtocolDisplayRows(info, ev, summaryText = "", readableStrings =
     const bodyKind = proto && proto.ok
       ? "Protobuf envelope { header=f1, body=f2 }"
       : "Protobuf fragment";
+    const protoCommandName = proto && (proto.commandName || proto.commandDisplay)
+      ? String(proto.commandName || proto.commandDisplay)
+      : "";
     rows.push({
       label: "Layout",
       value: `TGCP 0x4013 → AES 明文${compressed ? " → LZ4" : ""} → ${bodyKind}`,
@@ -7309,7 +7456,7 @@ function gcloudProtocolDisplayRows(info, ev, summaryText = "", readableStrings =
       label: "字段",
       value: [
         proto && proto.commandId !== null && proto.commandId !== undefined ? `cmd_id=${proto.commandId}` : "",
-        proto && (proto.commandName || proto.commandDisplay) ? `command=${proto.commandName || proto.commandDisplay}` : "",
+        protoCommandName ? `command=${gcloudCommandDisplay(protoCommandName)}` : "",
         proto && proto.module ? `module=${proto.module}` : "",
         proto && proto.language ? `language=${proto.language}` : "",
         fieldCount > 0 ? `fields=${fieldCount}` : "",
@@ -7550,10 +7697,10 @@ function gcloudTssCommandKind(commandName) {
 }
 
 function gcloudAceCommandLabel(kind) {
-  if (kind === "ace_antidata") return "ACE AntiData";
-  if (kind === "ace_ack") return "ACE AntiData ACK";
-  if (kind === "ace_light") return "ACE LightFeature";
-  if (kind === "ace_transfer") return "ACE Transfer";
+  if (kind === "ace_antidata") return "ACE 反作弊数据上报";
+  if (kind === "ace_ack") return "ACE 反作弊数据确认";
+  if (kind === "ace_light") return "ACE 轻量特征上报";
+  if (kind === "ace_transfer") return "ACE 反作弊数据传输";
   return "ACE";
 }
 
@@ -7984,7 +8131,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     );
     const effectiveCommandDisplay = String(
       (isUagameGcloudMeta(meta) && gcloudUagameOpcodeDisplay(meta))
-      || effectiveCommandName
+      || gcloudCommandDisplay(effectiveCommandName)
       || ""
     );
     // 17500 的数字信封没有 CS* 明文命令名。把后端已验证或按端口
@@ -8289,7 +8436,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
       if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
       return out;
     }
-    out.push({ kind: "ace", text: ace.label, title: ace.commandName });
+    out.push({ kind: "ace", text: gcloudCommandDisplay(ace.commandName) || ace.label, title: ace.label });
     out.push({ kind: "carrier", text: carrier.mode || "ACE carrier", title: carrier.chain || carrier.mode || "" });
     if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
     return out;
@@ -8305,7 +8452,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
   if (info.kind === "tss" && info.tss) {
     const tss = info.tss;
     const carrier = tss.carrier || {};
-    out.push({ kind: "ace", text: "CSTss", title: tss.commandName });
+    out.push({ kind: "ace", text: gcloudCommandDisplay(tss.commandName) || "CSTss", title: "TSS 安全通道命令" });
     out.push({ kind: "carrier", text: carrier.mode || "TSS carrier", title: carrier.chain || carrier.mode || "" });
     if (tss.identity) out.push({ kind: "type", text: tss.identity, title: tss.meaning || tss.identity });
     return out;
@@ -8317,6 +8464,9 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     || gcloudUagameOpcodeDisplay(info.meta)
     || ""
   );
+  const commandDisplay = isUagameGcloudMeta(info.meta)
+    ? name
+    : gcloudCommandDisplay(name);
   const flow = getCurrentFlowMeta();
   const gcloudPort = gcloudTargetPortFromText(
     ev && ev.cid,
@@ -8329,7 +8479,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
   } else {
     out.push({
       kind: "gcloud",
-      text: name || (info.meta && info.meta.commandText ? `${info.meta.commandText} ${info.meta.crypto || ""}`.trim() : `GCloud ${gcloudPort || "TGCP"}`),
+      text: commandDisplay || (info.meta && info.meta.commandText ? `${info.meta.commandText} ${info.meta.crypto || ""}`.trim() : `GCloud ${gcloudPort || "TGCP"}`),
       title: info.meta ? info.meta.raw : "",
     });
   }
