@@ -302,34 +302,50 @@ class ArchiveAndStoreTests(unittest.TestCase):
             app_js,
         )
 
-    def test_tcpview_frontend_renders_gcloud_mrpcs_crc_validation_panel(self):
+    def test_tcpview_frontend_keeps_gcloud_validation_data_out_of_human_view(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"
         )
         self.assertIn("function buildGcloudValidationPanel(ev)", app_js)
-        self.assertIn("GCloud 验证证据 · MRPCS / CSAce / CRC", app_js)
-        self.assertIn("ZIP blob CRC32", app_js)
-        self.assertIn("AntiData MRPCS #", app_js)
-        self.assertIn("LightFeature envelope", app_js)
-        self.assertIn("Transfer/Ack 边界", app_js)
-        self.assertIn("前面 ${omittedRenderCount} 包未丢失", app_js)
+        self.assertNotIn(
+            "isGcloudEvent ? buildGcloudValidationPanel(ev) : null", app_js
+        )
+        self.assertNotIn(
+            "const validationInsights = gcloudValidationSummaryInsights(ev);", app_js
+        )
+        self.assertNotIn(
+            "isGcloudEvent ? buildGcloudAceCarrierDeepPanel(ev, summaryText) : null",
+            app_js,
+        )
+        self.assertIn("if (summaryText && !isGcloud)", app_js)
 
     def test_tcpview_frontend_labels_unknown_uagame_opcode_and_direct_tss_body(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"
         )
         self.assertIn('gcloudOpcode: readSummaryValue(raw, "gcloud_opcode")', app_js)
-        self.assertIn('`UAGame ${formatHexValue(opcode, 8)}`', app_js)
-        self.assertIn('return "UAGame body";', app_js)
+        self.assertIn("const GCLOUD_UAGAME_OPCODE_NAMES = new Map", app_js)
+        self.assertIn(
+            '[0x08000005, { name: "UAGameHeartbeatOrTimeSync", label: "心跳/时间同步" }]',
+            app_js,
+        )
+        self.assertIn(
+            '[0x1d000011, { name: "UAGameActivityBenefitCatalog", label: "运营活动/福利目录批量获取" }]',
+            app_js,
+        )
+        self.assertIn(
+            '[0x1d000012, { name: "UAGameActivityBenefitDetail", label: "运营活动/福利条目详情/状态" }]',
+            app_js,
+        )
+        self.assertIn('.replace(/Candidate\\b/g, "")', app_js)
         self.assertIn('directTssRecord ? `UAGame body -> TSS record ${payload.length}B`', app_js)
         self.assertIn('["ascii_hex", "tss_record"].includes(carrierMode)', app_js)
         self.assertIn("function gcloudUagame4013Insights(meta, commandName", app_js)
-        self.assertIn('label: "UAGame 4013"', app_js)
-        self.assertIn("function gcloudUagameEnvelopeAnchorText()", app_js)
-        self.assertIn('label: "Identity anchor"', app_js)
-        self.assertIn('label: "识别边界"', app_js)
-        self.assertIn('"1.3": "call_id"', app_js)
-        self.assertIn('label: "消息关联 ID"', app_js)
+        self.assertIn("function gcloudProtocolDisplayRows", app_js)
+        self.assertIn('label: "Layout"', app_js)
+        self.assertIn('label: "字段"', app_js)
+        self.assertIn('label: "Payload"', app_js)
+        self.assertIn('label: "修改"', app_js)
         self.assertIn("function isUagamePrivateFragmentMeta(meta)", app_js)
         self.assertIn("function analyzeUagamePrivateFragment(byteValues)", app_js)
         self.assertIn('kind: "uagame_private_fragment"', app_js)
@@ -400,16 +416,16 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("after 来自后端 sent wire", app_js)
         self.assertIn("收到的原始4013 [raw before/full_pay]", app_js)
         self.assertIn("修改后重建4013 [raw after/sent]", app_js)
-        self.assertIn("收到的响应原始4013 [修改前/full_pay]", app_js)
-        self.assertIn("实际发送的响应4013 [修改后/raw_pay]", app_js)
-        self.assertIn("响应解密 [decoded/内层保持]", app_js)
+        self.assertIn("修改前加密 Payload [full_pay]", app_js)
+        self.assertIn("修改后加密 Payload [raw_pay]", app_js)
+        self.assertIn("修改后解密 Payload [after]", app_js)
         self.assertIn("function gcloudSummaryHasSentWireChange", app_js)
         self.assertIn("wire_header_modified=1|wire_changed=1|report_010a005f=outer_header_only|outer_header_0x15=01->00", app_js)
         self.assertIn("实际发送修改成功", app_js)
         self.assertIn("isGcloud65010Summary(summaryText, ev)", app_js)
         self.assertIn("gcloudSummaryHasSentWireChange(summaryText)", app_js)
         self.assertIn("rawWireChangedOffsets", app_js)
-        self.assertIn("修改后解密 [after/rebuilt]", app_js)
+        self.assertIn("修改后解密 Payload [after/rebuilt]", app_js)
         self.assertIn("forceSideBySideSame: compareRoot", app_js)
         self.assertIn("forceSideBySideSame: hasBefore", app_js)
         self.assertIn("backend rebuilt", app_js)
@@ -423,13 +439,16 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("function buildGcloudPacketPanel", app_js)
         self.assertIn("TGCP 9001 控制帧", app_js)
         self.assertIn("payload_len=0 的控制旁路帧", app_js)
-        self.assertIn("proto fragment", app_js)
-        self.assertIn("protobuf tree", app_js)
-        self.assertIn("raw field paths", app_js)
+        self.assertIn("Protobuf fragment", app_js)
+        self.assertIn("Layout / fields / value / hex", app_js)
+        self.assertIn("function gcloudReadableStringsForEvent", app_js)
+        self.assertIn("明文字符串 ×${rows.length}", app_js)
         self.assertIn("function buildGcloudProtoTree", app_js)
         self.assertIn("summary-insight-gcloud", app_js)
         self.assertIn("isGcloudEvent ? null : buildEventAnalysisGrid", app_js)
         self.assertIn("!isGcloudEvent && isRequest", app_js)
+        self.assertIn('{ collapsed: true, foldNote: "raw 参考" }', app_js)
+        self.assertIn('"解密 Payload [current]"', app_js)
 
     def test_tcpview_frontend_decodes_gateway_kick_player_notice(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(

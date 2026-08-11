@@ -645,6 +645,34 @@ function installDumpAsciiRowStyles() {
       overflow-wrap: anywhere;
       line-height: 1.35;
     }
+    .gcloud-readable {
+      min-width: 0;
+      display: grid;
+      gap: 5px;
+      padding-top: 2px;
+    }
+    .gcloud-readable-title {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .gcloud-readable-list {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 5px;
+    }
+    .gcloud-readable-string {
+      min-width: 0;
+      padding: 6px 8px;
+      border: 1px solid color-mix(in srgb, #22c55e 34%, var(--line));
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--panel) 89%, #16a34a 11%);
+      color: color-mix(in srgb, #dcfce7 86%, var(--text));
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
     .gcloud-fact-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5296,10 +5324,73 @@ function isUagamePrivateFragmentMeta(meta) {
   return String(meta && meta.gcloudProto || "").toLowerCase() === "uagame_private_frame";
 }
 
-function gcloudUagameOpcodeDisplay(meta) {
-  if (!isUagameGcloudMeta(meta)) return "";
+const GCLOUD_UAGAME_OPCODE_NAMES = new Map([
+  [0x08000001, { name: "CSAccountLoginReq", label: "账号登录请求" }],
+  [0x08000005, { name: "UAGameHeartbeatOrTimeSync", label: "心跳/时间同步" }],
+  [0x08000006, { name: "CSAccountReconnectLoginReq", label: "账号重连登录请求" }],
+  [0x08100001, { name: "CSAccountLoginRes", label: "账号登录响应" }],
+  [0x08100003, { name: "CSAceSendAntiDataNtf", label: "ACE AntiData 上报" }],
+  [0x08000161, { name: "UAGameSocialChatSend", label: "社交聊天发送" }],
+  [0x08000162, { name: "UAGameSocialFeedPush", label: "社交动态/邀请推送" }],
+  [0x08000188, { name: "UAGameSpeedNodeList", label: "测速/加速节点列表" }],
+  [0x08010505, { name: "UAGameLoadoutScheme", label: "配装方案" }],
+  [0x08f40501, { name: "UAGameBattlePassConfig", label: "战斗通行证配置" }],
+  [0x08f4050a, { name: "UAGameBattlePassConfig", label: "战斗通行证配置" }],
+  [0x08f4081a, { name: "UAGameQQAuthorizationRedirect", label: "QQ 授权跳转" }],
+  [0x0b000001, { name: "UAGameActivityCatalog", label: "活动目录" }],
+  [0x0b000002, { name: "UAGameActivityDetail", label: "活动详情" }],
+  [0x0b000009, { name: "UAGameActivityProgress", label: "活动进度" }],
+  [0x0b00001c, { name: "UAGameActivityEmptyState", label: "活动空状态" }],
+  [0x0b000050, { name: "UAGameAdvertisementBanner", label: "广告横幅" }],
+  [0x0d000001, { name: "UAGameNamedJsonConfig", label: "命名 JSON 配置" }],
+  [0x0d000002, { name: "UAGameLocalizationFeatureTable", label: "本地化功能表" }],
+  [0x0d000003, { name: "UAGameNumericKeyValueTable", label: "数字键值配置表" }],
+  [0x0d000004, { name: "UAGameNumericParameterTable", label: "数字参数配置表" }],
+  [0x0d000006, { name: "UAGameTextConfigResponse", label: "文本配置响应" }],
+  [0x25000001, { name: "UAGameRankingProfileShape", label: "排行榜玩家资料" }],
+  [0x25000005, { name: "UAGameRankingProfileShape", label: "排行榜玩家资料" }],
+  [0x09100001, { name: "UAGameSocialPlayerProfile", label: "社交玩家资料" }],
+  [0x09100002, { name: "UAGameSocialPlayerProfile", label: "社交玩家资料" }],
+  [0x09100005, { name: "UAGameSocialRosterPush", label: "社交列表推送" }],
+  [0x09100007, { name: "UAGameSocialRosterPush", label: "社交列表推送" }],
+  [0x08e00000, { name: "UAGameClientResourceTelemetry", label: "客户端资源遥测" }],
+  [0x29000003, { name: "UAGameCompactKeySetUpdate", label: "紧凑键集合更新" }],
+  [0x1d000011, { name: "UAGameActivityBenefitCatalog", label: "运营活动/福利目录批量获取" }],
+  [0x1d000012, { name: "UAGameActivityBenefitDetail", label: "运营活动/福利条目详情/状态" }],
+  [0x1d000017, { name: "UAGameTypeValueTable", label: "类型值配置表" }],
+  [0x34000110, { name: "UAGameServerTuple", label: "服务器地址元组" }],
+]);
+
+function gcloudReadableTypeName(value) {
+  return String(value || "")
+    .replace(/Candidate\b/g, "")
+    .replace(/((?:Req|Res|Rsp|Ntf))B$/i, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function gcloudUagameOpcodeInfo(meta) {
+  if (!isUagameGcloudMeta(meta)) return null;
   const opcode = parseFlexibleInt(meta.gcloudOpcode);
-  return opcode === null ? "" : `UAGame ${formatHexValue(opcode, 8)}`;
+  if (opcode === null) return null;
+  const mapped = GCLOUD_UAGAME_OPCODE_NAMES.get(opcode) || null;
+  const inferred = gcloudReadableTypeName(meta.gcloudInferredType);
+  return {
+    opcode,
+    opcodeText: formatHexValue(opcode, 8),
+    name: mapped ? mapped.name : inferred,
+    label: mapped ? mapped.label : inferred,
+    mapped: !!mapped,
+  };
+}
+
+function gcloudUagameOpcodeDisplay(meta) {
+  const info = gcloudUagameOpcodeInfo(meta);
+  if (!info) return "";
+  if (info.label && info.name) return `${info.label} · ${info.name} [${info.opcodeText}]`;
+  if (info.label) return `${info.label} [${info.opcodeText}]`;
+  if (info.name) return `${info.name} [${info.opcodeText}]`;
+  return `UAGame ${info.opcodeText}`;
 }
 
 function gcloudUagameEnvelopeAnchorText() {
@@ -5308,24 +5399,28 @@ function gcloudUagameEnvelopeAnchorText() {
 
 function gcloudUagame4013Insights(meta, commandName = "") {
   if (!isUagameGcloudMeta(meta) || isUagamePrivateFragmentMeta(meta)) return [];
+  const opcodeInfo = gcloudUagameOpcodeInfo(meta);
   const opcodeDisplay = gcloudUagameOpcodeDisplay(meta);
-  const name = String(commandName || "").trim();
-  const label = name && name !== opcodeDisplay
-    ? name
-    : opcodeDisplay.replace(/^UAGame\s+/i, "");
+  const name = gcloudReadableTypeName(commandName || (opcodeInfo && opcodeInfo.name));
+  const label = opcodeInfo && opcodeInfo.label
+    ? opcodeInfo.label
+    : (name && name !== opcodeDisplay ? name : opcodeDisplay.replace(/^UAGame\s+/i, ""));
   if (!label) return [];
   return [{
-    kind: name && name !== opcodeDisplay ? "gcloud" : "type",
-    text: label,
-    title: `${opcodeDisplay || "UAGame 20001"} · 4013 decrypted · ${gcloudUagameEnvelopeAnchorText()}`,
+    kind: opcodeInfo && opcodeInfo.mapped ? "gcloud" : "type",
+    text: opcodeDisplay || label,
+    title: `${name || "UAGame message"} · 4013 decrypted · ${gcloudUagameEnvelopeAnchorText()}`,
   }];
 }
 
 function gcloudEventPayloadStatusText(proto, meta) {
-  if (proto && proto.ok) return "protobuf ok";
+  if (proto && proto.ok) {
+    const count = Array.isArray(proto.flat) ? proto.flat.length : 0;
+    return count > 0 ? `Protobuf · ${count} fields` : "Protobuf body";
+  }
   if (isUagamePrivateFragmentMeta(meta)) return "private fragment";
-  if (isUagameGcloudMeta(meta)) return "UAGame body";
-  return "proto fragment";
+  if (isUagameGcloudMeta(meta)) return "UAGame binary body";
+  return "Protobuf fragment";
 }
 
 function analyzeUagamePrivateFragment(byteValues) {
@@ -5936,9 +6031,12 @@ function findGcloudCommandMatches(byteValues, maxBytes = 512) {
 function chooseGcloudCommandDisplay(structuredName, roughName) {
   const structured = String(structuredName || "").trim();
   const rough = String(roughName || "").trim();
-  if (!structured) return rough;
-  if (rough && rough.startsWith(structured) && rough.length <= structured.length + 2) return rough;
-  return structured;
+  if (!structured) return gcloudReadableTypeName(rough);
+  // The raw ASCII scan historically swallowed the next protobuf tag byte.
+  // For example field[7] "CSReportIDCReq" followed by tag 0x42 was shown as
+  // "CSReportIDCReqB".  A parsed length-delimited command field is the exact
+  // value and must always win over the rough substring scan.
+  return gcloudReadableTypeName(structured);
 }
 
 function decodeGcloudLz4Block(byteValues, maxOutput = 4 * 1024 * 1024) {
@@ -7061,6 +7159,198 @@ function gcloudCollectProtoStrings(proto, maxItems = 160) {
   return out;
 }
 
+function gcloudProducerPacket(ev) {
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  return analysis && analysis.packet && typeof analysis.packet === "object"
+    ? analysis.packet
+    : {};
+}
+
+function gcloudReadableStringsForEvent(ev, proto = null, maxItems = 24) {
+  const out = [];
+  const seen = new Set();
+  const add = (value, path = "") => {
+    const text = String(value ?? "").trim();
+    if (!text || text.length < 2) return;
+    if (/^(?:CS|UAGame)[A-Za-z0-9_]{4,}$/.test(text)) return;
+    if (/^[a-z]{2}(?:[-_][A-Za-z]{2,8})+$/.test(text)) return;
+    if (/^[0-9a-f]{64,}$/i.test(text) || /^[A-Za-z0-9+/]{96,}={0,2}$/.test(text)) return;
+    const visible = /[\u3400-\u9fff]/u.test(text)
+      || /^https?:\/\//i.test(text)
+      || /[\s:/{\[]/.test(text)
+      || (text.length >= 4 && isGcloudVisibleString(text));
+    if (!visible) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ text: shortenText(text, 320), path: String(path || "") });
+  };
+
+  const packet = gcloudProducerPacket(ev);
+  const textSummary = packet.text_summary && typeof packet.text_summary === "object"
+    ? packet.text_summary
+    : {};
+  for (const item of Array.isArray(textSummary.previews) ? textSummary.previews : []) {
+    add(item && item.value, item && item.path);
+  }
+  for (const field of Array.isArray(packet.fields) ? packet.fields : []) {
+    if (!field || field.value_type !== "string") continue;
+    add(field.value, field.path);
+  }
+  for (const item of gcloudCollectProtoStrings(proto, Math.max(maxItems * 3, 96))) {
+    add(item && item.text, item && item.path ? gcloudRawPathText(item.path, item.topIndex) : "");
+  }
+  out.sort((left, right) => {
+    const leftCjk = /[\u3400-\u9fff]/u.test(left.text) ? 1 : 0;
+    const rightCjk = /[\u3400-\u9fff]/u.test(right.text) ? 1 : 0;
+    return rightCjk - leftCjk;
+  });
+  return out.slice(0, Math.max(1, Number(maxItems || 48)));
+}
+
+function gcloudPayloadChangeSummary(ev, summaryText = "") {
+  const before = String(ev && ev.before_pay ? ev.before_pay : "");
+  const current = String(ev && ev.pay ? ev.pay : "");
+  const receivedWire = String(ev && ev.full_pay ? ev.full_pay : "");
+  const forwardedWire = String(ev && ev.raw_pay ? ev.raw_pay : "");
+  const summary = String(summaryText || (ev && ev.summary) || "");
+  const declaredModified = /\bpayload_modified=1\b|\bwire_header_modified=1\b|\bwire_changed=1\b/i.test(summary)
+    || gcloudSummaryHasBackendRebuild(summary);
+  if (gcloudSummaryHasSentWireChange(summary) && receivedWire && forwardedWire) {
+    const beforeWire = b64ToBytes(receivedWire);
+    const afterWire = b64ToBytes(forwardedWire);
+    const wireDiff = countChangedBytes(beforeWire, afterWire);
+    return `修改前 wire ${beforeWire.length}B → 修改后 wire ${afterWire.length}B · 变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? ` · lenΔ=${wireDiff.lenDelta}` : ""}`;
+  }
+  const currentLen = current ? b64ToBytes(current).length : Number(ev && ev.len || 0);
+  if (!before) {
+    const currentStage = /\bcrypto=decrypted\b/i.test(summary) ? "当前解密 Payload" : "当前 Payload";
+    return `${declaredModified ? "已修改" : "未修改"} · ${currentStage} ${currentLen}B`;
+  }
+  const beforeBytes = b64ToBytes(before);
+  const currentBytes = current ? b64ToBytes(current) : [];
+  const diff = countChangedBytes(beforeBytes, currentBytes);
+  if (Number(diff.changed || 0) <= 0 && Number(diff.lenDelta || 0) === 0) {
+    return `修改前 ${beforeBytes.length}B = 修改后 ${currentBytes.length}B · 内容相同`;
+  }
+  return `修改前 ${beforeBytes.length}B → 修改后 ${currentBytes.length}B · 变化 ${diff.changed}/${diff.commonLen}${diff.lenDelta ? ` · lenΔ=${diff.lenDelta}` : ""}`;
+}
+
+function gcloudProtocolDisplayRows(info, ev, summaryText = "", readableStrings = []) {
+  const sourceRows = Array.isArray(info && info.rows) ? info.rows : [];
+  const meta = info && info.meta && typeof info.meta === "object" ? info.meta : {};
+  const command = parseFlexibleInt(meta.command);
+  const decrypted4013 = command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted";
+  const direction = normalizeGcloudDirection(ev, meta) || meta.direction || "-";
+  if (!decrypted4013) {
+    const frame = info && info.frame ? info.frame : null;
+    const commandText = command === 0x9001 ? "0x9001" : (meta.commandText || (Number.isFinite(command) ? formatHexValue(command, 4) : "?"));
+    const payloadLength = frame && Number.isFinite(Number(frame.payloadLen))
+      ? Number(frame.payloadLen)
+      : Number(ev && ev.len || 0);
+    return [{
+      label: "Layout",
+      value: command === 0x9001
+        ? "TGCP 0x9001 header-only → echo / keepalive"
+        : `TGCP ${commandText} → ${meta.crypto || "raw"} frame`,
+    }, {
+      label: "字段",
+      value: [
+        `command=${commandText}`,
+        `direction=${direction}`,
+        frame && Number.isFinite(Number(frame.headerLen)) ? `header=${Number(frame.headerLen)}B` : "",
+        `payload=${payloadLength}B`,
+      ].filter(Boolean).join(" · "),
+    }, {
+      label: "Payload",
+      value: command === 0x9001 ? "0B · header-only" : `${payloadLength}B raw/encrypted`,
+    }, {
+      label: "修改",
+      value: command === 0x9001 ? "未修改 · Payload 0B" : gcloudPayloadChangeSummary(ev, summaryText),
+    }];
+  }
+
+  const proto = info && info.proto ? info.proto : null;
+  const protoBytes = info && Array.isArray(info.protoBytes) ? info.protoBytes : [];
+  const fieldCount = proto && Array.isArray(proto.flat) ? proto.flat.length : 0;
+  const packet = gcloudProducerPacket(ev);
+  const shape = packet.shape && typeof packet.shape === "object" ? packet.shape : {};
+  const carrier = String(shape.application_carrier || "");
+  const compression = info && info.proto && info.proto.compression ? info.proto.compression : null;
+  const compressed = carrier === "lz4_raw" || !!compression;
+  const rows = [];
+
+  if (isUagameGcloudMeta(meta)) {
+    const opcode = gcloudUagameOpcodeInfo(meta);
+    const bodyKind = proto && proto.ok ? "Protobuf body" : "binary body";
+    rows.push({
+      label: "Layout",
+      value: `TGCP 0x4013 → AES 明文${compressed ? " → raw-LZ4" : ""} → UAGame 40B header → ${bodyKind}`,
+    });
+    rows.push({
+      label: "字段",
+      value: [
+        opcode ? `opcode=${opcode.opcodeText}` : "opcode=?",
+        opcode && opcode.name ? `type=${opcode.name}` : "",
+        `direction=${direction}`,
+        `body=${protoBytes.length || Number(ev && ev.len || 0)}B`,
+        fieldCount > 0 ? `fields=${fieldCount}` : "",
+      ].filter(Boolean).join(" · "),
+    });
+  } else {
+    const bodyKind = proto && proto.ok
+      ? "Protobuf envelope { header=f1, body=f2 }"
+      : "Protobuf fragment";
+    rows.push({
+      label: "Layout",
+      value: `TGCP 0x4013 → AES 明文${compressed ? " → LZ4" : ""} → ${bodyKind}`,
+    });
+    rows.push({
+      label: "字段",
+      value: [
+        proto && proto.commandId !== null && proto.commandId !== undefined ? `cmd_id=${proto.commandId}` : "",
+        proto && (proto.commandName || proto.commandDisplay) ? `command=${proto.commandName || proto.commandDisplay}` : "",
+        proto && proto.module ? `module=${proto.module}` : "",
+        proto && proto.language ? `language=${proto.language}` : "",
+        fieldCount > 0 ? `fields=${fieldCount}` : "",
+      ].filter(Boolean).join(" · ") || `direction=${direction}`,
+    });
+  }
+
+  rows.push({
+    label: "Payload",
+    value: `解密后 ${protoBytes.length || Number(ev && ev.len || 0)}B${readableStrings.length > 0 ? ` · strings=${readableStrings.length}` : ""}`,
+  });
+  rows.push({ label: "修改", value: gcloudPayloadChangeSummary(ev, summaryText) });
+  if (compressed) {
+    const inputLength = Number(shape.application_carrier_len || (compression && compression.inputLength) || 0);
+    const outputLength = Number(shape.application_envelope_len || (compression && compression.outputLength) || 0);
+    rows.push({
+      label: "压缩",
+      value: `raw-LZ4${inputLength > 0 && outputLength > 0 ? ` ${inputLength}B → ${outputLength}B` : " 已解压"}`,
+    });
+  }
+
+  const keepLabels = new Map([
+    ["业务语义", "业务语义"],
+    ["反作弊角色", "业务语义"],
+    ["TSS 角色", "业务语义"],
+    ["字段结构", "字段结构"],
+    ["服务器提示", "服务器提示"],
+    ["处罚状态", "处罚状态"],
+    ["踢下线代码", "踢下线代码"],
+    ["可读特征", "可读特征"],
+    ["设备画像", "设备画像"],
+    ["网络/资源", "网络/资源"],
+    ["时间字段", "时间字段"],
+  ]);
+  for (const row of sourceRows) {
+    const label = String(row && row.label || "");
+    if (keepLabels.has(label)) rows.push({ ...row, label: keepLabels.get(label) });
+  }
+  return rows;
+}
+
 function gcloudFirstString(strings, predicate) {
   const list = Array.isArray(strings) ? strings : [];
   for (const item of list) {
@@ -7402,25 +7692,25 @@ function gcloudCommandNameForEvent(ev, summaryText = "") {
   let value = "";
   if (isGcloud65010Summary(summary, ev)) {
     const meta = parseGcloud65010Summary(summary, ev);
-    if (meta.gcloudType) {
-      value = String(meta.gcloudType || "");
-      ev.__tcpvGcloudCommandCache = { signature, value };
-      return value;
-    }
+    const uagameOpcode = gcloudUagameOpcodeInfo(meta);
     const preview = getGcloudPreviewBytes(ev);
     const frame = parseGcloudTgcpFrame(preview.bytes);
     const command = meta.command !== null ? meta.command : (frame ? frame.command : null);
     if (command === 0x4013 && String(meta.crypto || "").toLowerCase() === "decrypted") {
       const proto = getGcloudBusinessProtoCached(ev, preview.bytes, preview.complete);
-      value = String(proto && proto.commandDisplay ? proto.commandDisplay : "");
+      // Prefer the parsed length-delimited field over summary substring scans
+      // so 65010 Req + protobuf tag 0x42 is never rendered as a fake ReqB.
+      value = String(proto && (proto.commandName || proto.commandDisplay) ? (proto.commandName || proto.commandDisplay) : "");
       if (!value) {
         const numeric = gcloudNumericCommandInfo(ev, proto, summary);
         value = String(numeric && numeric.commandName ? numeric.commandName : "");
       }
     }
+    if (!value && meta.gcloudType) value = gcloudReadableTypeName(meta.gcloudType);
     if (!value && meta.gcloudInferredType) {
-      value = String(meta.gcloudInferredType || "");
+      value = gcloudReadableTypeName(meta.gcloudInferredType);
     }
+    if (uagameOpcode && uagameOpcode.name) value = uagameOpcode.name;
     if (!value) value = gcloudUagameOpcodeDisplay(meta);
   }
   ev.__tcpvGcloudCommandCache = { signature, value };
@@ -7683,18 +7973,24 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
     const compression = proto && proto.compression ? proto.compression : null;
     const numeric = gcloudNumericCommandInfo(ev, proto, summaryText || (ev && ev.summary));
-    const effectiveCommandDisplay = String(
-      meta.gcloudType
-      || (proto && proto.commandDisplay)
+    const uagameOpcode = gcloudUagameOpcodeInfo(meta);
+    const effectiveCommandName = String(
+      (!isUagameGcloudMeta(meta) && proto && (proto.commandName || proto.commandDisplay))
+      || gcloudReadableTypeName(meta.gcloudType)
       || (numeric && numeric.commandName)
-      || meta.gcloudInferredType
-      || gcloudUagameOpcodeDisplay(meta)
+      || (uagameOpcode && uagameOpcode.name)
+      || gcloudReadableTypeName(meta.gcloudInferredType)
+      || ""
+    );
+    const effectiveCommandDisplay = String(
+      (isUagameGcloudMeta(meta) && gcloudUagameOpcodeDisplay(meta))
+      || effectiveCommandName
       || ""
     );
     // 17500 的数字信封没有 CS* 明文命令名。把后端已验证或按端口
     // 映射出的名称挂到当前解析视图，确保详情、字段别名和筛选口径一致。
-    if (proto && effectiveCommandDisplay && !proto.commandDisplay) {
-      proto.commandDisplay = effectiveCommandDisplay;
+    if (proto && effectiveCommandName && !proto.commandDisplay) {
+      proto.commandDisplay = effectiveCommandName;
       proto.commandNameSource = meta.gcloudType
         ? String(meta.gcloudTypeSource || "backend")
         : (numeric && numeric.commandName ? "numeric" : "inferred");
@@ -7705,8 +8001,8 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     const bodyNode = proto && !proto.uagameBody && proto.bodyNode ? proto.bodyNode : null;
     const profileRows = gcloudProtoProfileRows(proto, ev);
     const timeRows = gcloudProtoTimeRows(proto);
-    const gatewayKick = effectiveCommandDisplay
-      ? analyzeGcloudGatewayKickCommand(proto, effectiveCommandDisplay)
+    const gatewayKick = effectiveCommandName
+      ? analyzeGcloudGatewayKickCommand(proto, effectiveCommandName)
       : null;
     if (gatewayKick) {
       return {
@@ -7740,8 +8036,8 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         nodeRows: gcloudProtoNodeRows(proto),
       };
     }
-    const ace = effectiveCommandDisplay
-      ? analyzeGcloudAceCommand(ev, proto, protoBytes, effectiveCommandDisplay)
+    const ace = effectiveCommandName
+      ? analyzeGcloudAceCommand(ev, proto, protoBytes, effectiveCommandName)
       : null;
     if (ace) {
       const carrier = ace.carrier || {};
@@ -7783,8 +8079,8 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         nodeRows: gcloudProtoNodeRows(proto),
       };
     }
-    const tss = effectiveCommandDisplay
-      ? analyzeGcloudTssCommand(proto, protoBytes, effectiveCommandDisplay)
+    const tss = effectiveCommandName
+      ? analyzeGcloudTssCommand(proto, protoBytes, effectiveCommandName)
       : null;
     if (tss) {
       const carrier = tss.carrier || {};
@@ -7953,7 +8249,6 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
   const info = analyzeGcloudEvent(ev, summaryText);
   if (!info) return [];
   const out = [];
-  const validationInsights = gcloudValidationSummaryInsights(ev);
   if (info.kind === "control") {
     const direction = normalizeGcloudDirection(ev, info.meta);
     const control = info.control || null;
@@ -7973,7 +8268,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
         title: `当前窗口匹配到另一半 index=${pair.index}`,
       });
     }
-    return out.concat(validationInsights);
+    return out;
   }
   if (info.kind === "uagame_private_fragment" && info.fragment) {
     const fragment = info.fragment;
@@ -7984,7 +8279,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
       kind: "proto",
       text: `fragment ${fragment.family} · ${markerText}`,
       title: "UAGame private/segmented frame；marker offset 动态，未把 +0x04 误认成 opcode，未对不完整片段生成 protobuf child tree。",
-    }].concat(validationInsights);
+    }];
   }
   if (info.kind === "ace" && info.ace) {
     const ace = info.ace;
@@ -7992,12 +8287,12 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     out.push(...gcloudUagame4013Insights(info.meta, ace.commandName));
     if (isUagameGcloudMeta(info.meta)) {
       if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
-      return out.concat(validationInsights);
+      return out;
     }
     out.push({ kind: "ace", text: ace.label, title: ace.commandName });
     out.push({ kind: "carrier", text: carrier.mode || "ACE carrier", title: carrier.chain || carrier.mode || "" });
     if (ace.identity) out.push({ kind: "type", text: ace.identity, title: ace.meaning || ace.identity });
-    return out.concat(validationInsights);
+    return out;
   }
   if (info.kind === "kick" && info.kick) {
     const kick = info.kick;
@@ -8005,7 +8300,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     if (kick.codeValue !== null) out.push({ kind: "type", text: `kick_code=${kick.codeValue}`, title: kick.codeMeaning });
     if (Number.isFinite(kick.freezeDays)) out.push({ kind: "carrier", text: `冻结${kick.freezeDays}天`, title: kick.penaltyText });
     if (kick.unlockTime) out.push({ kind: "time", text: `解封 ${kick.unlockTime}`, title: kick.notice });
-    return out.concat(validationInsights);
+    return out;
   }
   if (info.kind === "tss" && info.tss) {
     const tss = info.tss;
@@ -8013,7 +8308,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
     out.push({ kind: "ace", text: "CSTss", title: tss.commandName });
     out.push({ kind: "carrier", text: carrier.mode || "TSS carrier", title: carrier.chain || carrier.mode || "" });
     if (tss.identity) out.push({ kind: "type", text: tss.identity, title: tss.meaning || tss.identity });
-    return out.concat(validationInsights);
+    return out;
   }
   const proto = info.proto || null;
   const name = String(
@@ -8052,7 +8347,7 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
       title: "已按 UAGame 20001 的 40-byte envelope 提取 body；当前 body 不强制假设为 protobuf。",
     });
   }
-  return out.concat(validationInsights);
+  return out;
 }
 
 function appendGcloudKv(grid, label, value) {
@@ -8175,8 +8470,28 @@ function appendGcloudSecuritySummary(panel, info) {
     appendGcloudContext(rail, row);
   }
   if (rail.childElementCount > 0) panel.appendChild(rail);
+}
 
-  appendGcloudEvidenceDetails(panel, rows.filter((row) => !consumed.has(String(row && row.label || ""))));
+function appendGcloudReadableStrings(panel, items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (rows.length <= 0) return;
+  const block = document.createElement("section");
+  block.className = "gcloud-readable";
+  const title = document.createElement("div");
+  title.className = "gcloud-readable-title";
+  title.textContent = `明文字符串 ×${rows.length}`;
+  block.appendChild(title);
+  const list = document.createElement("div");
+  list.className = "gcloud-readable-list";
+  for (const item of rows) {
+    const row = document.createElement("div");
+    row.className = "gcloud-readable-string";
+    row.textContent = String(item && item.text ? item.text : "");
+    if (item && item.path) row.title = String(item.path);
+    list.appendChild(row);
+  }
+  block.appendChild(list);
+  panel.appendChild(block);
 }
 
 function buildGcloudPacketPanel(ev, summaryText = "") {
@@ -8193,7 +8508,10 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   head.appendChild(title);
   const chips = document.createElement("div");
   chips.className = "gcloud-chip-list";
-  for (const text of (Array.isArray(info.chips) ? info.chips : []).slice(0, 7)) {
+  const visibleChips = (Array.isArray(info.chips) ? info.chips : [])
+    .filter((text) => !/^(?:seq|ctrl|msg_id|msg_seq|call_id|basis|confidence|type|ctx|method|wire key_len)=/i.test(String(text || "")))
+    .slice(0, 5);
+  for (const text of visibleChips) {
     const chip = document.createElement("span");
     chip.className = `gcloud-chip${info.kind === "control" ? " gcloud-chip-control" : ""}${info.kind === "proto" ? " gcloud-chip-proto" : ""}${info.kind === "ace" || info.kind === "tss" ? " gcloud-chip-ace" : ""}${info.kind === "kick" ? " gcloud-chip-kick" : ""}`;
     chip.textContent = text;
@@ -8202,16 +8520,16 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   head.appendChild(chips);
   panel.appendChild(head);
 
-  if (info.kind === "ace" || info.kind === "tss") {
-    appendGcloudSecuritySummary(panel, info);
-  } else {
-    const grid = document.createElement("div");
-    grid.className = "gcloud-kv-grid";
-    for (const row of Array.isArray(info.rows) ? info.rows : []) {
-      appendGcloudKv(grid, row.label, row.value);
-    }
-    if (grid.childElementCount > 0) panel.appendChild(grid);
+  const readableStrings = gcloudReadableStringsForEvent(ev, info.proto);
+
+  const grid = document.createElement("div");
+  grid.className = "gcloud-kv-grid";
+  for (const row of gcloudProtocolDisplayRows(info, ev, summaryText, readableStrings)) {
+    appendGcloudKv(grid, row.label, row.value);
   }
+  if (grid.childElementCount > 0) panel.appendChild(grid);
+
+  appendGcloudReadableStrings(panel, readableStrings);
 
   const protoTree = info.proto ? buildGcloudProtoTree(info.proto, info.protoBytes || info.bytes) : null;
   if (protoTree) {
@@ -8220,18 +8538,18 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     details.open = info.kind !== "ace" && info.kind !== "tss" && info.kind !== "kick";
     const summary = document.createElement("summary");
     const count = info.proto && Array.isArray(info.proto.flat) ? info.proto.flat.length : info.nodeRows.length;
-    summary.textContent = `${info.kind === "ace" || info.kind === "tss" ? "protobuf 外层" : "protobuf tree"} ×${count}`;
+    summary.textContent = `${info.kind === "ace" || info.kind === "tss" ? "Protobuf 外层" : "Layout / fields / value / hex"} ×${count}`;
     details.appendChild(summary);
     details.appendChild(protoTree);
     panel.appendChild(details);
   }
 
-  if (Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
+  if (!protoTree && Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
     const details = document.createElement("details");
     details.className = "gcloud-node-details";
     details.open = !protoTree;
     const summary = document.createElement("summary");
-    summary.textContent = `语义路径 / raw field paths ×${info.nodeRows.length}`;
+    summary.textContent = `字段 / value ×${info.nodeRows.length}`;
     details.appendChild(summary);
     const list = document.createElement("div");
     list.className = "gcloud-node-list";
@@ -14791,24 +15109,26 @@ function buildEventReadableSummary(ev, summaryText) {
   }
   block.appendChild(primary);
 
-  const transport = document.createElement("div");
-  transport.className = "event-summary-transport";
-  const proxyUsername = getProxyUsername(ev && ev.proxy_username);
-  const transportBits = [
-    `id=${ev && ev.id !== undefined ? ev.id : "-"}`,
-    proxyUsername ? `kp=${proxyUsername}` : `cid=${stripDecoratorsFromCid(ev && ev.cid)}`,
-    `seq=${ev && ev.seq !== undefined ? ev.seq : "-"}`,
-    `msg=${ev && ev.msg_idx !== undefined ? ev.msg_idx : "-"}`,
-    `chunk=${ev && ev.chunk_idx !== undefined ? ev.chunk_idx : "-"}`,
-  ];
-  for (const text of transportBits) {
-    const node = document.createElement("span");
-    node.textContent = text;
-    transport.appendChild(node);
+  if (!isGcloud) {
+    const transport = document.createElement("div");
+    transport.className = "event-summary-transport";
+    const proxyUsername = getProxyUsername(ev && ev.proxy_username);
+    const transportBits = [
+      `id=${ev && ev.id !== undefined ? ev.id : "-"}`,
+      proxyUsername ? `kp=${proxyUsername}` : `cid=${stripDecoratorsFromCid(ev && ev.cid)}`,
+      `seq=${ev && ev.seq !== undefined ? ev.seq : "-"}`,
+      `msg=${ev && ev.msg_idx !== undefined ? ev.msg_idx : "-"}`,
+      `chunk=${ev && ev.chunk_idx !== undefined ? ev.chunk_idx : "-"}`,
+    ];
+    for (const text of transportBits) {
+      const node = document.createElement("span");
+      node.textContent = text;
+      transport.appendChild(node);
+    }
+    block.appendChild(transport);
   }
-  block.appendChild(transport);
 
-  if (summaryText) {
+  if (summaryText && !isGcloud) {
     const details = document.createElement("details");
     details.className = "event-summary-debug";
     const summary = document.createElement("summary");
@@ -14845,17 +15165,9 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   if (gcloudPanel) {
     body.appendChild(gcloudPanel);
   }
-  const gcloudValidationPanel = isGcloudEvent ? buildGcloudValidationPanel(ev) : null;
-  if (gcloudValidationPanel) {
-    body.appendChild(gcloudValidationPanel);
-  }
   const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
   if (wssJsonPanel) {
     body.appendChild(wssJsonPanel);
-  }
-  const aceCarrierDeepPanel = isGcloudEvent ? buildGcloudAceCarrierDeepPanel(ev, summaryText) : null;
-  if (aceCarrierDeepPanel) {
-    body.appendChild(aceCarrierDeepPanel);
   }
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
@@ -15062,7 +15374,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           ? (gcloudWireCompare
             ? "收到的原始4013 [raw before/full_pay]"
             : (opaqueUndecrypted ? "修改前原始封包 [raw before]" : "修改前加密 [raw before]"))
-          : "原始封包 [raw]",
+          : (isGcloudEvent ? "加密 Payload [raw]" : "原始封包 [raw]"),
         fullPay,
         ev.full_len,
         "dump-panel-full",
@@ -15073,7 +15385,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           changedOffsets: showRawCompare ? rawWireChangedOffsets : null,
         }
       );
-    } else {
+    } else if (!isGcloudEvent) {
       appendEmptyDumpSection("原始封包 [raw]", "当前事件没有 full_pay，无法显示完整原始封包。", "dump-panel-full");
     }
     if (showRawCompare) {
@@ -15093,7 +15405,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       );
     }
     if (hasBeforeDump) {
-      appendDumpSection(gcloudWireRebuilt ? "原始解密 [before/received]" : (opaqueUndecrypted ? "修改前原始封包 [before/raw]" : "修改前解密 [before]"), beforePay, ev.before_len, "dump-panel-before", "before", {
+      appendDumpSection(gcloudWireRebuilt ? "修改前解密 Payload [before/received]" : (opaqueUndecrypted ? "修改前原始封包 [before/raw]" : (isGcloudEvent ? "修改前解密 Payload [before]" : "修改前解密 [before]")), beforePay, ev.before_len, "dump-panel-before", "before", {
         changedOffsets: decodedChangedOffsets,
       });
     } else if (hasDecodedDump) {
@@ -15114,11 +15426,11 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           : "当前原始封包 [current/raw]")
         : (hasBeforeDump
           ? gcloudWireRebuilt
-            ? "修改后解密 [after/rebuilt]"
+            ? "修改后解密 Payload [after/rebuilt]"
             : beforeDumpSameAsDecoded
-            ? "修改后解密 [after same]"
-            : "修改后解密 [after]"
-          : "当前解密 [current]");
+            ? (isGcloudEvent ? "修改后解密 Payload [after same]" : "修改后解密 [after same]")
+            : (isGcloudEvent ? "修改后解密 Payload [after]" : "修改后解密 [after]")
+          : (isGcloudEvent ? "解密 Payload [current]" : "当前解密 [current]"));
       appendDumpSection(
         decodedTitle,
         decodedPay,
@@ -15134,25 +15446,55 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         "dump-panel-decoded"
       );
     }
-  } else if (gcloudWireCompare) {
-    appendDumpSection(
-      "收到的响应原始4013 [修改前/full_pay]",
-      fullPay,
-      ev.full_len,
-      "dump-panel-full",
-      "full",
-      { changedOffsets: rawWireChangedOffsets }
-    );
-    appendDumpSection(
-      "实际发送的响应4013 [修改后/raw_pay]",
-      rawAfterPay,
-      ev.raw_len,
-      "dump-panel-raw-after",
-      "raw_after",
-      { changedOffsets: rawWireChangedOffsets }
-    );
+  } else if (isGcloudEvent) {
+    if (gcloudWireCompare) {
+      appendDumpSection(
+        "修改前加密 Payload [full_pay]",
+        fullPay,
+        ev.full_len,
+        "dump-panel-full",
+        "full",
+        { collapsed: true, foldNote: "修改前 wire", changedOffsets: rawWireChangedOffsets }
+      );
+      appendDumpSection(
+        "修改后加密 Payload [raw_pay]",
+        rawAfterPay,
+        ev.raw_len,
+        "dump-panel-raw-after",
+        "raw_after",
+        { collapsed: true, foldNote: "修改后 wire", changedOffsets: rawWireChangedOffsets }
+      );
+    } else if (hasFullDump && !fullDumpSameAsDecoded) {
+      appendDumpSection(
+        "加密 Payload [raw]",
+        fullPay,
+        ev.full_len,
+        "dump-panel-full",
+        "full",
+        { collapsed: true, foldNote: "raw 参考" }
+      );
+    }
+    if (hasBeforeDump) {
+      appendDumpSection(
+        "修改前解密 Payload [before]",
+        beforePay,
+        ev.before_len,
+        "dump-panel-before",
+        "before",
+        { changedOffsets: decodedChangedOffsets }
+      );
+    }
     if (hasDecodedDump) {
-      appendDumpSection("响应解密 [decoded/内层保持]", decodedPay, ev.len, "dump-panel-decoded", "decoded");
+      appendDumpSection(
+        hasBeforeDump ? "修改后解密 Payload [after]" : "解密 Payload [current]",
+        decodedPay,
+        ev.len,
+        "dump-panel-decoded",
+        "decoded",
+        { changedOffsets: decodedChangedOffsets }
+      );
+    } else if (!hasFullDump) {
+      appendEmptyDumpSection("Payload", "当前事件没有可显示的 Payload。", "dump-panel-single");
     }
   } else if (hasFullDump && !fullDumpSameAsDecoded) {
     appendDumpSection("响应原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
