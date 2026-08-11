@@ -14394,6 +14394,31 @@ function gcloudSecurityCommandFromInfo(info) {
   return null;
 }
 
+function gcloudSecurityDeepPanelKind(ev, summaryText = "") {
+  const info = analyzeGcloudEvent(ev, summaryText);
+  const command = gcloudSecurityCommandFromInfo(info);
+  const kind = String(command && command.kind || "");
+  // The compact GCloud view intentionally hides the old validation/evidence
+  // wall.  Only the packet families whose useful content lives inside an ACE
+  // carrier get the recursive child/reportcode view.
+  return ["ace_antidata", "ace_light", "ace_transfer"].includes(kind) ? kind : "";
+}
+
+function gcloudSecurityDeepPanelTitle(info, securityCommand) {
+  const kind = String(securityCommand && securityCommand.kind || "");
+  if (kind === "ace_antidata") return "AntiData 二层/三层解析";
+  if (kind === "ace_light") return "轻量特征子节点 / ReportCode";
+  if (kind === "ace_transfer") return "AntiData Transfer 二层解析";
+  return info && info.kind === "tss" ? "TSS 二层/三层解析" : "ACE 二层解析";
+}
+
+function gcloudSecurityThirdLayerTitle(securityCommand) {
+  const kind = String(securityCommand && securityCommand.kind || "");
+  if (kind === "ace_antidata") return "AntiData 三层解密结果";
+  if (kind === "ace_light") return "轻量特征三层解密结果";
+  return "TSS 第三层解密结果";
+}
+
 function analyzeGcloudBeforeSecurityVariant(ev, summaryText, currentCommandName) {
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
   if (!beforePay) return null;
@@ -14436,7 +14461,7 @@ function makeGcloudOpaqueCarrierNode(carrier, payload, channelLabel) {
   };
 }
 
-function buildGcloudAceOpaqueCarrierPanel(securityCommand, carrier, payload, identityText, channelLabel = "ACE", beforeCarrier = null, beforePayload = []) {
+function buildGcloudAceOpaqueCarrierPanel(securityCommand, carrier, payload, identityText, channelLabel = "ACE", beforeCarrier = null, beforePayload = [], panelTitle = "") {
   ensureChildCommonStyles();
   const hasBefore = Array.isArray(beforePayload) && beforePayload.length > 0;
   const beforeChanged = hasBefore && !gcloudBytesEqual(beforePayload, payload);
@@ -14445,11 +14470,11 @@ function buildGcloudAceOpaqueCarrierPanel(securityCommand, carrier, payload, ide
   const head = document.createElement("div");
   head.className = "child-compare-head";
   const title = document.createElement("span");
-  title.textContent = `${channelLabel} carrier 二次深度解析`;
+  title.textContent = panelTitle || `${channelLabel} 二层解析`;
   const meta = document.createElement("small");
   meta.textContent = hasBefore
-    ? `${securityCommand.commandName} · ${carrier.mode || "carrier"} · before ${beforePayload.length}B / after ${payload.length}B · ${beforeChanged ? "binary diff" : "same bytes"}`
-    : `${securityCommand.commandName} · ${carrier.mode || "carrier"} · decoded ${payload.length}B · ${identityText} · observe-only`;
+    ? `${securityCommand.commandName} · ${carrier.mode || "carrier"} · 修改前 ${beforePayload.length}B / 修改后 ${payload.length}B · ${beforeChanged ? "字节有变化" : "内容相同"}`
+    : `${securityCommand.commandName} · ${carrier.mode || "carrier"} · 已解码 ${payload.length}B · ${identityText}`;
   head.appendChild(title);
   head.appendChild(meta);
   panel.appendChild(head);
@@ -14514,7 +14539,7 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
   const beforeReportText = beforeRoot ? formatHexValue(beforeRoot.value, 8) : "";
   const encrypted = root ? decryptTssEncryptedEnvelope(displayPayload) : null;
   const beforeEncrypted = beforeRoot ? decryptTssEncryptedEnvelope(beforePayload) : null;
-  const panelTitle = `${channelLabel} carrier 二次深度解析`;
+  const panelTitle = gcloudSecurityDeepPanelTitle(info, securityCommand);
   const panel = root
     ? buildChildComparePanel(compareRoot ? beforePayloadBase64 : "", payloadBase64, "", {
       forceCurrentOnly: !compareRoot,
@@ -14533,6 +14558,7 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
       channelLabel,
       beforeCarrier,
       beforePayload,
+      panelTitle,
     );
   if (!panel) return null;
 
@@ -14610,7 +14636,7 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
         : "未识别 record root";
       const innerPanel = buildChildComparePanel(beforePlainBase64, plainBase64, "", {
         forceCurrentOnly: !beforePlainBase64,
-        title: "TSS 第三层解密结果",
+        title: gcloudSecurityThirdLayerTitle(securityCommand),
         meta: beforePlainBase64
           ? `${securityCommand.commandName} · ${encrypted.familyName} slot[${encrypted.slot}] · CRC32 verified · before ${beforePlain.length}B / after ${encrypted.plain.length}B · ${innerReport} · ${beforePlainChanged ? "diff" : "same"}`
           : `${securityCommand.commandName} · ${encrypted.familyName} · slot[${encrypted.slot}] · CRC32 verified · ${innerReport} · ${encrypted.plain.length}B`,
@@ -15314,6 +15340,15 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
   if (gcloudPanel) {
     body.appendChild(gcloudPanel);
+  }
+  const gcloudDeepKind = isGcloudEvent
+    ? gcloudSecurityDeepPanelKind(ev, summaryText)
+    : "";
+  const gcloudSecurityDeepPanel = gcloudDeepKind
+    ? buildGcloudAceCarrierDeepPanel(ev, summaryText)
+    : null;
+  if (gcloudSecurityDeepPanel) {
+    body.appendChild(gcloudSecurityDeepPanel);
   }
   const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
   if (wssJsonPanel) {

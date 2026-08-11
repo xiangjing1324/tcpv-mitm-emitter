@@ -302,7 +302,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
             app_js,
         )
 
-    def test_tcpview_frontend_keeps_gcloud_validation_data_out_of_human_view(self):
+    def test_tcpview_frontend_keeps_validation_wall_hidden_but_restores_ace_layers(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"
         )
@@ -313,10 +313,15 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertNotIn(
             "const validationInsights = gcloudValidationSummaryInsights(ev);", app_js
         )
-        self.assertNotIn(
-            "isGcloudEvent ? buildGcloudAceCarrierDeepPanel(ev, summaryText) : null",
+        self.assertIn("function gcloudSecurityDeepPanelKind(ev, summaryText = \"\")", app_js)
+        self.assertIn(
+            '["ace_antidata", "ace_light", "ace_transfer"].includes(kind)',
             app_js,
         )
+        self.assertIn("? buildGcloudAceCarrierDeepPanel(ev, summaryText)", app_js)
+        self.assertIn('return "AntiData 二层/三层解析";', app_js)
+        self.assertIn('return "轻量特征子节点 / ReportCode";', app_js)
+        self.assertIn('return "AntiData 三层解密结果";', app_js)
         self.assertIn("if (summaryText && !isGcloud)", app_js)
 
     def test_tcpview_frontend_labels_unknown_uagame_opcode_and_direct_tss_body(self):
