@@ -5950,6 +5950,201 @@ function readGcloudVarint(bytes, pos, end) {
   return { ok: false, value: 0, valueText: "0", valueHexText: "0x0", raw: [], next: Number(pos || 0) };
 }
 
+function gcloudVarintEncodedLength(value) {
+  let current = Number(value);
+  if (!Number.isFinite(current) || current < 0 || current > 0xffffffff) return 0;
+  current = Math.floor(current);
+  let length = 1;
+  while (current >= 0x80) {
+    current = Math.floor(current / 0x80);
+    length += 1;
+  }
+  return length;
+}
+
+function scanUagameReportCodeCandidates(byteValues, maxHits = 32) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const hits = [];
+  for (let offset = 0; offset + 3 < bytes.length && hits.length < maxHits; offset += 1) {
+    if (
+      (bytes[offset] & 0xff) !== 0x01
+      || (bytes[offset + 1] & 0xff) !== 0x0a
+      || (bytes[offset + 2] & 0xff) !== 0x00
+    ) continue;
+    const code = (
+      0x010a0000
+      + (bytes[offset + 3] & 0xff)
+    ) >>> 0;
+    const recordStart = offset >= 6
+      && (bytes[offset - 6] & 0xff) === 0x00
+      && (bytes[offset - 5] & 0xff) === 0x00
+      && (bytes[offset - 4] & 0xff) === 0x00
+      && (bytes[offset - 3] & 0xff) === 0x01
+      ? offset - 6
+      : null;
+    const declaredLength = recordStart === null
+      ? null
+      : readBe16(bytes, recordStart + 4);
+    const structurallyBounded = recordStart !== null
+      && Number.isFinite(declaredLength)
+      && declaredLength >= 10
+      && recordStart + declaredLength <= bytes.length;
+    hits.push({
+      offset,
+      code,
+      codeText: formatHexValue(code, 8),
+      recordStart,
+      declaredLength,
+      structurallyBounded,
+    });
+  }
+  return hits;
+}
+
+function scanUagameKnownMarkers(byteValues, maxHits = 24) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const markers = [
+    { key: "09 4e", bytes: [0x09, 0x4e] },
+    { key: "0a 92", bytes: [0x0a, 0x92] },
+    { key: "27 0f", bytes: [0x27, 0x0f] },
+  ];
+  const hits = [];
+  for (const marker of markers) {
+    for (let offset = 0; offset + marker.bytes.length <= bytes.length && hits.length < maxHits; offset += 1) {
+      if (marker.bytes.every((byte, index) => (bytes[offset + index] & 0xff) === byte)) {
+        hits.push({ marker: marker.key, offset });
+      }
+    }
+  }
+  return hits;
+}
+
+function parseUagamePackedUint32Root(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length < 3) return null;
+  const tag = readGcloudVarint(bytes, 0, bytes.length);
+  if (!tag.ok || Number(tag.value) !== 0x12) return null;
+  const length = readGcloudVarint(bytes, tag.next, bytes.length);
+  if (!length.ok) return null;
+  const payloadStart = Number(length.next || 0);
+  const payloadLength = Number(length.value || 0);
+  const payloadEnd = payloadStart + payloadLength;
+  if (payloadLength <= 0 || payloadEnd !== bytes.length) return null;
+
+  const values = [];
+  let cursor = payloadStart;
+  let canonical = true;
+  while (cursor < payloadEnd && values.length < 8192) {
+    const item = readGcloudVarint(bytes, cursor, payloadEnd);
+    if (!item.ok || item.next <= cursor || item.value < 0 || item.value > 0xffffffff) return null;
+    if (gcloudVarintEncodedLength(item.value) !== item.raw.length) canonical = false;
+    values.push(Number(item.value));
+    cursor = item.next;
+  }
+  if (cursor !== payloadEnd || values.length <= 0) return null;
+
+  const counts = new Map();
+  const prefixes = new Map();
+  let idLikeCount = 0;
+  for (const value of values) {
+    counts.set(value, Number(counts.get(value) || 0) + 1);
+    const decimal = String(value);
+    if (/^\d{8,10}$/.test(decimal)) idLikeCount += 1;
+    const prefix = decimal.slice(0, 3);
+    prefixes.set(prefix, Number(prefixes.get(prefix) || 0) + 1);
+  }
+  const duplicates = Array.from(counts.entries())
+    .filter((entry) => entry[1] > 1)
+    .map((entry) => ({ value: entry[0], count: entry[1] }));
+  const prefixCounts = Array.from(prefixes.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  const reportCodeValues = values.filter((value) => value >= 0x010a0000 && value <= 0x010a00ff);
+  return {
+    ok: true,
+    field: 2,
+    payloadStart,
+    payloadLength,
+    count: values.length,
+    uniqueCount: counts.size,
+    canonical,
+    idLike: idLikeCount >= Math.ceil(values.length * 0.8),
+    values,
+    first: values.slice(0, 20),
+    last: values.slice(-20),
+    duplicates,
+    prefixCounts,
+    reportCodeValues,
+  };
+}
+
+function analyzeUagameDecodedBodyProbe(byteValues, meta = null) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length <= 0) return null;
+  const reportHits = scanUagameReportCodeCandidates(bytes);
+  const markerHits = scanUagameKnownMarkers(bytes);
+  const packed = parseUagamePackedUint32Root(bytes);
+  return {
+    opcode: parseFlexibleInt(meta && meta.gcloudOpcode),
+    opcodeText: String(meta && meta.gcloudOpcode || ""),
+    length: bytes.length,
+    packed,
+    reportHits,
+    structuredReportHits: reportHits.filter((hit) => hit.structurallyBounded),
+    markerHits,
+  };
+}
+
+function uagameReportProbeRows(probe, direction = "") {
+  if (!probe) return [];
+  const packed = probe.packed;
+  const reportHits = Array.isArray(probe.reportHits) ? probe.reportHits : [];
+  const structured = Array.isArray(probe.structuredReportHits) ? probe.structuredReportHits : [];
+  const markerHits = Array.isArray(probe.markerHits) ? probe.markerHits : [];
+  const rows = [];
+  if (packed && packed.ok) {
+    rows.push({
+      label: "人话结论",
+      value: `${direction === "inbound" ? "服务器下发" : direction === "outbound" ? "客户端上传" : "当前消息携带"} ${packed.count} 个数字 ID（${packed.uniqueCount} unique）；这是列表，不是 ZIP 文件，也没有未消费的尾部密文。`,
+    });
+    rows.push({
+      label: "ID 样例",
+      value: `前20=${packed.first.join(", ")} · 后20=${packed.last.join(", ")}`,
+    });
+    rows.push({
+      label: "ID 分组",
+      value: packed.prefixCounts.slice(0, 12).map((item) => `${item[0]}…×${item[1]}`).join(" · "),
+    });
+    rows.push({
+      label: "Protobuf",
+      value: `root field 2 · packed uint32 ×${packed.count} · payload=${packed.payloadLength}B · canonical=${packed.canonical ? "yes" : "no"} · byte boundary=complete`,
+    });
+  }
+
+  const reportText = reportHits.length > 0
+    ? reportHits.map((hit) => `${hit.codeText}@+${formatHexValue(hit.offset)}${hit.structurallyBounded ? `[record+${formatHexValue(hit.recordStart)} len=${hit.declaredLength}]` : "[raw候选]"}`).join(" · ")
+    : "解密 body 全量扫描未发现 01 0a 00 xx";
+  rows.push({ label: "01 0a 00 xx 扫描", value: reportText });
+  rows.push({
+    label: "TerSafe record",
+    value: structured.length > 0
+      ? `发现 ${structured.length} 个同时满足 00000001 + declared_len + reportCode 的结构候选，可继续交给 TerSafe decoder。`
+      : "未发现完整 00000001 + declared_len + reportCode 记录；不会仅凭 4 字节巧合宣称 TerSafe 解密成功。",
+  });
+  rows.push({
+    label: "Marker 独立扫描",
+    value: markerHits.length > 0
+      ? markerHits.map((hit) => `${hit.marker}@+${formatHexValue(hit.offset)}`).join(" · ")
+      : "09 4e / 0a 92 / 27 0f 均未命中；reportCode 扫描不依赖这些 marker。",
+  });
+  if (packed && packed.reportCodeValues.length > 0) {
+    rows.push({
+      label: "ID值中的 reportCode",
+      value: packed.reportCodeValues.map((value) => formatHexValue(value, 8)).join(", "),
+    });
+  }
+  return rows;
+}
+
 function gcloudBytesToUtf8(byteValues) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
   try {
@@ -7479,6 +7674,14 @@ function gcloudProtocolDisplayRows(info, ev, summaryText = "", readableStrings =
   }
 
   const keepLabels = new Map([
+    ["人话结论", "内容"],
+    ["ID 样例", "ID 样例"],
+    ["ID 分组", "ID 分组"],
+    ["Protobuf", "Protobuf"],
+    ["01 0a 00 xx 扫描", "ReportCode 扫描"],
+    ["TerSafe record", "TerSafe record"],
+    ["Marker 独立扫描", "Marker 独立扫描"],
+    ["ID值中的 reportCode", "ID值中的 reportCode"],
     ["业务语义", "业务语义"],
     ["反作弊角色", "业务语义"],
     ["TSS 角色", "业务语义"],
@@ -8118,6 +8321,9 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       if (!meta.gcloudType) proto.commandDisplay = "";
     }
     const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
+    const uagameProbe = isUagameGcloudMeta(meta)
+      ? analyzeUagameDecodedBodyProbe(protoBytes, meta)
+      : null;
     const compression = proto && proto.compression ? proto.compression : null;
     const numeric = gcloudNumericCommandInfo(ev, proto, summaryText || (ev && ev.summary));
     const uagameOpcode = gcloudUagameOpcodeInfo(meta);
@@ -8265,11 +8471,20 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       bytes,
       protoBytes,
       proto,
-      title,
+      uagameProbe,
+      title: uagameProbe && uagameProbe.packed && uagameProbe.packed.ok
+        ? `UAGame 数字 ID 列表 · ${gcloudUagameOpcodeDisplay(meta)}`
+        : title,
       chips: [
         ...(isUagameGcloudMeta(meta)
           ? [effectiveCommandDisplay || gcloudUagameOpcodeDisplay(meta), proto ? gcloudEventPayloadStatusText(proto, meta) : "UAGame body"]
           : [effectiveCommandDisplay || "4013 decrypted"]),
+        ...(uagameProbe && uagameProbe.packed && uagameProbe.packed.ok
+          ? [`ID×${uagameProbe.packed.count}`, `unique=${uagameProbe.packed.uniqueCount}`]
+          : []),
+        ...(uagameProbe
+          ? [uagameProbe.reportHits.length > 0 ? `01 0a report×${uagameProbe.reportHits.length}` : "01 0a report=0"]
+          : []),
         numeric ? `msg_id=${formatHexValue(numeric.messageId)}` : "",
         numeric && Number.isFinite(numeric.messageSeq) ? `msg_seq=${numeric.messageSeq}` : "",
         numeric ? `confidence=${numeric.confidence}` : "",
@@ -8282,6 +8497,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         !isUagameGcloudMeta(meta) && proto ? gcloudEventPayloadStatusText(proto, meta) : "",
       ].filter(Boolean),
       rows: [
+        ...uagameReportProbeRows(uagameProbe, normalizeGcloudDirection(ev, meta)),
         ...(isUagameGcloudMeta(meta) ? [{
           label: "UAGame 4013",
           value: `${gcloudUagameOpcodeDisplay(meta)} · direction=${normalizeGcloudDirection(ev, meta)} · 40-byte header · body=${meta.plainLen ? Math.max(0, Number(meta.plainLen) - 40) : protoBytes.length}B`,
@@ -8481,6 +8697,22 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
       kind: "gcloud",
       text: commandDisplay || (info.meta && info.meta.commandText ? `${info.meta.commandText} ${info.meta.crypto || ""}`.trim() : `GCloud ${gcloudPort || "TGCP"}`),
       title: info.meta ? info.meta.raw : "",
+    });
+  }
+  if (info.uagameProbe && info.uagameProbe.packed && info.uagameProbe.packed.ok) {
+    out.push({
+      kind: "proto",
+      text: `下发 ID×${info.uagameProbe.packed.count}`,
+      title: `field2 packed uint32；unique=${info.uagameProbe.packed.uniqueCount}；已完整消费当前解密 body。`,
+    });
+  }
+  if (info.uagameProbe) {
+    out.push({
+      kind: info.uagameProbe.reportHits.length > 0 ? "ace" : "type",
+      text: info.uagameProbe.reportHits.length > 0
+        ? `01 0a report×${info.uagameProbe.reportHits.length}`
+        : "01 0a report 无命中",
+      title: "直接扫描解密 body，不依赖 09 4e / 0a 92 / 27 0f marker；只有同时满足记录头和长度边界才提升为 TerSafe record。",
     });
   }
   if (proto) {
