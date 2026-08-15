@@ -11527,6 +11527,7 @@ function renderTssRecursiveNode(node, level) {
       const sub = document.createElement("div");
       sub.className = "tss-recursive-line tss-recursive-line-string";
       sub.textContent = "  @" + hexOffsetText(item.offset) + String.fromCharCode(34) + item.text + String.fromCharCode(34) + (item.truncated ? "…" : "") + " (候选，非校验字段)";
+      body.appendChild(sub);
     }
   }
   if (node.plainHex) {
@@ -15420,8 +15421,8 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
   }
   const decodeTree = root ? buildTssRecursiveDecodeTree(displayPayload, { kind: channelLabel }) : null;
   if (decodeTree && decodeTree.root) {
-    const treeWrap = document.createElement(div);
-    treeWrap.className = gcloud-ace-recursive-tree-wrap;
+    const treeWrap = document.createElement("div");
+    treeWrap.className = "gcloud-ace-recursive-tree-wrap";
     renderTssRecursiveTree(decodeTree, treeWrap);
     stack.appendChild(treeWrap);
   }
