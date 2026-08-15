@@ -1160,7 +1160,96 @@ function installDumpAsciiRowStyles() {
         border-top: 1px solid color-mix(in srgb, var(--line) 52%, transparent);
       }
     }
-  `;
+      .tss-recursive-tree {
+      margin: 6px 0 0;
+      border: 1px solid color-mix(in srgb, #a855f7 30%, var(--line));
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .tss-recursive-tree-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 9px;
+      border-bottom: 1px solid color-mix(in srgb, #a855f7 24%, var(--line));
+      background: color-mix(in srgb, var(--dump-bg) 88%, #a855f7 12%);
+      font-weight: 750;
+    }
+    .tss-recursive-status {
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-weight: 700;
+    }
+    .tss-recursive-status-ok {
+      color: color-mix(in srgb, #22c55e 72%, var(--text));
+      background: color-mix(in srgb, var(--dump-bg) 90%, #22c55e 10%);
+    }
+    .tss-recursive-status-candidate {
+      color: color-mix(in srgb, #f59e0b 82%, var(--text));
+      background: color-mix(in srgb, var(--dump-bg) 90%, #f59e0b 10%);
+    }
+    .tss-recursive-tree-nodes { padding: 4px 6px 6px; }
+    .tss-recursive-node { margin: 2px 0; }
+    .tss-recursive-node > summary {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      list-style: none;
+      padding: 4px 6px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--panel);
+    }
+    .tss-recursive-node > summary::-webkit-details-marker { display: none; }
+    .tss-recursive-node-status {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      line-height: 16px;
+      text-align: center;
+      border-radius: 3px;
+      font-weight: 850;
+      font-size: 12px;
+    }
+    .tss-recursive-node-status-ok { color: #16a34a; background: #dcfce7; }
+    .tss-recursive-node-status-candidate { color: #b45309; background: #fef3c7; }
+    .tss-recursive-node-status-error { color: #dc2626; background: #fee2e2; }
+    .tss-recursive-node-name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .tss-recursive-node-meta {
+      margin-left: auto;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tss-recursive-node-body {
+      margin: 2px 0 4px 20px;
+      padding: 4px 6px;
+      border-left: 2px solid color-mix(in srgb, #a855f7 34%, var(--line));
+      background: color-mix(in srgb, var(--panel) 94%, #a855f7 6%);
+    }
+    .tss-recursive-line {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      overflow-wrap: anywhere;
+      padding: 1px 0;
+      color: var(--text);
+    }
+    .tss-recursive-line-ok { color: color-mix(in srgb, #22c55e 72%, var(--text)); }
+    .tss-recursive-line-error { color: color-mix(in srgb, #dc2626 70%, var(--text)); }
+    .tss-recursive-line-xor { color: color-mix(in srgb, #a855f7 72%, var(--text)); font-weight: 700; }
+    .tss-recursive-line-string { color: color-mix(in srgb, #059669 70%, var(--text)); }
+    .tss-recursive-line-hex { color: var(--muted); }
+    .tss-recursive-node-children { margin-top: 2px; }
+`;
 }
 
 function installAceFilterControl() {
@@ -11022,6 +11111,455 @@ function parseTssChildRecords(byteValues) {
   };
 }
 
+// === TerSafe recursive decode tree (portable DFM-style recursion) ===
+
+const TSS_RECURSE_MAX_DEPTH = 6;
+const TSS_RECURSE_MAX_NODES = 128;
+const TSS_RECURSE_MAX_CHILDREN = 64;
+const TSS_RECURSE_MAX_HEX_BYTES = 64;
+const TSS_RECURSE_MAX_STRING_LEN = 96;
+
+const TSS_RECURSE_REPORT_NAMES = {
+  0x010a0008: "nested-unwrap-envelope",
+  0x010a0009: "nested-control-envelope",
+  0x010a001b: "parent-container",
+  0x010a0023: "control-wrapper",
+  0x0102000a: "typed-leaf",
+  0x010a0011: "request-child",
+  0x010a0010: "ack-response",
+  0x010a0027: "ack",
+  0x010a0044: "short-response",
+  0x010a0057: "file-config-sync",
+  0x010a005f: "sync-status",
+  0x010a0053: "control-status",
+};
+
+const TSS_RECURSE_KEY_SOURCE = "recovered-template-slot-derivation";
+const TSS_RECURSE_KEY_CONFIDENCE = "crc32_structure_validated";
+
+function tssRecurseBoundedHex(byteValues) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
+  const capped = byteValues.slice(0, TSS_RECURSE_MAX_HEX_BYTES);
+  return capped.map((byte) => (Number(byte) & 0xff).toString(16).padStart(2, "0")).join("");
+}
+
+function tssRecurseStrings(byteValues, baseOffset) {
+  const runs = extractPrintableRuns(byteValues, 4, TSS_RECURSE_MAX_CHILDREN, { fullText: true });
+  return (runs || []).slice(0, TSS_RECURSE_MAX_CHILDREN).map((item) => ({
+    offset: Number(baseOffset || 0) + Number(item.off || 0),
+    length: Number(item.len || String(item.text || "").length),
+    text: shortenText(String(item.text || ""), TSS_RECURSE_MAX_STRING_LEN),
+    truncated: String(item.text || "").length > TSS_RECURSE_MAX_STRING_LEN,
+    confidence: "candidate",
+    reason: "printable-ascii-run;not-schema-verified",
+  }));
+}
+
+function tssRecurseReportCode(byteValues) {
+  const report = detectTssReport(byteValues);
+  return report ? Number(report.value) : null;
+}
+
+function tssRecurseNode(node) {
+  return Object.assign({
+    kind: "candidate",
+    name: "unknown",
+    path: "$",
+    depth: 0,
+    carrier: "direct",
+    sourceOffset: null,
+    declaredLen: 0,
+    actualLen: 0,
+    stage: "raw",
+    reportCode: null,
+    status: "candidate",
+    truncated: false,
+    hex: "",
+    strings: [],
+    stringStatus: "no_trusted_text",
+    failure: null,
+    children: [],
+  }, node || {});
+}
+
+function tssRecurseEffectiveSlice(byteValues, declaredTotal) {
+  if (Number.isFinite(declaredTotal) && declaredTotal > 0 && declaredTotal < byteValues.length) {
+    return byteValues.slice(0, declaredTotal);
+  }
+  return byteValues;
+}
+
+function tssRecurseHexReport(code) {
+  return code === null || code === undefined ? "unknown" : "0x" + formatHexValue(code, 8);
+}
+
+function tssRecurseWalk(byteValues, state) {
+  const path = state.path || "$";
+  const depth = Number(state.depth || 0);
+  if (state.nodeBudget.value <= 0) {
+    return tssRecurseNode({
+      kind: "budget_stop", name: "recursion-budget-exhausted", path, depth,
+      carrier: "direct", status: "candidate",
+      failure: "recursive budget exhausted",
+    });
+  }
+  state.nodeBudget.value -= 1;
+
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) {
+    return tssRecurseNode({ kind: "candidate", name: "empty", path, depth, failure: "empty record" });
+  }
+
+  const report = detectTssReport(byteValues);
+  const reportCode = report ? Number(report.value) : null;
+  const declined = !report || !isLikelyTssReportCode(reportCode);
+  const declaredTotal = readBe16(byteValues, 4);
+
+  if (declined) {
+    return tssRecurseNode({
+      kind: "candidate", name: "candidate-non-tss-record", path, depth,
+      carrier: "direct", sourceOffset: 0, declaredLen: declaredTotal,
+      actualLen: byteValues.length, stage: "raw", reportCode, status: "candidate",
+      truncated: Number.isFinite(declaredTotal) && declaredTotal > byteValues.length,
+      hex: tssRecurseBoundedHex(byteValues),
+      strings: tssRecurseStrings(byteValues),
+      failure: "not a trusted TSS report family",
+    });
+  }
+
+  if ((reportCode === 0x010a0008 || reportCode === 0x010a0009) && depth < TSS_RECURSE_MAX_DEPTH) {
+    return tssRecurseEnvelope(byteValues, reportCode, declaredTotal, path, depth, state);
+  }
+  if (reportCode === 0x010a0023 && depth < TSS_RECURSE_MAX_DEPTH) {
+    return tssRecurse0023Wrapper(byteValues, declaredTotal, path, depth, state);
+  }
+  if (reportCode === 0x010a001b && depth < TSS_RECURSE_MAX_DEPTH) {
+    return tssRecurse001bContainer(byteValues, path, depth, state);
+  }
+
+  return tssRecurseNode({
+    kind: "direct-compact-record",
+    name: TSS_RECURSE_REPORT_NAMES[reportCode] || tssRecurseHexReport(reportCode),
+    path, depth, carrier: "direct", sourceOffset: 0,
+    declaredLen: declaredTotal, actualLen: byteValues.length, stage: "raw",
+    reportCode, status: "verified",
+    truncated: Number.isFinite(declaredTotal) && declaredTotal > 0 && declaredTotal < byteValues.length,
+    hex: tssRecurseBoundedHex(byteValues),
+    strings: tssRecurseStrings(byteValues),
+  });
+}
+
+function tssRecurseEnvelope(byteValues, reportCode, declaredTotal, path, depth, state) {
+  const effective = tssRecurseEffectiveSlice(byteValues, declaredTotal);
+  const encrypted = decryptTssEncryptedEnvelope(effective);
+  const headerValid = encrypted !== null && encrypted.supported;
+
+  if (!headerValid) {
+    return tssRecurseNode({
+      kind: "candidate",
+      name: tssRecurseHexReport(reportCode),
+      path, depth, carrier: "family-decrypted", sourceOffset: 0,
+      declaredLen: declaredTotal, actualLen: byteValues.length, stage: "raw", reportCode,
+      status: "candidate",
+      hex: tssRecurseBoundedHex(byteValues),
+      strings: tssRecurseStrings(byteValues),
+      failure: encrypted ? encrypted.reason : "envelope header/family invalid",
+    });
+  }
+
+  const family = Number(encrypted.family);
+  const slot = Number(encrypted.slot);
+  const keyLabel = String(encrypted.keyLabel || "");
+  const xor = {
+    family,
+    familyName: String(encrypted.familyName || ("family" + family)),
+    slot,
+    slotLabel: keyLabel,
+    keySource: TSS_RECURSE_KEY_SOURCE,
+    keyConfidence: encrypted.crcMatch ? "crc32_validated" : "crc32_structure_validated",
+    keyDerivation: "slot-label xor fixed-constants -> 8-byte key -> permutation/block transform",
+  };
+  const crc = {
+    algorithm: "crc32",
+    expected: formatHexValue(encrypted.expectedCrc, 8),
+    actual: encrypted.crcMatch ? formatHexValue(encrypted.actualCrc, 8) : "",
+    match: Boolean(encrypted.crcMatch),
+  };
+
+  if (!encrypted.crcMatch) {
+    return tssRecurseNode({
+      kind: "candidate",
+      name: TSS_RECURSE_REPORT_NAMES[reportCode] || tssRecurseHexReport(reportCode),
+      path, depth, carrier: "family-decrypted", sourceOffset: 0,
+      declaredLen: declaredTotal, actualLen: byteValues.length, stage: "decrypted", reportCode,
+      status: "candidate", hex: tssRecurseBoundedHex(byteValues),
+      plainHex: tssRecurseBoundedHex(encrypted.plain),
+      plainLen: Array.isArray(encrypted.plain) ? encrypted.plain.length : 0,
+      strings: tssRecurseStrings(encrypted.plain || []),
+      stringStatus: "candidate-text-only",
+      xor, crc,
+      failure: "CRC32 mismatch: expected " + crc.expected + " got " + crc.actual,
+    });
+  }
+
+  const inner = Array.isArray(encrypted.plain) ? encrypted.plain : [];
+  const innerReport = detectTssReport(inner);
+  const innerTrusted = Boolean(innerReport && isLikelyTssReportCode(innerReport.value));
+
+  const node = tssRecurseNode({
+    kind: "nested-unwrap-envelope",
+    name: TSS_RECURSE_REPORT_NAMES[reportCode] || tssRecurseHexReport(reportCode),
+    path, depth, carrier: "family-decrypted", sourceOffset: 0,
+    declaredLen: declaredTotal, actualLen: byteValues.length,
+    stage: innerTrusted ? "decrypted" : "xor-decoded", reportCode,
+    status: innerTrusted ? "verified" : "candidate",
+    hex: tssRecurseBoundedHex(byteValues),
+    plainHex: tssRecurseBoundedHex(inner),
+    plainLen: inner.length,
+    strings: tssRecurseStrings(inner),
+    stringStatus: innerTrusted ? "xor-validated-plaintext" : "candidate-text-only",
+    xor, crc,
+  });
+
+  if (innerTrusted && depth + 1 < TSS_RECURSE_MAX_DEPTH && inner.length >= 10) {
+    const child = tssRecurseWalk(inner, {
+      nodeBudget: state.nodeBudget,
+      path: path + ".inner",
+      depth: depth + 1,
+    });
+    node.children = [child];
+  }
+  return node;
+}
+
+function tssRecurse0023Wrapper(byteValues, declaredTotal, path, depth, state) {
+  const effective = tssRecurseEffectiveSlice(byteValues, declaredTotal);
+  const payload = effective.slice(20);
+  if (payload.length < 4) {
+    return tssRecurseNode({
+      kind: "candidate", name: "0x010a0023", path, depth, carrier: "0023-wrapper",
+      declaredLen: declaredTotal, actualLen: byteValues.length, stage: "raw", reportCode: 0x010a0023,
+      status: "candidate", hex: tssRecurseBoundedHex(byteValues),
+      failure: "0023 wrapper shorter than cstr_len header",
+    });
+  }
+  const cstrLen = readBe32(payload, 0);
+  if (!Number.isFinite(cstrLen) || cstrLen < 1 || cstrLen > 0x40 || 4 + cstrLen + 2 > payload.length) {
+    return tssRecurseNode({
+      kind: "candidate", name: "0x010a0023", path, depth, carrier: "0023-wrapper",
+      declaredLen: declaredTotal, actualLen: byteValues.length, stage: "raw", reportCode: 0x010a0023,
+      status: "candidate", hex: tssRecurseBoundedHex(byteValues),
+      failure: "0023 cstr_len out of range: " + formatHexValue(cstrLen, 8),
+    });
+  }
+  const labelRaw = payload.slice(4, 4 + cstrLen);
+  const label = labelRaw.length > 0 && labelRaw[labelRaw.length - 1] === 0
+    ? String.fromCharCode.apply(null, labelRaw.slice(0, -1))
+    : String.fromCharCode.apply(null, labelRaw);
+  const nestedLen = readBe16(payload, 4 + cstrLen);
+  const nested = (Number.isFinite(nestedLen) && nestedLen >= 0 && 6 + cstrLen + nestedLen <= payload.length)
+    ? payload.slice(6 + cstrLen, 6 + cstrLen + nestedLen)
+    : [];
+
+  const node = tssRecurseNode({
+    kind: "nested-wrapper-0023",
+    name: "control-wrapper-0023", path, depth, carrier: "0023-wrapper", sourceOffset: 0,
+    declaredLen: declaredTotal, actualLen: byteValues.length, stage: "raw", reportCode: 0x010a0023,
+    status: "verified", hex: tssRecurseBoundedHex(byteValues),
+    strings: tssRecurseStrings(byteValues),
+  });
+  node.labelText = label;
+  node.nestedPayloadLen = nestedLen;
+
+  const nestedReport = nested.length >= 10 ? detectTssReport(nested) : null;
+  if (nestedReport && isLikelyTssReportCode(nestedReport.value) && depth + 1 < TSS_RECURSE_MAX_DEPTH) {
+    const child = tssRecurseWalk(nested, { nodeBudget: state.nodeBudget, path: path + ".nested", depth: depth + 1 });
+    node.children = [child];
+  }
+  return node;
+}
+
+function tssRecurse001bContainer(byteValues, path, depth, state) {
+  const parsed = parseTssChildRecords(byteValues);
+  const children = (Array.isArray(parsed.children) ? parsed.children : []).slice(0, TSS_RECURSE_MAX_CHILDREN);
+  const node = tssRecurseNode({
+    kind: "parent-container-010a001b",
+    name: "parent-container", path, depth, carrier: "001b-container", sourceOffset: 0,
+    declaredLen: readBe16(byteValues, 4), actualLen: byteValues.length, stage: "raw",
+    reportCode: 0x010a001b, status: "verified",
+    hex: tssRecurseBoundedHex(byteValues),
+    strings: tssRecurseStrings(byteValues),
+  });
+  node.children = [];
+  for (let index = 0; index < children.length && state.nodeBudget.value > 0; index += 1) {
+    const child = children[index];
+    const childBytes = childBytesFromParsed(byteValues, child);
+    if (childBytes.length <= 0) continue;
+    const childTree = tssRecurseWalk(childBytes, {
+      nodeBudget: state.nodeBudget,
+      path: path + ".children[" + index + "]",
+      depth: depth + 1,
+    });
+    node.children.push(childTree);
+  }
+  return node;
+}
+
+function buildTssRecursiveDecodeTree(byteValues, options) {
+  const opts = options || {};
+  const maxNodes = Math.max(1, Math.min(Number(opts.maxNodes || TSS_RECURSE_MAX_NODES), 512));
+  const state = { nodeBudget: { value: maxNodes }, path: "$", depth: 0 };
+  const root = tssRecurseWalk(Array.isArray(byteValues) ? byteValues : [], state);
+  const consumed = maxNodes - state.nodeBudget.value;
+  return {
+    schema: "tersafe.recursive_decode_tree.v1",
+    reported: String(opts.kind || "tss"),
+    ok: Boolean(root && root.status === "verified"),
+    status: root && root.status === "verified" ? "verified" : "candidate",
+    root,
+    stats: {
+      depth: 0,
+      nodes: consumed,
+      maxDepth: TSS_RECURSE_MAX_DEPTH,
+      maxNodes,
+    },
+  };
+}
+
+function tssRecurseCountNodes(node) {
+  if (!node || typeof node !== "object") return 0;
+  let count = 1;
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) count += tssRecurseCountNodes(child);
+  }
+  return count;
+}
+
+function tssRecurseNodeDisplayName(node) {
+  const name = String(node && node.name || "");
+  if (name.indexOf("0x") === 0 && node && node.reportCode !== null && node.reportCode !== undefined) {
+    return name + " (" + String(node.carrier || "direct") + ")";
+  }
+  return name;
+}
+
+function renderTssRecursiveTree(tree, container) {
+  if (!container || !tree || typeof tree !== "object") return null;
+  const wrap = document.createElement("div");
+  wrap.className = "tss-recursive-tree";
+  const head = document.createElement("div");
+  head.className = "tss-recursive-tree-head";
+  const title = document.createElement("span");
+  title.textContent = "TerSafe 递归解码树";
+  const badge = document.createElement("span");
+  badge.className = "tss-recursive-status tss-recursive-status-" + (tree.status === "verified" ? "ok" : "candidate");
+  badge.textContent = tree.status === "verified" ? "结构校验通过" : "候选/未验证";
+  head.appendChild(title);
+  head.appendChild(badge);
+  wrap.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "tss-recursive-tree-nodes";
+  if (tree.root) {
+    list.appendChild(renderTssRecursiveNode(tree.root, 0));
+  }
+  wrap.appendChild(list);
+  container.appendChild(wrap);
+  return wrap;
+}
+
+function renderTssRecursiveNode(node, level) {
+  const row = document.createElement("details");
+  row.className = "tss-recursive-node";
+  row.open = level === 0;
+  const summary = document.createElement("summary");
+  summary.className = "tss-recursive-node-summary";
+  const depthPad = "  ".repeat(Math.min(level, 8));
+  const statusChip = document.createElement("span");
+  statusChip.className = "tss-recursive-node-status tss-recursive-node-status-" + (
+    node.status === "verified" ? "ok" : node.status === "candidate" ? "candidate" : "error"
+  );
+  statusChip.textContent = node.status === "verified" ? "✓" : node.status === "candidate" ? "?" : "✗";
+  summary.appendChild(statusChip);
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "tss-recursive-node-name";
+  nameSpan.textContent = depthPad + tssRecurseNodeDisplayName(node);
+  summary.appendChild(nameSpan);
+  const metaSpan = document.createElement("span");
+  metaSpan.className = "tss-recursive-node-meta";
+  const metaParts = [];
+  if (node.reportCode !== null && node.reportCode !== undefined) metaParts.push("report=" + formatHexValue(node.reportCode, 8));
+  if (node.carrier && node.carrier !== "direct") metaParts.push("carrier=" + node.carrier);
+  if (node.stage && node.stage !== "raw") metaParts.push("stage=" + node.stage);
+  metaParts.push("len=" + node.actualLen);
+  if (node.depth !== undefined) metaParts.push("depth=" + node.depth);
+  metaSpan.textContent = metaParts.join(" · ");
+  summary.appendChild(metaSpan);
+  row.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "tss-recursive-node-body";
+
+  if (node.xor) {
+    const xor = node.xor;
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line";
+    line.textContent = "XOR 算法 " + xor.familyName + " slot[" + xor.slot + "]" + (xor.slotLabel ? "=" + xor.slotLabel : "") +
+      " · 密钥来源 " + xor.keySource + " · 置信 " + xor.keyConfidence;
+    body.appendChild(line);
+  }
+  if (node.crc) {
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line" + (node.crc.match ? " tss-recursive-line-ok" : " tss-recursive-line-error");
+    line.textContent = "CRC32 " + (node.crc.match ? "匹配" : "不匹配") + " expected=" + node.crc.expected + " actual=" + node.crc.actual;
+    body.appendChild(line);
+  }
+  if (node.sourceOffset !== null && node.sourceOffset !== undefined) {
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line";
+    line.textContent = "源偏移 " + hexOffsetText(node.sourceOffset) + " 声明长度 " + node.declaredLen + " 实际长度 " + node.actualLen + " stage=" + node.stage;
+    body.appendChild(line);
+  }
+  if (Array.isArray(node.strings) && node.strings.length > 0) {
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line tss-recursive-line-xor";
+    line.textContent = "字符串(候选) " + node.stringStatus + ":";
+    body.appendChild(line);
+    for (const item of node.strings.slice(0, 12)) {
+      const sub = document.createElement("div");
+      sub.className = "tss-recursive-line tss-recursive-line-string";
+      sub.textContent = "  @" + hexOffsetText(item.offset) + String.fromCharCode(34) + item.text + String.fromCharCode(34) + (item.truncated ? "…" : "") + " (候选，非校验字段)";
+    }
+  }
+  if (node.plainHex) {
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line tss-recursive-line-hex";
+    line.textContent = "解密明文 (" + node.plainLen + "B): " + node.plainHex;
+    body.appendChild(line);
+  }
+  if (node.hex) {
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line tss-recursive-line-hex";
+    line.textContent = "原始字节: " + node.hex;
+    body.appendChild(line);
+  }
+  if (node.failure) {
+    const line = document.createElement("div");
+    line.className = "tss-recursive-line tss-recursive-line-error";
+    line.textContent = "解析失败: " + node.failure;
+    body.appendChild(line);
+  }
+  if (Array.isArray(node.children) && node.children.length > 0) {
+    const childWrap = document.createElement("div");
+    childWrap.className = "tss-recursive-node-children";
+    for (const child of node.children) {
+      if (child) childWrap.appendChild(renderTssRecursiveNode(child, level + 1));
+    }
+    body.appendChild(childWrap);
+  }
+  row.appendChild(body);
+  return row;
+}
+
+
 function makeRootComparableNode(byteValues) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return null;
   const root = detectTssReport(byteValues);
@@ -14879,6 +15417,13 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
         stack.appendChild(innerPanel);
       }
     }
+  }
+  const decodeTree = root ? buildTssRecursiveDecodeTree(displayPayload, { kind: channelLabel }) : null;
+  if (decodeTree && decodeTree.root) {
+    const treeWrap = document.createElement(div);
+    treeWrap.className = gcloud-ace-recursive-tree-wrap;
+    renderTssRecursiveTree(decodeTree, treeWrap);
+    stack.appendChild(treeWrap);
   }
   return stack;
 }

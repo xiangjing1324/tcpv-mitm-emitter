@@ -53,6 +53,10 @@ def report_role(report_code: int | None, *, direction: int) -> tuple[str, str]:
         return "dynamic_metadata_event", "confirmed"
     if value == 0x0102000A:
         return "typed_leaf_shell", "confirmed"
+    if value in {0x010A0008, 0x010A0009}:
+        return ("nested_encrypted_envelope", "confirmed")
+    if value == 0x010A0023:
+        return "control_wrapper", "confirmed"
     if value == 0x010A0011:
         return "server_acknowledged_child_request", "confirmed"
     if value == 0x010A0010:
