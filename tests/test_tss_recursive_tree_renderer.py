@@ -155,3 +155,59 @@ console.log(JSON.stringify({{ ok: true, nodes: createdTags.length }}));
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["ok"] is True
 
+
+def test_standalone_gcloud_tss_record_reuses_recursive_tree_without_duplicate_panel(
+    tmp_path: Path,
+) -> None:
+    node = shutil.which("node")
+    if not node:
+        raise AssertionError("node is required for the focused TCPView renderer test")
+
+    source = APP_JS.read_text(encoding="utf-8")
+    assert '0x010a0056: "report-0056"' in source
+    assert '0x010a0037: "report-0037"' in source
+    build_event = _extract_function(source, "buildEventBody")
+    assert "isGcloudEvent && !gcloudSecurityDeepPanel" in build_event
+    assert "buildGcloudStandaloneTssRecursivePanel(ev, summaryText)" in build_event
+
+    function_source = _extract_function(source, "buildGcloudStandaloneTssRecursivePanel")
+    program = f"""
+class Element {{
+  constructor(tag) {{ this.tag = tag; this.children = []; this.className = ''; }}
+  appendChild(child) {{ this.children.push(child); return child; }}
+}}
+const document = {{ createElement(tag) {{ return new Element(tag); }} }};
+let styleCalls = 0;
+let renderCalls = 0;
+function ensureChildCommonStyles() {{ styleCalls += 1; }}
+function analyzeGcloudEvent(ev) {{ return ev.info; }}
+function readBe16(bytes, offset) {{ return (bytes[offset] << 8) | bytes[offset + 1]; }}
+function readBe32(bytes, offset) {{
+  return (((bytes[offset] * 0x1000000) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]) >>> 0);
+}}
+function isLikelyTssReportCode(value) {{ return ((Number(value) >>> 16) & 0xffff) === 0x010a; }}
+function buildTssRecursiveDecodeTree(bytes) {{
+  return {{ status: 'verified', root: {{ reportCode: readBe32(bytes, 6) }} }};
+}}
+function renderTssRecursiveTree(tree, container) {{
+  renderCalls += 1;
+  const child = new Element('tree');
+  child.reportCode = tree.root.reportCode;
+  container.appendChild(child);
+}}
+{function_source}
+const record = [0,0,0,1,0,21,1,10,0,86,0,0,0,0,0,0,0,0,0,0,1];
+const panel = buildGcloudStandaloneTssRecursivePanel({{ info: {{ protoBytes: record, bytes: record }} }}, '');
+if (!panel) throw new Error('standalone tree was not rendered');
+if (!panel.className.includes('gcloud-standalone-tss-recursive')) throw new Error('standalone class missing');
+if (renderCalls !== 1 || styleCalls !== 1) throw new Error('tree was duplicated');
+if (!panel.children[0] || panel.children[0].reportCode !== 0x010a0056) throw new Error('0056 report missing');
+const negative = buildGcloudStandaloneTssRecursivePanel({{ info: {{ protoBytes: [1,2,3,4,5,6,7,8,9,10] }} }}, '');
+if (negative !== null) throw new Error('non-compact payload created a false tree');
+console.log(JSON.stringify({{ ok: true, renderCalls }}));
+"""
+    harness = tmp_path / "standalone-tss-tree.js"
+    harness.write_text(program, encoding="utf-8")
+    result = subprocess.run([node, str(harness)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"ok": True, "renderCalls": 1}

@@ -11129,6 +11129,8 @@ const TSS_RECURSE_REPORT_NAMES = {
   0x010a0010: "ack-response",
   0x010a0027: "ack",
   0x010a0044: "short-response",
+  0x010a0037: "report-0037",
+  0x010a0056: "report-0056",
   0x010a0057: "file-config-sync",
   0x010a005f: "sync-status",
   0x010a0053: "control-status",
@@ -15429,6 +15431,42 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
   return stack;
 }
 
+function buildGcloudStandaloneTssRecursivePanel(ev, summaryText = "") {
+  const info = analyzeGcloudEvent(ev, summaryText);
+  if (!info) return null;
+  const candidates = [info.protoBytes, info.bytes];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate) || candidate.length < 10) continue;
+    const identity = `${candidate.length}:${candidate.slice(0, 12).join(",")}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    if (
+      candidate[0] !== 0x00
+      || candidate[1] !== 0x00
+      || candidate[2] !== 0x00
+      || candidate[3] !== 0x01
+    ) continue;
+    const declared = readBe16(candidate, 4);
+    const reportCode = readBe32(candidate, 6);
+    if (
+      !Number.isFinite(declared)
+      || declared < 10
+      || declared > candidate.length
+      || !isLikelyTssReportCode(reportCode)
+    ) continue;
+    const record = candidate.slice(0, declared);
+    const tree = buildTssRecursiveDecodeTree(record, { kind: "TSS current payload" });
+    if (!tree || !tree.root) continue;
+    ensureChildCommonStyles();
+    const treeWrap = document.createElement("div");
+    treeWrap.className = "gcloud-ace-recursive-tree-wrap gcloud-standalone-tss-recursive";
+    renderTssRecursiveTree(tree, treeWrap);
+    return treeWrap;
+  }
+  return null;
+}
+
 function comparableNodesFromBytes(byteValues) {
   const parsed = parseTssChildRecords(byteValues);
   const children = Array.isArray(parsed.children) ? parsed.children : [];
@@ -16127,6 +16165,12 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     : null;
   if (gcloudSecurityDeepPanel) {
     body.appendChild(gcloudSecurityDeepPanel);
+  }
+  const gcloudStandaloneTssRecursivePanel = (
+    isGcloudEvent && !gcloudSecurityDeepPanel
+  ) ? buildGcloudStandaloneTssRecursivePanel(ev, summaryText) : null;
+  if (gcloudStandaloneTssRecursivePanel) {
+    body.appendChild(gcloudStandaloneTssRecursivePanel);
   }
   const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
   if (wssJsonPanel) {
