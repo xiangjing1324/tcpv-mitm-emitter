@@ -211,15 +211,15 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
-    def test_tcpv_previous_runtime_cleanup_is_explicit_opt_in(self):
+    def test_tcpv_previous_runtime_cleanup_is_default_with_explicit_opt_out(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(_cleanup_previous_on_start_enabled(None))
+            self.assertTrue(_cleanup_previous_on_start_enabled(None))
         with mock.patch.dict(
             os.environ,
-            {"TCPV_CLEAR_PREVIOUS_ON_START": "1"},
+            {"TCPV_CLEAR_PREVIOUS_ON_START": "0"},
             clear=True,
         ):
-            self.assertTrue(_cleanup_previous_on_start_enabled(None))
+            self.assertFalse(_cleanup_previous_on_start_enabled(None))
         self.assertFalse(_cleanup_previous_on_start_enabled(False))
         self.assertTrue(_cleanup_previous_on_start_enabled(True))
 

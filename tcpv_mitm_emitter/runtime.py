@@ -32,11 +32,11 @@ def _normalize_instance_id(value: str | None) -> str:
 
 
 def _cleanup_previous_on_start_enabled(value: bool | None) -> bool:
-    """Preserve the stable Redis namespace unless cleanup is explicit."""
+    """Clear the previous recording window unless preservation is explicit."""
 
     if value is not None:
         return bool(value)
-    raw = str(os.getenv("TCPV_CLEAR_PREVIOUS_ON_START", "0") or "0").strip().lower()
+    raw = str(os.getenv("TCPV_CLEAR_PREVIOUS_ON_START", "1") or "1").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -112,9 +112,9 @@ class TcpvRuntime:
                     previous_owner_pid != os.getpid()
                     and _cleanup_previous_on_start_enabled(cleanup_previous_on_start)
                 ):
-                    # Only an explicit opt-in defines a new observation
-                    # window.  Stable instance ids preserve Redis/TCPView
-                    # history across ordinary mitmweb restarts.
+                    # An ordinary mitmweb restart defines a new observation
+                    # window.  Explicit opt-out is reserved for recovery or
+                    # forensic preservation.
                     cleared_runtime_keys = self.store.cleanup_instance()
                 self.store.register_runtime_owner(os.getpid(), runtime_started_ts_ms)
                 if cleared_runtime_keys:
