@@ -10,6 +10,44 @@ import redis
 from .config import env_int
 
 
+_MODIFIED_SUMMARY_SIGNALS = (
+    "[修改后:",
+    "payload_modified=1",
+    "wire_rebuilt=1",
+    "wire_header_modified=1",
+    "wire_changed=1",
+    "raw_pay_is_sent_wire=1",
+    "tcpview_after_source=raw_pay_sent_wire",
+    "backend_rewrite_verified=1",
+    "tcpview_focus=modified",
+)
+
+
+def _event_modification_evidence(
+    *,
+    payload: bytes,
+    full_payload: bytes,
+    before_payload: bytes,
+    raw_payload: bytes,
+    summary: str,
+    analysis: dict[str, Any] | None,
+) -> tuple[str, ...]:
+    """Return protocol-neutral, evidence-backed modification sources."""
+
+    evidence: list[str] = []
+    mutation = analysis.get("mutation") if isinstance(analysis, dict) else None
+    if isinstance(mutation, dict) and mutation.get("modified") is True:
+        evidence.append("analysis")
+    if before_payload and before_payload != payload:
+        evidence.append("payload_diff")
+    if full_payload and raw_payload and full_payload != raw_payload:
+        evidence.append("wire_diff")
+    summary_text = str(summary or "").casefold()
+    if any(signal.casefold() in summary_text for signal in _MODIFIED_SUMMARY_SIGNALS):
+        evidence.append("summary")
+    return tuple(dict.fromkeys(evidence))
+
+
 class TcpvEventStore:
     """Redis Stream storage for TCP analysis events."""
 
@@ -145,6 +183,17 @@ class TcpvEventStore:
             "pay": base64.b64encode(payload_bytes).decode("ascii"),
             "seq": str(seq),
         }
+        modification_evidence = _event_modification_evidence(
+            payload=payload_bytes,
+            full_payload=full_payload_bytes,
+            before_payload=before_payload_bytes,
+            raw_payload=raw_payload_bytes,
+            summary=summary,
+            analysis=analysis,
+        )
+        if modification_evidence:
+            fields["mod"] = "1"
+            fields["modsrc"] = ",".join(modification_evidence)
         if label:
             fields["lbl"] = str(label)
         if decode_status:
@@ -763,6 +812,10 @@ class TcpvEventStore:
             "cid": decoded.get("cid", ""),
             "proxy_username": decoded.get("kp", ""),
             "summary": decoded.get("sm", ""),
+            "modified": decoded.get("mod", "") == "1",
+            "modification_evidence": [
+                item for item in decoded.get("modsrc", "").split(",") if item
+            ],
             "dir": self._to_int(decoded.get("dir"), 0),
             "len": self._to_int(decoded.get("len"), 0),
             "pfx": decoded.get("pfx", ""),

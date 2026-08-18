@@ -447,6 +447,62 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("forceSideBySideSame: hasBefore", app_js)
         self.assertIn("backend rebuilt", app_js)
 
+    def test_tcpview_compact_rows_mark_verified_modified_chunks(self):
+        root = Path(__file__).parents[1]
+        app_js = (root / "tcpv_mitm_emitter" / "app.js").read_text(encoding="utf-8")
+        web_py = (root / "tcpv_mitm_emitter" / "web.py").read_text(encoding="utf-8")
+
+        self.assertIn("function eventModificationEvidence", app_js)
+        self.assertIn("function syncEventModificationIndicator", app_js)
+        self.assertIn("ev.modified === true", app_js)
+        self.assertIn("Tersafe 修改标签", app_js)
+        self.assertIn("payload_modified=1", app_js)
+        self.assertIn("wire_rebuilt=1", app_js)
+        self.assertIn("wire_header_modified=1", app_js)
+        self.assertIn("before_pay 与当前 Payload 不同", app_js)
+        self.assertIn("接收 Wire 与实际发送 Wire 不同", app_js)
+        self.assertIn("summary-modified-badge", web_py)
+        self.assertIn("event-modified", web_py)
+
+    def test_store_compact_rows_carry_protocol_neutral_modification_evidence(self):
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.append_event(
+            "acct",
+            "cid",
+            0,
+            b"decoded-after",
+            full_payload=b"wire-before",
+            before_payload=b"decoded-before",
+            raw_payload=b"wire-after",
+            summary="[修改后:packet_rewrite] payload_modified=1",
+            ts_ms=1000,
+        )
+        store.append_event(
+            "acct",
+            "cid",
+            0,
+            b"unchanged",
+            full_payload=b"same-wire",
+            before_payload=b"unchanged",
+            raw_payload=b"same-wire",
+            summary="observe-only",
+            ts_ms=1001,
+        )
+
+        events, _last_id, _has_more = store.get_events(
+            "acct",
+            include_payload=False,
+            include_analysis=False,
+        )
+
+        self.assertTrue(events[0]["modified"])
+        self.assertEqual(
+            events[0]["modification_evidence"],
+            ["payload_diff", "wire_diff", "summary"],
+        )
+        self.assertFalse(events[1]["modified"])
+        self.assertEqual(events[1]["modification_evidence"], [])
+
     def test_tcpview_frontend_has_gcloud_65010_proto_view(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(
             encoding="utf-8"

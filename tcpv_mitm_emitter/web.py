@@ -35,6 +35,10 @@ INDEX_HTML = """
       --hex-history-color: #b45309;
       --hex-history-bg: rgba(180, 83, 9, 0.12);
       --hex-history-line: rgba(180, 83, 9, 0.22);
+      --modified-accent: #d97706;
+      --modified-text: #92400e;
+      --modified-bg: rgba(245, 158, 11, 0.13);
+      --modified-line: rgba(217, 119, 6, 0.42);
     }
 
     :root[data-theme="dark"] {
@@ -65,6 +69,10 @@ INDEX_HTML = """
       --hex-history-color: #fdba74;
       --hex-history-bg: rgba(251, 146, 60, 0.13);
       --hex-history-line: rgba(251, 146, 60, 0.22);
+      --modified-accent: #f59e0b;
+      --modified-text: #fde68a;
+      --modified-bg: rgba(245, 158, 11, 0.14);
+      --modified-line: rgba(251, 191, 36, 0.46);
     }
 
     :root[data-theme="github-dark"] {
@@ -95,6 +103,10 @@ INDEX_HTML = """
       --hex-history-color: #fdba74;
       --hex-history-bg: rgba(251, 146, 60, 0.12);
       --hex-history-line: rgba(251, 146, 60, 0.20);
+      --modified-accent: #f59e0b;
+      --modified-text: #fde68a;
+      --modified-bg: rgba(245, 158, 11, 0.14);
+      --modified-line: rgba(251, 191, 36, 0.46);
     }
 
     * { box-sizing: border-box; }
@@ -573,6 +585,46 @@ INDEX_HTML = """
 
     details.event-req > summary { border-left-color: var(--req); }
     details.event-resp > summary { border-left-color: var(--resp); }
+
+    details.event-modified {
+      border-bottom-color: color-mix(in srgb, var(--modified-accent) 34%, var(--line));
+    }
+
+    details.event-modified > summary {
+      background-image: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--modified-accent) 10%, transparent) 0%,
+        color-mix(in srgb, var(--modified-accent) 4%, transparent) 24%,
+        transparent 52%
+      );
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--modified-accent) 18%, transparent);
+    }
+
+    .summary-modified-badge {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 1px 7px 1px 6px;
+      border: 1px solid var(--modified-line);
+      border-radius: 999px;
+      background: var(--modified-bg);
+      color: var(--modified-text);
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.35;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+
+    .summary-modified-badge::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--modified-accent);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--modified-accent) 18%, transparent);
+    }
 
     .summary-fixed { flex: 0 0 auto; }
 

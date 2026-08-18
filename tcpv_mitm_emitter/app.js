@@ -1495,6 +1495,10 @@ function writePayloadCache(account, eventId, detail) {
       seq: Number.isFinite(Number(normalized.seq)) ? Number(normalized.seq) : undefined,
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
+      modified: normalized.modified === true || String(normalized.modified || "") === "1",
+      modification_evidence: Array.isArray(normalized.modification_evidence)
+        ? normalized.modification_evidence.map((item) => String(item || "")).filter(Boolean)
+        : [],
       analysis: normalized.analysis && typeof normalized.analysis === "object" ? normalized.analysis : {},
     },
     size:
@@ -7664,6 +7668,98 @@ function gcloudPayloadChangeSummary(ev, summaryText = "") {
   return `修改前 ${beforeBytes.length}B → 修改后 ${currentBytes.length}B · 变化 ${diff.changed}/${diff.commonLen}${diff.lenDelta ? ` · lenΔ=${diff.lenDelta}` : ""}`;
 }
 
+function eventModificationEvidence(ev, summaryText = "") {
+  const summary = String(summaryText || (ev && ev.summary) || "");
+  const reasons = [];
+  const addReason = (reason) => {
+    const text = String(reason || "").trim();
+    if (text && !reasons.includes(text)) reasons.push(text);
+  };
+
+  const backendEvidenceLabels = {
+    analysis: "生产端 mutation.modified",
+    payload_diff: "后端 Payload 前后不同",
+    wire_diff: "后端接收/发送 Wire 不同",
+    summary: "后端修改摘要",
+  };
+  if (ev && ev.modified === true) {
+    const sources = Array.isArray(ev.modification_evidence) ? ev.modification_evidence : [];
+    if (sources.length <= 0) addReason("后端已确认修改");
+    for (const source of sources) {
+      addReason(backendEvidenceLabels[String(source || "")] || `后端证据 ${String(source || "")}`);
+    }
+  }
+
+  const summarySignals = [
+    [/\[修改后:[^\]]+\]/, "Tersafe 修改标签"],
+    [/\bpayload_modified=1\b/i, "Payload 已修改"],
+    [/\bwire_rebuilt=1\b/i, "Wire 已重建"],
+    [/\bwire_header_modified=1\b/i, "Wire 头已修改"],
+    [/\bwire_changed=1\b/i, "发送 Wire 已变化"],
+    [/\braw_pay_is_sent_wire=1\b/i, "raw_pay 为实际发送包"],
+    [/\btcpview_after_source=raw_pay_sent_wire\b/i, "after 来自实际发送包"],
+    [/\bbackend_rewrite_verified=1\b/i, "后端重建已验证"],
+    [/\btcpview_focus=modified\b/i, "修改事件焦点"],
+  ];
+  for (const [pattern, reason] of summarySignals) {
+    if (pattern.test(summary)) addReason(reason);
+  }
+
+  const payloadDiffers = (leftText, rightText) => {
+    const left = String(leftText || "");
+    const right = String(rightText || "");
+    if (!left || !right) return false;
+    if (left === right) return false;
+    const leftBytes = b64ToBytes(left);
+    const rightBytes = b64ToBytes(right);
+    if (leftBytes.length <= 0 && rightBytes.length <= 0) return false;
+    const diff = countChangedBytes(leftBytes, rightBytes);
+    return Number(diff.changed || 0) > 0 || Number(diff.lenDelta || 0) !== 0;
+  };
+
+  if (payloadDiffers(ev && ev.before_pay, ev && ev.pay)) {
+    addReason("before_pay 与当前 Payload 不同");
+  }
+  if (payloadDiffers(ev && ev.full_pay, ev && ev.raw_pay)) {
+    addReason("接收 Wire 与实际发送 Wire 不同");
+  }
+
+  if (reasons.length <= 0) return null;
+  return { modified: true, reasons };
+}
+
+function syncEventModificationIndicator(wrap, summaryNode, ev, summaryText = "") {
+  if (!wrap || !summaryNode || typeof summaryNode.querySelector !== "function") return;
+  const evidence = eventModificationEvidence(ev, summaryText);
+  let badge = summaryNode.querySelector(".summary-modified-badge");
+
+  if (!evidence || !evidence.modified) {
+    wrap.classList.remove("event-modified");
+    delete wrap.dataset.modified;
+    delete wrap.dataset.modificationEvidence;
+    if (badge) badge.remove();
+    return;
+  }
+
+  wrap.classList.add("event-modified");
+  wrap.dataset.modified = "1";
+  wrap.dataset.modificationEvidence = evidence.reasons.join(" | ");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "summary-modified-badge";
+    badge.textContent = "已修改";
+    const preview = summaryNode.querySelector(".summary-preview");
+    if (preview) {
+      summaryNode.insertBefore(badge, preview);
+    } else {
+      summaryNode.appendChild(badge);
+    }
+  }
+  const frame = `seq=${ev && ev.seq !== undefined ? ev.seq : "-"} m${ev && ev.msg_idx >= 0 ? ev.msg_idx : "-"}/c${ev && ev.chunk_idx >= 0 ? ev.chunk_idx : "-"}`;
+  badge.title = `该时间帧有真实修改证据 · ${frame} · ${evidence.reasons.join(" · ")}`;
+  badge.setAttribute("aria-label", badge.title);
+}
+
 function gcloudProtocolDisplayRows(info, ev, summaryText = "", readableStrings = []) {
   const sourceRows = Array.isArray(info && info.rows) ? info.rows : [];
   const meta = info && info.meta && typeof info.meta === "object" ? info.meta : {};
@@ -9813,6 +9909,12 @@ function hydrateSummaryBadges(summaryNode, ev, summaryText = "", eventId = "") {
         syncSummaryTimestampBadge(summaryNode, ev);
         syncSummaryIdfvBadge(summaryNode, ev, summaryText);
         syncSummaryHistoryOpenidBadge(summaryNode, ev, summaryText);
+        syncEventModificationIndicator(
+          summaryNode.closest("details"),
+          summaryNode,
+          ev,
+          String(ev && ev.summary ? ev.summary : summaryText)
+        );
       } else {
         schedulePreviewOffsetRender();
       }
@@ -16582,6 +16684,12 @@ function applyEventPayloadDetail(ev, detail) {
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
   if (detail.summary !== undefined) ev.summary = String(detail.summary || "");
+  if (detail.modified !== undefined) {
+    ev.modified = detail.modified === true || String(detail.modified || "") === "1";
+  }
+  if (Array.isArray(detail.modification_evidence)) {
+    ev.modification_evidence = detail.modification_evidence.map((item) => String(item || "")).filter(Boolean);
+  }
   if (detail.analysis && typeof detail.analysis === "object") ev.analysis = detail.analysis;
 
   const seqNum = Number(detail.seq);
@@ -17268,6 +17376,7 @@ function renderEvents() {
     ) {
       summaryHydrateBudget -= 1;
     }
+    syncEventModificationIndicator(wrap, summary, ev, summaryText);
 
     wrap.appendChild(summary);
     let prefetchTimer = 0;
@@ -17309,6 +17418,12 @@ function renderEvents() {
         syncSummaryTimestampBadge(summary, ev);
         syncSummaryIdfvBadge(summary, ev, summaryText);
         syncSummaryHistoryOpenidBadge(summary, ev, summaryText);
+        syncEventModificationIndicator(
+          wrap,
+          summary,
+          ev,
+          String(ev && ev.summary ? ev.summary : summaryText)
+        );
         if (loading.isConnected) loading.remove();
         const bodyNode = buildEventBody(ev, hideAscii, eventId);
         wrap.appendChild(bodyNode);
