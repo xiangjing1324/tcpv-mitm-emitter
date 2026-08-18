@@ -12,7 +12,7 @@ from unittest import mock
 from tcpv_mitm_emitter.analyzer import TersafeAnalyzer
 from tcpv_mitm_emitter.archive import parse_txt_capture, read_flow_archive_bytes, write_flow_archive
 from tcpv_mitm_emitter.config import runtime_config
-from tcpv_mitm_emitter.runtime import TcpvRuntime
+from tcpv_mitm_emitter.runtime import TcpvRuntime, _cleanup_previous_on_start_enabled
 from tcpv_mitm_emitter.store import TcpvEventStore
 from tcpv_mitm_emitter.semantic import (
     analysis_from_event,
@@ -211,6 +211,18 @@ class FakeRedis:
 
 
 class ArchiveAndStoreTests(unittest.TestCase):
+    def test_tcpv_previous_runtime_cleanup_is_explicit_opt_in(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_cleanup_previous_on_start_enabled(None))
+        with mock.patch.dict(
+            os.environ,
+            {"TCPV_CLEAR_PREVIOUS_ON_START": "1"},
+            clear=True,
+        ):
+            self.assertTrue(_cleanup_previous_on_start_enabled(None))
+        self.assertFalse(_cleanup_previous_on_start_enabled(False))
+        self.assertTrue(_cleanup_previous_on_start_enabled(True))
+
     def test_web_retention_defaults_to_no_ttl(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             config = runtime_config()

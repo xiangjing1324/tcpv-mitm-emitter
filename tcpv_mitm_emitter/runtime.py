@@ -31,6 +31,15 @@ def _normalize_instance_id(value: str | None) -> str:
     return safe[:128]
 
 
+def _cleanup_previous_on_start_enabled(value: bool | None) -> bool:
+    """Preserve the stable Redis namespace unless cleanup is explicit."""
+
+    if value is not None:
+        return bool(value)
+    raw = str(os.getenv("TCPV_CLEAR_PREVIOUS_ON_START", "0") or "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _producer_analysis_is_authoritative(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -81,6 +90,7 @@ class TcpvRuntime:
         redis_db: int = 0,
         instance_id: str = "",
         cleanup_on_stop: bool | None = None,
+        cleanup_previous_on_start: bool | None = None,
     ) -> bool:
         with self._lock:
             if self.enabled:
@@ -98,10 +108,13 @@ class TcpvRuntime:
                 runtime_started_ts_ms = int(time.time() * 1000)
                 previous_owner_pid = self.store.runtime_owner_pid()
                 cleared_runtime_keys = 0
-                if previous_owner_pid != os.getpid():
-                    # A real mitmweb process restart defines a new observation
-                    # window. Runtime GET/list paths never clear a live flow;
-                    # cleanup is confined to this explicit restart boundary.
+                if (
+                    previous_owner_pid != os.getpid()
+                    and _cleanup_previous_on_start_enabled(cleanup_previous_on_start)
+                ):
+                    # Only an explicit opt-in defines a new observation
+                    # window.  Stable instance ids preserve Redis/TCPView
+                    # history across ordinary mitmweb restarts.
                     cleared_runtime_keys = self.store.cleanup_instance()
                 self.store.register_runtime_owner(os.getpid(), runtime_started_ts_ms)
                 if cleared_runtime_keys:
@@ -844,6 +857,7 @@ def init_emitter(
     redis_db: int = 0,
     instance_id: str = "",
     cleanup_on_stop: bool | None = None,
+    cleanup_previous_on_start: bool | None = None,
 ) -> bool:
     return TCPV_RUNTIME.start(
         bind_host=bind_host,
@@ -853,6 +867,7 @@ def init_emitter(
         redis_db=redis_db,
         instance_id=instance_id,
         cleanup_on_stop=cleanup_on_stop,
+        cleanup_previous_on_start=cleanup_previous_on_start,
     )
 
 
