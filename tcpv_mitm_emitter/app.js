@@ -1378,6 +1378,20 @@ function writePayloadCache(account, eventId, detail) {
       seq: Number.isFinite(Number(normalized.seq)) ? Number(normalized.seq) : undefined,
       msg_idx: Number.isFinite(Number(normalized.msg_idx)) ? Number(normalized.msg_idx) : undefined,
       chunk_idx: Number.isFinite(Number(normalized.chunk_idx)) ? Number(normalized.chunk_idx) : undefined,
+      modification_state: String(normalized.modification_state || ""),
+      modification_basis: String(normalized.modification_basis || ""),
+      modification_diff_count: Number.isFinite(Number(normalized.modification_diff_count))
+        ? Number(normalized.modification_diff_count)
+        : 0,
+      modification_first_offset: Number.isFinite(Number(normalized.modification_first_offset))
+        ? Number(normalized.modification_first_offset)
+        : -1,
+      modification_before_len: Number.isFinite(Number(normalized.modification_before_len))
+        ? Number(normalized.modification_before_len)
+        : 0,
+      modification_after_len: Number.isFinite(Number(normalized.modification_after_len))
+        ? Number(normalized.modification_after_len)
+        : 0,
       analysis: normalized.analysis && typeof normalized.analysis === "object" ? normalized.analysis : {},
     },
     size:
@@ -10029,6 +10043,90 @@ function countChangedBytes(left, right) {
   };
 }
 
+function firstChangedByteOffset(left, right) {
+  const leftBytes = Array.isArray(left) ? left : [];
+  const rightBytes = Array.isArray(right) ? right : [];
+  const commonLen = Math.min(leftBytes.length, rightBytes.length);
+  for (let offset = 0; offset < commonLen; offset += 1) {
+    if (leftBytes[offset] !== rightBytes[offset]) return offset;
+  }
+  return leftBytes.length !== rightBytes.length ? commonLen : -1;
+}
+
+function eventModificationStatus(ev) {
+  const storedState = String(ev && ev.modification_state ? ev.modification_state : "").trim().toLowerCase();
+  const beforeBytes = b64ToBytes(String(ev && ev.before_pay ? ev.before_pay : ""));
+  const afterBytes = b64ToBytes(String(ev && ev.pay ? ev.pay : ""));
+  if (storedState !== "blocked" && beforeBytes.length > 0 && afterBytes.length > 0) {
+    const diff = countChangedBytes(beforeBytes, afterBytes);
+    const totalChanged = Number(diff.changed || 0) + Math.abs(Number(diff.lenDelta || 0));
+    if (totalChanged > 0) {
+      return {
+        state: "modified",
+        basis: "payload",
+        changed: totalChanged,
+        firstOffset: firstChangedByteOffset(beforeBytes, afterBytes),
+        beforeLen: beforeBytes.length,
+        afterLen: afterBytes.length,
+      };
+    }
+    if (storedState !== "modified") {
+      return {
+        state: "original",
+        basis: "payload",
+        changed: 0,
+        firstOffset: -1,
+        beforeLen: beforeBytes.length,
+        afterLen: afterBytes.length,
+      };
+    }
+  }
+
+  const validStates = new Set(["modified", "original", "blocked"]);
+  const stateValue = validStates.has(storedState) ? storedState : "unknown";
+  return {
+    state: stateValue,
+    basis: String(ev && ev.modification_basis ? ev.modification_basis : ""),
+    changed: Number(ev && ev.modification_diff_count) || 0,
+    firstOffset: Number.isFinite(Number(ev && ev.modification_first_offset))
+      ? Number(ev.modification_first_offset)
+      : -1,
+    beforeLen: Number(ev && ev.modification_before_len) || 0,
+    afterLen: Number(ev && ev.modification_after_len) || 0,
+  };
+}
+
+function syncEventModificationStatus(wrap, node, ev) {
+  if (!wrap || !node) return;
+  const status = eventModificationStatus(ev);
+  const labels = {
+    modified: "已改",
+    original: "原样",
+    blocked: "阻断",
+    unknown: "待证",
+  };
+  const basisLabels = {
+    payload: "解密 payload 前后比较",
+    wire: "实际发送 wire 前后比较",
+    backend: "后端修改证据",
+    backend_drop: "后端阻断证据",
+    no_diff_artifact: "未产生 before/after 修改记录",
+  };
+  node.className = `summary-mutation-state mutation-state-${status.state}`;
+  node.textContent = labels[status.state] || labels.unknown;
+  const detail = [];
+  detail.push(labels[status.state] || labels.unknown);
+  if (basisLabels[status.basis]) detail.push(basisLabels[status.basis]);
+  if (status.beforeLen || status.afterLen) detail.push(`${status.beforeLen}B→${status.afterLen}B`);
+  if (status.changed > 0) detail.push(`变化 ${status.changed}B`);
+  if (status.firstOffset >= 0) detail.push(`首差 +0x${status.firstOffset.toString(16)}`);
+  node.title = `${detail.join(" · ")} · 点击展开差异`;
+  node.setAttribute("aria-label", node.title);
+  wrap.classList.remove("event-modified", "event-original", "event-blocked", "event-unknown");
+  wrap.classList.add(`event-${status.state}`);
+  wrap.dataset.modificationState = status.state;
+}
+
 function buildChangedIndexSet(left, right) {
   const leftBytes = Array.isArray(left) ? left : [];
   const rightBytes = Array.isArray(right) ? right : [];
@@ -14728,6 +14826,17 @@ function applyEventPayloadDetail(ev, detail) {
   if (detail.cid) ev.cid = String(detail.cid);
   if (detail.proxy_username !== undefined) ev.proxy_username = String(detail.proxy_username || "");
   if (detail.summary !== undefined) ev.summary = String(detail.summary || "");
+  if (detail.modification_state !== undefined) ev.modification_state = String(detail.modification_state || "");
+  if (detail.modification_basis !== undefined) ev.modification_basis = String(detail.modification_basis || "");
+  for (const key of [
+    "modification_diff_count",
+    "modification_first_offset",
+    "modification_before_len",
+    "modification_after_len",
+  ]) {
+    const value = Number(detail[key]);
+    if (Number.isFinite(value)) ev[key] = value;
+  }
   if (detail.analysis && typeof detail.analysis === "object") ev.analysis = detail.analysis;
 
   const seqNum = Number(detail.seq);
@@ -15348,6 +15457,11 @@ function renderEvents() {
     dirWrap.appendChild(document.createTextNode("]"));
     summary.appendChild(dirWrap);
 
+    const mutationStateNode = document.createElement("button");
+    mutationStateNode.type = "button";
+    syncEventModificationStatus(wrap, mutationStateNode, ev);
+    summary.appendChild(mutationStateNode);
+
     const lenWrap = document.createElement("span");
     lenWrap.className = "summary-fixed summary-len";
     lenWrap.appendChild(document.createTextNode("[l="));
@@ -15455,6 +15569,7 @@ function renderEvents() {
         syncSummaryTimestampBadge(summary, ev);
         syncSummaryIdfvBadge(summary, ev, summaryText);
         syncSummaryHistoryOpenidBadge(summary, ev, summaryText);
+        syncEventModificationStatus(wrap, mutationStateNode, ev);
         if (loading.isConnected) loading.remove();
         const bodyNode = buildEventBody(ev, hideAscii, eventId);
         wrap.appendChild(bodyNode);
@@ -15468,6 +15583,27 @@ function renderEvents() {
         delete wrap.dataset.bodyLoading;
       }
     };
+    const focusModificationDiff = (attempt = 0) => {
+      if (!wrap.isConnected) return;
+      if (wrap.dataset.bodyReady !== "1") {
+        if (attempt < 30) window.setTimeout(() => focusModificationDiff(attempt + 1), 50);
+        return;
+      }
+      const target = wrap.querySelector(
+        ".ace-compare-status-changed, .gcloud-wire-proof, .child-compare-panel, .tree-compare-row, .body"
+      );
+      if (target && typeof target.scrollIntoView === "function") {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    };
+    mutationStateNode.addEventListener("click", (clickEvent) => {
+      clickEvent.preventDefault();
+      clickEvent.stopPropagation();
+      if (!allowExpand) return;
+      if (!wrap.open) wrap.open = true;
+      ensureBody().catch((_e) => {});
+      focusModificationDiff();
+    });
     if (allowExpand) {
       if (wrap.open) {
         ensureBody().catch((_e) => {});

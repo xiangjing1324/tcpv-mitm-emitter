@@ -1098,6 +1098,56 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(event["raw_pfx"], b"encrypted-after".hex())
         self.assertEqual(event["raw_pay"], base64.b64encode(b"encrypted-after").decode("ascii"))
 
+    def test_compact_rows_carry_byte_based_modification_status(self):
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.append_event(
+            "acct",
+            "cid",
+            0,
+            b"\x00\xff\x02",
+            before_payload=b"\x00\x01\x02",
+            ts_ms=1000,
+        )
+        store.append_event(
+            "acct",
+            "cid",
+            0,
+            b"unchanged",
+            before_payload=b"unchanged",
+            ts_ms=1001,
+        )
+        store.append_event("acct", "cid", 1, b"relay-only", ts_ms=1002)
+
+        events, _last_id, _has_more = store.get_events(
+            "acct",
+            include_payload=False,
+            include_analysis=False,
+        )
+
+        self.assertEqual(events[0]["modification_state"], "modified")
+        self.assertEqual(events[0]["modification_basis"], "payload")
+        self.assertEqual(events[0]["modification_diff_count"], 1)
+        self.assertEqual(events[0]["modification_first_offset"], 1)
+        self.assertEqual(events[0]["modification_before_len"], 3)
+        self.assertEqual(events[0]["modification_after_len"], 3)
+        self.assertEqual(events[1]["modification_state"], "original")
+        self.assertEqual(events[1]["modification_basis"], "payload")
+        self.assertEqual(events[2]["modification_state"], "original")
+        self.assertEqual(events[2]["modification_basis"], "no_diff_artifact")
+
+    def test_tcpview_uses_fixed_row_status_light_not_preview_chip(self):
+        root = Path(__file__).parents[1]
+        app_js = (root / "tcpv_mitm_emitter" / "app.js").read_text(encoding="utf-8")
+        web_py = (root / "tcpv_mitm_emitter" / "web.py").read_text(encoding="utf-8")
+
+        self.assertIn("function syncEventModificationStatus", app_js)
+        self.assertIn("summary-mutation-state", app_js)
+        self.assertIn("首差 +0x", app_js)
+        self.assertIn("focusModificationDiff", app_js)
+        self.assertIn(".summary-mutation-state", web_py)
+        self.assertIn(".mutation-state-modified", web_py)
+        self.assertNotIn("summary-modified-badge", web_py)
+
 
 if __name__ == "__main__":
     unittest.main()

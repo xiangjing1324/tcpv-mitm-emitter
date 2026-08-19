@@ -574,6 +574,65 @@ INDEX_HTML = """
     details.event-req > summary { border-left-color: var(--req); }
     details.event-resp > summary { border-left-color: var(--resp); }
 
+    .summary-mutation-state {
+      appearance: none;
+      flex: 0 0 6.5ch;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 5px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 760;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .summary-mutation-state::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      border: 1.5px solid currentColor;
+      border-radius: 50%;
+      background: transparent;
+    }
+
+    .summary-mutation-state:focus-visible {
+      outline: 1px dashed currentColor;
+      outline-offset: 3px;
+    }
+
+    .mutation-state-modified { color: #f59e0b; }
+    .mutation-state-modified::before {
+      background: currentColor;
+      box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+    }
+    .mutation-state-original { color: color-mix(in srgb, #22c55e 70%, var(--muted)); }
+    .mutation-state-blocked { color: #ef4444; }
+    .mutation-state-blocked::before {
+      border-radius: 2px;
+      background: currentColor;
+      transform: rotate(45deg);
+    }
+    .mutation-state-unknown { color: color-mix(in srgb, var(--muted) 84%, var(--text)); }
+    .mutation-state-unknown::before { border-style: dotted; }
+
+    details.event-modified > summary {
+      box-shadow: inset 4px 0 0 color-mix(in srgb, #f59e0b 58%, transparent);
+    }
+
+    details.event-blocked > summary {
+      box-shadow: inset 4px 0 0 color-mix(in srgb, #ef4444 66%, transparent);
+    }
+
     .summary-fixed { flex: 0 0 auto; }
 
     .summary-ts {

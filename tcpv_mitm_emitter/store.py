@@ -10,6 +10,80 @@ import redis
 from .config import env_int
 
 
+_MODIFIED_SUMMARY_SIGNALS = (
+    "[修改后:",
+    "payload_modified=1",
+    "wire_rebuilt=1",
+    "wire_header_modified=1",
+    "wire_changed=1",
+    "raw_pay_is_sent_wire=1",
+    "tcpview_after_source=raw_pay_sent_wire",
+    "backend_rewrite_verified=1",
+)
+
+
+def _byte_diff_metrics(before: bytes, after: bytes) -> tuple[int, int]:
+    """Return total changed bytes and the first changed absolute offset."""
+
+    common_len = min(len(before), len(after))
+    first_offset = -1
+    changed = 0
+    for offset in range(common_len):
+        if before[offset] == after[offset]:
+            continue
+        changed += 1
+        if first_offset < 0:
+            first_offset = offset
+    if len(before) != len(after):
+        changed += abs(len(after) - len(before))
+        if first_offset < 0:
+            first_offset = common_len
+    return changed, first_offset
+
+
+def _event_modification_state(
+    *,
+    payload: bytes,
+    full_payload: bytes,
+    before_payload: bytes,
+    raw_payload: bytes,
+    summary: str,
+    analysis: dict[str, Any] | None,
+) -> tuple[str, str, int, int, int, int]:
+    """Classify a compact row without requiring the browser to fetch payloads."""
+
+    mutation = analysis.get("mutation") if isinstance(analysis, dict) else None
+    action = str(mutation.get("action") or "").strip().casefold() if isinstance(mutation, dict) else ""
+    dropped = bool(mutation.get("dropped")) if isinstance(mutation, dict) else False
+    summary_folded = str(summary or "").casefold()
+    if dropped or action in {"drop", "block", "blocked", "delete", "deleted"} or any(
+        token in summary_folded
+        for token in ("packet_dropped=1", "packet_blocked=1", "action=drop", "action=block")
+    ):
+        return "blocked", "backend_drop", 0, -1, len(before_payload or full_payload), 0
+
+    comparisons = []
+    if before_payload:
+        comparisons.append(("payload", before_payload, payload))
+    for basis, before, after in comparisons:
+        changed, first_offset = _byte_diff_metrics(before, after)
+        if changed > 0:
+            return "modified", basis, changed, first_offset, len(before), len(after)
+
+    declared_modified = isinstance(mutation, dict) and mutation.get("modified") is True
+    summary_modified = any(signal.casefold() in summary_folded for signal in _MODIFIED_SUMMARY_SIGNALS)
+    if declared_modified or summary_modified:
+        if full_payload and raw_payload:
+            changed, first_offset = _byte_diff_metrics(full_payload, raw_payload)
+            return "modified", "wire", changed, first_offset, len(full_payload), len(raw_payload)
+        return "modified", "backend", 0, -1, len(before_payload or full_payload), len(payload or raw_payload)
+
+    if comparisons:
+        basis, before, after = comparisons[0]
+        return "original", basis, 0, -1, len(before), len(after)
+    return "original", "no_diff_artifact", 0, -1, len(payload), len(payload)
+
+
 class TcpvEventStore:
     """Redis Stream storage for TCP analysis events."""
 
@@ -145,6 +219,24 @@ class TcpvEventStore:
             "pay": base64.b64encode(payload_bytes).decode("ascii"),
             "seq": str(seq),
         }
+        modification_state = _event_modification_state(
+            payload=payload_bytes,
+            full_payload=full_payload_bytes,
+            before_payload=before_payload_bytes,
+            raw_payload=raw_payload_bytes,
+            summary=summary,
+            analysis=analysis,
+        )
+        fields.update(
+            {
+                "modstate": modification_state[0],
+                "modbasis": modification_state[1],
+                "moddiff": str(modification_state[2]),
+                "modoff": str(modification_state[3]),
+                "modblen": str(modification_state[4]),
+                "modalen": str(modification_state[5]),
+            }
+        )
         if label:
             fields["lbl"] = str(label)
         if decode_status:
@@ -656,6 +748,12 @@ class TcpvEventStore:
             "cid": decoded.get("cid", ""),
             "proxy_username": decoded.get("kp", ""),
             "summary": decoded.get("sm", ""),
+            "modification_state": decoded.get("modstate", ""),
+            "modification_basis": decoded.get("modbasis", ""),
+            "modification_diff_count": self._to_int(decoded.get("moddiff"), 0),
+            "modification_first_offset": self._to_int(decoded.get("modoff"), -1),
+            "modification_before_len": self._to_int(decoded.get("modblen"), 0),
+            "modification_after_len": self._to_int(decoded.get("modalen"), 0),
             "dir": self._to_int(decoded.get("dir"), 0),
             "len": self._to_int(decoded.get("len"), 0),
             "pfx": decoded.get("pfx", ""),
