@@ -438,7 +438,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("修改后解密 Payload [after]", app_js)
         self.assertIn("function gcloudSummaryHasSentWireChange", app_js)
         self.assertIn("wire_header_modified=1|wire_changed=1|report_010a005f=outer_header_only|outer_header_0x15=01->00", app_js)
-        self.assertIn("实际发送修改成功", app_js)
+        self.assertIn("实际修改并发送", app_js)
         self.assertIn("isGcloud65010Summary(summaryText, ev)", app_js)
         self.assertIn("gcloudSummaryHasSentWireChange(summaryText)", app_js)
         self.assertIn("rawWireChangedOffsets", app_js)
@@ -453,6 +453,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
         web_py = (root / "tcpv_mitm_emitter" / "web.py").read_text(encoding="utf-8")
 
         self.assertIn("function eventModificationEvidence", app_js)
+        self.assertIn("function eventModificationDiffText", app_js)
         self.assertIn("function syncEventModificationIndicator", app_js)
         self.assertIn("ev.modified === true", app_js)
         self.assertIn("Tersafe 修改标签", app_js)
@@ -461,8 +462,10 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertIn("wire_header_modified=1", app_js)
         self.assertIn("before_pay 与当前 Payload 不同", app_js)
         self.assertIn("接收 Wire 与实际发送 Wire 不同", app_js)
-        self.assertIn("summary-modified-badge", web_py)
+        self.assertIn("summary-modification-badge", web_py)
+        self.assertIn("summary-modification-unchanged", web_py)
         self.assertIn("event-modified", web_py)
+        self.assertIn("event-unchanged", web_py)
 
     def test_store_compact_rows_carry_protocol_neutral_modification_evidence(self):
         store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
@@ -502,6 +505,43 @@ class ArchiveAndStoreTests(unittest.TestCase):
         )
         self.assertFalse(events[1]["modified"])
         self.assertEqual(events[1]["modification_evidence"], [])
+
+    def test_wire_diff_without_business_mutation_is_not_modified(self):
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.append_event(
+            "acct",
+            "cid",
+            0,
+            b"same-plaintext",
+            full_payload=b"received-ciphertext",
+            raw_payload=b"reencrypted-ciphertext",
+            summary="crypto=decrypted raw_pay_is_sent_wire=1",
+            analysis={"mutation": {"modified": False}},
+            ts_ms=1000,
+        )
+        events, _last_id, _has_more = store.get_events(
+            "acct",
+            include_payload=False,
+            include_analysis=True,
+        )
+        self.assertFalse(events[0]["modified"])
+        self.assertEqual(events[0]["modification_evidence"], [])
+
+    def test_legacy_wire_diff_only_row_is_demoted_without_cache_clear(self):
+        fake = FakeRedis()
+        store = TcpvEventStore(fake, "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        store.append_event("acct", "cid", 0, b"payload", ts_ms=1000)
+        stream = fake.streams[store.stream_key("acct")]
+        _entry_id, fields = stream[0]
+        fields[b"mod"] = b"1"
+        fields[b"modsrc"] = b"wire_diff"
+        events, _last_id, _has_more = store.get_events(
+            "acct",
+            include_payload=False,
+            include_analysis=False,
+        )
+        self.assertFalse(events[0]["modified"])
+        self.assertEqual(events[0]["modification_evidence"], [])
 
     def test_tcpview_frontend_has_gcloud_65010_proto_view(self):
         app_js = (Path(__file__).parents[1] / "tcpv_mitm_emitter" / "app.js").read_text(

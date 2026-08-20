@@ -600,7 +600,15 @@ INDEX_HTML = """
       box-shadow: inset 0 1px 0 color-mix(in srgb, var(--modified-accent) 18%, transparent);
     }
 
-    .summary-modified-badge {
+    details.event-unchanged > summary {
+      background-image: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--muted) 6%, transparent) 0%,
+        transparent 36%
+      );
+    }
+
+    .summary-modification-badge {
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
@@ -617,13 +625,26 @@ INDEX_HTML = """
       white-space: nowrap;
     }
 
-    .summary-modified-badge::before {
+    .summary-modification-badge::before {
       content: "";
       width: 6px;
       height: 6px;
       border-radius: 999px;
       background: var(--modified-accent);
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--modified-accent) 18%, transparent);
+    }
+
+    .summary-modification-unchanged {
+      border-color: color-mix(in srgb, var(--muted) 48%, var(--line));
+      background: color-mix(in srgb, var(--muted) 8%, transparent);
+      color: color-mix(in srgb, var(--muted) 88%, var(--text));
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+
+    .summary-modification-unchanged::before {
+      background: var(--muted);
+      box-shadow: none;
     }
 
     .summary-fixed { flex: 0 0 auto; }

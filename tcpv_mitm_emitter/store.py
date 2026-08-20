@@ -16,10 +16,12 @@ _MODIFIED_SUMMARY_SIGNALS = (
     "wire_rebuilt=1",
     "wire_header_modified=1",
     "wire_changed=1",
-    "raw_pay_is_sent_wire=1",
-    "tcpview_after_source=raw_pay_sent_wire",
     "backend_rewrite_verified=1",
     "tcpview_focus=modified",
+)
+
+_AUTHORITATIVE_MODIFICATION_SOURCES = frozenset(
+    {"analysis", "payload_diff", "summary"}
 )
 
 
@@ -36,14 +38,24 @@ def _event_modification_evidence(
 
     evidence: list[str] = []
     mutation = analysis.get("mutation") if isinstance(analysis, dict) else None
-    if isinstance(mutation, dict) and mutation.get("modified") is True:
-        evidence.append("analysis")
-    if before_payload and before_payload != payload:
-        evidence.append("payload_diff")
-    if full_payload and raw_payload and full_payload != raw_payload:
-        evidence.append("wire_diff")
+    analysis_modified = isinstance(mutation, dict) and mutation.get("modified") is True
+    payload_changed = bool(before_payload and before_payload != payload)
     summary_text = str(summary or "").casefold()
-    if any(signal.casefold() in summary_text for signal in _MODIFIED_SUMMARY_SIGNALS):
+    summary_modified = any(
+        signal.casefold() in summary_text for signal in _MODIFIED_SUMMARY_SIGNALS
+    )
+    wire_changed = bool(full_payload and raw_payload and full_payload != raw_payload)
+
+    if analysis_modified:
+        evidence.append("analysis")
+    if payload_changed:
+        evidence.append("payload_diff")
+    # GCloud can decrypt and re-encrypt an otherwise unchanged 0x4013 frame.
+    # Ciphertext differences caused by that pass are supporting evidence only;
+    # they do not prove a business-payload mutation by themselves.
+    if wire_changed and (analysis_modified or payload_changed or summary_modified):
+        evidence.append("wire_diff")
+    if summary_modified:
         evidence.append("summary")
     return tuple(dict.fromkeys(evidence))
 
@@ -806,16 +818,24 @@ class TcpvEventStore:
                     analysis = value
             except (TypeError, ValueError, json.JSONDecodeError):
                 analysis = {}
+        modification_evidence = [
+            item for item in decoded.get("modsrc", "").split(",") if item
+        ]
+        # Read old Redis rows safely as well: the first implementation marked
+        # wire_diff-only rows as modified.  Demote those historical rows at
+        # read time so no cache clear or data migration is required.
+        modified = decoded.get("mod", "") == "1" and any(
+            item in _AUTHORITATIVE_MODIFICATION_SOURCES
+            for item in modification_evidence
+        )
         return {
             "id": self._to_str(entry_id),
             "ts": self._to_int(decoded.get("ts"), 0),
             "cid": decoded.get("cid", ""),
             "proxy_username": decoded.get("kp", ""),
             "summary": decoded.get("sm", ""),
-            "modified": decoded.get("mod", "") == "1",
-            "modification_evidence": [
-                item for item in decoded.get("modsrc", "").split(",") if item
-            ],
+            "modified": modified,
+            "modification_evidence": modification_evidence if modified else [],
             "dir": self._to_int(decoded.get("dir"), 0),
             "len": self._to_int(decoded.get("len"), 0),
             "pfx": decoded.get("pfx", ""),

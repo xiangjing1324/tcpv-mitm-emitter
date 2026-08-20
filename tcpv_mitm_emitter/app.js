@@ -7668,6 +7668,47 @@ function gcloudPayloadChangeSummary(ev, summaryText = "") {
   return `修改前 ${beforeBytes.length}B → 修改后 ${currentBytes.length}B · 变化 ${diff.changed}/${diff.commonLen}${diff.lenDelta ? ` · lenΔ=${diff.lenDelta}` : ""}`;
 }
 
+function eventPayloadDiff(leftText, rightText) {
+  const left = String(leftText || "");
+  const right = String(rightText || "");
+  if (!left || !right || left === right) return null;
+  const leftBytes = b64ToBytes(left);
+  const rightBytes = b64ToBytes(right);
+  if (leftBytes.length <= 0 && rightBytes.length <= 0) return null;
+  const diff = countChangedBytes(leftBytes, rightBytes);
+  if (Number(diff.changed || 0) <= 0 && Number(diff.lenDelta || 0) === 0) return null;
+  const offsets = [];
+  const commonLen = Math.min(leftBytes.length, rightBytes.length);
+  for (let offset = 0; offset < commonLen && offsets.length < 12; offset += 1) {
+    if (leftBytes[offset] === rightBytes[offset]) continue;
+    offsets.push({
+      offset,
+      before: childHexByteText(leftBytes[offset]),
+      after: childHexByteText(rightBytes[offset]),
+    });
+  }
+  return { ...diff, offsets };
+}
+
+function eventModificationDiffText(ev) {
+  const plaintext = eventPayloadDiff(ev && ev.before_pay, ev && ev.pay);
+  const wire = eventPayloadDiff(ev && ev.full_pay, ev && ev.raw_pay);
+  const selected = plaintext || wire;
+  if (!selected) return { short: "", detail: "" };
+  const stage = plaintext ? "明文" : "Wire";
+  const delta = Number(selected.lenDelta || 0);
+  const changed = Number(selected.changed || 0);
+  const offsetText = (selected.offsets || []).map((item) => (
+    `+${formatHexValue(item.offset)} ${item.before}->${item.after}`
+  )).join("，");
+  return {
+    short: `${stage}${changed}B${delta ? `/lenΔ${delta > 0 ? "+" : ""}${delta}` : ""}`,
+    detail: `${stage} before -> after：变化 ${changed}/${Number(selected.commonLen || 0)}`
+      + (delta ? `，lenΔ=${delta > 0 ? "+" : ""}${delta}` : "")
+      + (offsetText ? `；${offsetText}` : ""),
+  };
+}
+
 function eventModificationEvidence(ev, summaryText = "") {
   const summary = String(summaryText || (ev && ev.summary) || "");
   const reasons = [];
@@ -7679,14 +7720,13 @@ function eventModificationEvidence(ev, summaryText = "") {
   const backendEvidenceLabels = {
     analysis: "生产端 mutation.modified",
     payload_diff: "后端 Payload 前后不同",
-    wire_diff: "后端接收/发送 Wire 不同",
     summary: "后端修改摘要",
   };
   if (ev && ev.modified === true) {
     const sources = Array.isArray(ev.modification_evidence) ? ev.modification_evidence : [];
-    if (sources.length <= 0) addReason("后端已确认修改");
     for (const source of sources) {
-      addReason(backendEvidenceLabels[String(source || "")] || `后端证据 ${String(source || "")}`);
+      const label = backendEvidenceLabels[String(source || "")];
+      if (label) addReason(label);
     }
   }
 
@@ -7696,8 +7736,6 @@ function eventModificationEvidence(ev, summaryText = "") {
     [/\bwire_rebuilt=1\b/i, "Wire 已重建"],
     [/\bwire_header_modified=1\b/i, "Wire 头已修改"],
     [/\bwire_changed=1\b/i, "发送 Wire 已变化"],
-    [/\braw_pay_is_sent_wire=1\b/i, "raw_pay 为实际发送包"],
-    [/\btcpview_after_source=raw_pay_sent_wire\b/i, "after 来自实际发送包"],
     [/\bbackend_rewrite_verified=1\b/i, "后端重建已验证"],
     [/\btcpview_focus=modified\b/i, "修改事件焦点"],
   ];
@@ -7705,49 +7743,68 @@ function eventModificationEvidence(ev, summaryText = "") {
     if (pattern.test(summary)) addReason(reason);
   }
 
-  const payloadDiffers = (leftText, rightText) => {
-    const left = String(leftText || "");
-    const right = String(rightText || "");
-    if (!left || !right) return false;
-    if (left === right) return false;
-    const leftBytes = b64ToBytes(left);
-    const rightBytes = b64ToBytes(right);
-    if (leftBytes.length <= 0 && rightBytes.length <= 0) return false;
-    const diff = countChangedBytes(leftBytes, rightBytes);
-    return Number(diff.changed || 0) > 0 || Number(diff.lenDelta || 0) !== 0;
-  };
-
-  if (payloadDiffers(ev && ev.before_pay, ev && ev.pay)) {
+  const plaintextDiff = eventPayloadDiff(ev && ev.before_pay, ev && ev.pay);
+  if (plaintextDiff) {
     addReason("before_pay 与当前 Payload 不同");
   }
-  if (payloadDiffers(ev && ev.full_pay, ev && ev.raw_pay)) {
+  const authoritativeModified = reasons.length > 0;
+  if (authoritativeModified && eventPayloadDiff(ev && ev.full_pay, ev && ev.raw_pay)) {
     addReason("接收 Wire 与实际发送 Wire 不同");
   }
 
-  if (reasons.length <= 0) return null;
-  return { modified: true, reasons };
+  if (reasons.length > 0) {
+    return {
+      state: "modified",
+      modified: true,
+      reasons,
+      diff: eventModificationDiffText(ev),
+    };
+  }
+
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  const mutation = analysis && analysis.mutation && typeof analysis.mutation === "object"
+    ? analysis.mutation
+    : null;
+  const transport = analysis && analysis.transport && typeof analysis.transport === "object"
+    ? analysis.transport
+    : null;
+  const producerSaysUnchanged = Boolean(
+    (mutation && mutation.modified === false)
+    || (transport && transport.payload_modified === false)
+  );
+  if (producerSaysUnchanged && Number(ev && ev.dir) === 0) {
+    return {
+      state: "unchanged",
+      modified: false,
+      reasons: ["生产端 mutation.modified=false，未见 before/after 业务差异"],
+      diff: { short: "", detail: "" },
+    };
+  }
+  return null;
 }
 
 function syncEventModificationIndicator(wrap, summaryNode, ev, summaryText = "") {
   if (!wrap || !summaryNode || typeof summaryNode.querySelector !== "function") return;
   const evidence = eventModificationEvidence(ev, summaryText);
-  let badge = summaryNode.querySelector(".summary-modified-badge");
+  let badge = summaryNode.querySelector(".summary-modification-badge");
 
-  if (!evidence || !evidence.modified) {
+  if (!evidence) {
     wrap.classList.remove("event-modified");
+    wrap.classList.remove("event-unchanged");
     delete wrap.dataset.modified;
     delete wrap.dataset.modificationEvidence;
     if (badge) badge.remove();
     return;
   }
 
-  wrap.classList.add("event-modified");
-  wrap.dataset.modified = "1";
+  const isModified = evidence.state === "modified";
+  wrap.classList.toggle("event-modified", isModified);
+  wrap.classList.toggle("event-unchanged", !isModified);
+  wrap.dataset.modified = isModified ? "1" : "0";
   wrap.dataset.modificationEvidence = evidence.reasons.join(" | ");
   if (!badge) {
     badge = document.createElement("span");
-    badge.className = "summary-modified-badge";
-    badge.textContent = "已修改";
+    badge.className = "summary-modification-badge";
     const preview = summaryNode.querySelector(".summary-preview");
     if (preview) {
       summaryNode.insertBefore(badge, preview);
@@ -7755,8 +7812,14 @@ function syncEventModificationIndicator(wrap, summaryNode, ev, summaryText = "")
       summaryNode.appendChild(badge);
     }
   }
+  badge.className = `summary-modification-badge summary-modification-${evidence.state}`;
+  badge.textContent = isModified
+    ? `已修改${evidence.diff && evidence.diff.short ? ` · ${evidence.diff.short}` : ""}`
+    : "未修改";
   const frame = `seq=${ev && ev.seq !== undefined ? ev.seq : "-"} m${ev && ev.msg_idx >= 0 ? ev.msg_idx : "-"}/c${ev && ev.chunk_idx >= 0 ? ev.chunk_idx : "-"}`;
-  badge.title = `该时间帧有真实修改证据 · ${frame} · ${evidence.reasons.join(" · ")}`;
+  badge.title = `${isModified ? "该时间帧有真实修改证据" : "生产端明确未修改"} · ${frame}`
+    + (evidence.diff && evidence.diff.detail ? ` · ${evidence.diff.detail}` : "")
+    + ` · ${evidence.reasons.join(" · ")}`;
   badge.setAttribute("aria-label", badge.title);
 }
 
@@ -15178,7 +15241,7 @@ function gcloudAceCsobMarkerRewritePreview(byteValues) {
 }
 
 function gcloudSummaryHasBackendRebuild(summaryText) {
-  return /payload_modified=1|wire_rebuilt=1|send_chain=replace_4013_plaintext|raw_pay=raw_after_4013|raw_pay_is_sent_wire=1|tcpview_after_source=raw_pay_sent_wire|rewrite_4013_samekey_ace_csob_dfm_patch|relay_4013_ace_csob_dfm_patch/i.test(String(summaryText || ""));
+  return /payload_modified=1|wire_rebuilt=1|send_chain=replace_4013_plaintext|backend_rewrite_verified=1|rewrite_4013_samekey_ace_csob_dfm_patch|relay_4013_ace_csob_dfm_patch/i.test(String(summaryText || ""));
 }
 
 function gcloudSummaryHasSentWireChange(summaryText) {
@@ -16307,7 +16370,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
 
-  if (!isRequest && gcloudWireCompare) {
+  if (isRequest && gcloudWireCompare) {
     const beforeWireBytes = b64ToBytes(fullPay);
     const afterWireBytes = b64ToBytes(rawAfterPay);
     const wireDiff = countChangedBytes(beforeWireBytes, afterWireBytes);
@@ -16320,9 +16383,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     const proof = document.createElement("div");
     proof.className = "ace-compare-status ace-compare-status-changed";
     const proofLabel = document.createElement("strong");
-    proofLabel.textContent = "实际发送修改成功";
+    proofLabel.textContent = "实际修改并发送";
     const proofText = document.createElement("span");
-    proofText.textContent = `收到 full_pay -> 实际发送 raw_pay：变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? `，lenΔ=${wireDiff.lenDelta}` : ""}${changedPreview ? `；${changedPreview}` : ""}`;
+    const businessDiff = eventModificationDiffText(ev);
+    proofText.textContent = `${businessDiff.detail ? `${businessDiff.detail}；` : ""}收到 full_pay -> 实际发送 raw_pay：变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? `，lenΔ=${wireDiff.lenDelta}` : ""}${changedPreview ? `；${changedPreview}` : ""}`;
     proof.appendChild(proofLabel);
     proof.appendChild(proofText);
     body.appendChild(proof);
