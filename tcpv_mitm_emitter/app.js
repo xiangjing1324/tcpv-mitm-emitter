@@ -5379,32 +5379,43 @@ function parseGcloud65010Summary(summaryText = "", ev = null) {
   const producerTransport = gcloudProducerTransport(ev);
   const producerCommandText = String(producerTransport.command || "");
   const command = parseFlexibleInt(commandText || producerCommandText);
-  return {
+  const packet = gcloudProducerPacket(ev);
+  const shape = packet.shape && typeof packet.shape === "object" ? packet.shape : {};
+  const envelope = getUagameDisplayEnvelope(ev);
+  const meta = {
     raw,
     transport: readSummaryValue(raw, "transport") || String(producerTransport.kind || "tgcp65010"),
-    targetPort: readSummaryValue(raw, "target_port"),
+    targetPort: readSummaryValue(raw, "target_port") || String(producerTransport.target_port || ""),
     command,
     commandText: command !== null ? formatHexValue(command, 4) : (commandText || producerCommandText),
-    direction: readSummaryValue(raw, "direction") || String(producerTransport.direction || ""),
+    direction: readSummaryValue(raw, "direction") || String(producerTransport.direction || (Number(ev && ev.dir) === 1 ? "inbound" : "outbound")),
     seq: readSummaryValue(raw, "seq") || String(producerTransport.sequence ?? ""),
-    crypto: readSummaryValue(raw, "crypto"),
+    crypto: readSummaryValue(raw, "crypto") || (producerTransport.decrypted === true ? "decrypted" : String(producerTransport.crypto || "")),
     plainLen: readSummaryValue(raw, "plain_len"),
     padding: readSummaryValue(raw, "padding"),
     beforedump: readSummaryValue(raw, "beforedump"),
-    gcloudType: readSummaryValue(raw, "gcloud_type"),
+    gcloudType: readSummaryValue(raw, "gcloud_type") || String(shape.gcloud_type || ""),
     gcloudTypes: readSummaryValue(raw, "gcloud_types"),
     gcloudTypeSource: readSummaryValue(raw, "gcloud_type_source"),
     gcloudTypeConfidence: readSummaryValue(raw, "gcloud_type_confidence"),
     gcloudTypeBasis: readSummaryValue(raw, "gcloud_type_basis"),
-    gcloudSchema: readSummaryValue(raw, "gcloud_schema"),
-    gcloudOpcode: readSummaryValue(raw, "gcloud_opcode"),
+    gcloudSchema: readSummaryValue(raw, "gcloud_schema") || String(shape.gcloud_schema || shape.application_schema || ""),
+    gcloudOpcode: readSummaryValue(raw, "gcloud_opcode") || String(shape.gcloud_opcode || shape.application_opcode || ""),
     gcloudMessageId: readSummaryValue(raw, "gcloud_message_id"),
     gcloudMessageSeq: readSummaryValue(raw, "gcloud_message_seq"),
     gcloudContext: readSummaryValue(raw, "gcloud_context"),
     gcloudInferredType: readSummaryValue(raw, "gcloud_inferred_type"),
     gcloudFocus: readSummaryValue(raw, "gcloud_focus"),
-    gcloudProto: readSummaryValue(raw, "gcloud_proto"),
+    gcloudProto: readSummaryValue(raw, "gcloud_proto") || String(shape.gcloud_proto || ""),
   };
+  if (envelope) {
+    meta.gcloudSchema = "uagame_binary_v1";
+    meta.gcloudOpcode = formatHexValue(envelope.opcode, 8);
+    meta.gcloudProto = "uagame_message";
+    meta.uagameDisplayRecovered = true;
+    meta.uagameEnvelope = envelope;
+  }
+  return meta;
 }
 
 function isUagameGcloudMeta(meta) {
@@ -5610,13 +5621,18 @@ function gcloudUagameOpcodeInfo(meta) {
   if (!isUagameGcloudMeta(meta)) return null;
   const opcode = parseFlexibleInt(meta.gcloudOpcode);
   if (opcode === null) return null;
-  const mapped = GCLOUD_UAGAME_OPCODE_NAMES.get(opcode) || null;
+  let mapped = GCLOUD_UAGAME_OPCODE_NAMES.get(opcode) || null;
+  // The iOS resource response uses 08000001 inbound; that is not proof of
+  // CSAccountLoginReq. Never apply a directional request/response alias backwards.
+  const direction = String(meta.direction || "").toLowerCase();
+  if (mapped && /Req$/.test(mapped.name) && direction !== "outbound") mapped = null;
+  if (mapped && /Res$/.test(mapped.name) && direction !== "inbound") mapped = null;
   const inferred = gcloudReadableTypeName(meta.gcloudInferredType);
   return {
     opcode,
     opcodeText: formatHexValue(opcode, 8),
     name: mapped ? mapped.name : inferred,
-    label: mapped ? mapped.label : inferred,
+    label: mapped ? `${mapped.label}${meta.uagameDisplayRecovered ? "（形态参考）" : ""}` : inferred,
     mapped: !!mapped,
   };
 }
@@ -5646,11 +5662,13 @@ function gcloudUagame4013Insights(meta, commandName = "") {
   return [{
     kind: opcodeInfo && opcodeInfo.mapped ? "gcloud" : "type",
     text: opcodeDisplay || label,
-    title: `${name || "UAGame message"} · 4013 decrypted · ${gcloudUagameEnvelopeAnchorText()}`,
+    title: `${meta.uagameDisplayRecovered ? "消息头已校验；名称仅沿用既有形态映射 · " : ""}${name || "UAGame message"} · 4013 decrypted · ${gcloudUagameEnvelopeAnchorText()}`,
   }];
 }
 
 function gcloudEventPayloadStatusText(proto, meta) {
+  if (proto && proto.uagameBody && proto.viewBytes.length === 0 && proto.sourceComplete) return "空正文";
+  if (proto && proto.uagameBody && !proto.sourceComplete) return "正文待加载";
   if (proto && proto.ok) {
     const count = Array.isArray(proto.flat) ? proto.flat.length : 0;
     return count > 0 ? `Protobuf · ${count} fields` : "Protobuf body";
@@ -5832,7 +5850,7 @@ function getGcloudPreviewBytes(ev, maxBytes = 384) {
   const pay = String(ev && ev.pay ? ev.pay : "");
   if (pay) {
     const bytes = b64ToBytes(pay);
-    if (bytes.length > 0) return { bytes, source: "pay", complete: true };
+    if (bytes.length > 0) return { bytes, source: "pay", complete: ev.len === undefined || bytes.length === Number(ev.len) };
   }
   for (const keyName of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
     const bytes = bytesFromHexPrefix(ev && ev[keyName], maxBytes);
@@ -6519,6 +6537,133 @@ function decodeGcloudLz4Block(byteValues, maxOutput = 4 * 1024 * 1024) {
   }
   if (pos !== input.length || output.length <= 0 || sequences <= 0) return null;
   return { bytes: output, sequences, matches };
+}
+
+// A display-only recovery path for older producer handoffs. Do not alter the
+// stored analysis/pay/wire, infer a family from LZ4 token bytes, or scan for an
+// arbitrary marker. Only the 20001 decrypted application view is eligible.
+function getUagameDisplayEnvelope(ev, byteValues = null, completeSource = null) {
+  const transport = gcloudProducerTransport(ev);
+  const analysis = gcloudAuthoritativeAnalysis(ev);
+  const shape = gcloudProducerPacket(ev).shape || {};
+  // An identified UAGame producer already hands off the extracted business
+  // body. It can coincidentally resemble another header; never peel it again.
+  if ((analysis && analysis.generic_semantic_reparse === "uagame_body")
+      || String(shape.gcloud_schema || "").startsWith("uagame_")
+      || /\bgcloud_schema=uagame_|\bgcloud_proto=uagame_/.test(String(ev && ev.summary || ""))) return null;
+  const summary = String(ev && ev.summary || "");
+  const port = readSummaryValue(summary, "target_port") || String(transport.target_port || "");
+  const command = parseFlexibleInt(readSummaryValue(summary, "command") || transport.command);
+  const decrypted = readSummaryValue(summary, "crypto") === "decrypted" || transport.decrypted === true;
+  if (port !== "20001" || command !== 0x4013 || !decrypted) return null;
+  const preview = byteValues === null ? getGcloudPreviewBytes(ev) : { bytes: byteValues, complete: completeSource === true };
+  const bytes = preview.bytes;
+  const total = Number(ev && ev.len);
+  const pay = String(ev && ev.pay || "");
+  const pfx = String(ev && ev.pfx || "");
+  const signature = `${bytes.length}|${total}|${preview.complete ? 1 : 0}`;
+  if (ev && ev.__tcpvUagameEnvelopeCache && ev.__tcpvUagameEnvelopeCache.signature === signature
+      && ev.__tcpvUagameEnvelopeCache.pay === pay && ev.__tcpvUagameEnvelopeCache.pfx === pfx) {
+    return ev.__tcpvUagameEnvelopeCache.value;
+  }
+  const strict = (application, carrier, complete, expectedLength) => {
+    if (application.length < 40 || application[38] !== 0xab || application[39] !== 0xab) return null;
+    const bodyLength = readGcloudBe32(application, 0);
+    if (bodyLength + 40 !== expectedLength) return null;
+    return {
+      opcode: readGcloudBe32(application, 4), carrier, bodyLength,
+      applicationLength: expectedLength, sourceLength: total,
+      complete, body: application.slice(40),
+    };
+  };
+  let value = strict(bytes, "direct", preview.complete, preview.complete ? bytes.length : total);
+  if (!value && preview.complete && bytes.length > 0 && bytes.length <= 1024 * 1024) {
+    const unpacked = decodeGcloudLz4Block(bytes);
+    if (unpacked) value = strict(unpacked.bytes, "lz4_raw", true, unpacked.bytes.length);
+  }
+  if (ev && typeof ev === "object") ev.__tcpvUagameEnvelopeCache = { signature, pay, pfx, value };
+  return value;
+}
+
+function uagameDisplayCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte & 0xff;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function uagameDisplayZipEntry(bytes) {
+  // Bounded classic single-entry ZIP directory validation, not inflation.
+  const u16 = (offset) => offset + 2 <= bytes.length ? bytes[offset] + bytes[offset + 1] * 256 : null;
+  for (let end = bytes.length - 22; end >= Math.max(0, bytes.length - 65557); end -= 1) {
+    if (readLe32(bytes, end) !== 0x06054b50 || end + 22 + u16(end + 20) !== bytes.length) continue;
+    if (u16(end + 4) !== 0 || u16(end + 6) !== 0 || u16(end + 8) !== 1 || u16(end + 10) !== 1) return null;
+    const directory = readLe32(bytes, end + 16), size = readLe32(bytes, end + 12);
+    if (directory + size !== end || size < 46 || readLe32(bytes, directory) !== 0x02014b50) return null;
+    const nameLength = u16(directory + 28), extraLength = u16(directory + 30), commentLength = u16(directory + 32);
+    if (46 + nameLength + extraLength + commentLength !== size || u16(directory + 34) !== 0) return null;
+    const local = readLe32(bytes, directory + 42);
+    if (local !== 0 || readLe32(bytes, local) !== 0x04034b50 || directory < 30) return null;
+    const flags = u16(directory + 8), method = u16(directory + 10);
+    if ((flags & 1) || ![0, 8].includes(method) || u16(local + 6) !== flags || u16(local + 8) !== method) return null;
+    const localNameLength = u16(local + 26), localExtraLength = u16(local + 28);
+    const compressedSize = readLe32(bytes, directory + 20);
+    const dataEnd = local + 30 + localNameLength + localExtraLength + compressedSize;
+    if (localNameLength !== nameLength || dataEnd > directory || (!(flags & 8) && dataEnd !== directory)) return null;
+    const nameBytes = bytes.slice(directory + 46, directory + 46 + nameLength);
+    if (bytes.slice(local + 30, local + 30 + localNameLength).join(",") !== nameBytes.join(",")) return null;
+    const name = gcloudBytesToUtf8(nameBytes);
+    if (name !== "unzipmrpcs.data") return null;
+    return { name, size: readLe32(bytes, directory + 24), crc: readLe32(bytes, directory + 16) };
+  }
+  return null;
+}
+
+function inspectUagameMrpcsResource(proto) {
+  // This capture proves f4.f25 -> {name=f1, ZIP=f3, CRC32(ZIP)=f5}.
+  // It does not prove CSAccountLoginRes or meanings for the two integers.
+  if (!proto || !proto.uagameBody || !proto.sourceComplete || !proto.ok) return null;
+  const roots = proto.nodes.filter((node) => node.field === 4 && node.wire === 2 && node.childOk === true);
+  const found = [];
+  for (const root of roots) {
+    for (const resource of root.children.filter((node) => node.field === 25 && node.wire === 2 && node.childOk === true)) {
+      const fields = resource.children;
+      if (fields.length !== 5 || fields.map((node) => `${node.field}:${node.wire}`).join(",") !== "1:2,2:0,3:2,4:0,5:0") continue;
+      const name = String(fields[0].string || "");
+      if (!/^mrpcs-uam-[a-z]+-\d+\.data$/.test(name)) continue;
+      const zip = proto.viewBytes.slice(fields[2].valueStart, fields[2].valueEnd);
+      if (zip.length < 22 || zip[0] !== 0x50 || zip[1] !== 0x4b || zip[2] !== 3 || zip[3] !== 4) continue;
+      const entry = uagameDisplayZipEntry(zip);
+      if (!entry) continue;
+      const wireCrc = Number(fields[4].valueText);
+      if (!Number.isInteger(wireCrc) || wireCrc < 0 || wireCrc > 0xffffffff) continue;
+      const actualCrc = uagameDisplayCrc32(zip);
+      found.push({ name, path: "f4.f25", zipLength: zip.length, wireCrc, actualCrc, crcMatch: actualCrc === wireCrc, entry });
+    }
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
+function analyzeUagameBusinessProto(envelope) {
+  const body = envelope.body;
+  // Unlike the generic CS decoder, do not slide the start offset or hunt for
+  // CS names in opaque fields. Parse exactly the verified business boundary.
+  const parsed = parseGcloudProtoNodes(body, 0, body.length, 0, 240);
+  const flat = walkGcloudProtoNodes(parsed.nodes);
+  const proto = {
+    start: 0, sourceComplete: envelope.complete, ok: parsed.ok && envelope.complete,
+    end: parsed.end, reason: parsed.reason || (envelope.complete ? "" : "正文待加载"),
+    nodes: parsed.nodes, flat, strings: flat.filter((item) => item.node.string),
+    commandDisplay: "", commandName: "", commandId: null, module: "", language: "",
+    bodyNode: null, uagameBody: true, viewBytes: body, uagameEnvelope: envelope,
+  };
+  if (envelope.carrier === "lz4_raw") {
+    proto.compression = { kind: "lz4-block", inputLength: envelope.sourceLength, outputLength: envelope.applicationLength };
+  }
+  proto.uagameResource = inspectUagameMrpcsResource(proto);
+  return proto;
 }
 
 function analyzeGcloudProtoCandidate(bytes, start, completeSource) {
@@ -8068,7 +8213,8 @@ function getGcloudBusinessProtoCached(ev, bytes, completeSource = true) {
   if (ev && ev.__tcpvGcloudProtoCache && ev.__tcpvGcloudProtoCache.signature === signature) {
     return ev.__tcpvGcloudProtoCache.value;
   }
-  const value = analyzeGcloudBusinessProto(bytes, completeSource);
+  const envelope = getUagameDisplayEnvelope(ev, bytes, completeSource);
+  const value = envelope ? analyzeUagameBusinessProto(envelope) : analyzeGcloudBusinessProto(bytes, completeSource);
   if (ev && typeof ev === "object") {
     ev.__tcpvGcloudProtoCache = { signature, value };
   }
@@ -8569,7 +8715,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       if (!meta.gcloudType) proto.commandDisplay = "";
     }
     const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
-    const uagameProbe = isUagameGcloudMeta(meta)
+    const uagameProbe = isUagameGcloudMeta(meta) && preview.complete
       ? analyzeUagameDecodedBodyProbe(protoBytes, meta)
       : null;
     const compression = proto && proto.compression ? proto.compression : null;
@@ -8596,7 +8742,8 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         ? String(meta.gcloudTypeSource || "backend")
         : (numeric && numeric.commandName ? "numeric" : "inferred");
     }
-    const title = effectiveCommandDisplay
+    const resource = proto && proto.uagameResource;
+    const title = resource ? `UAGame 资源载荷 · ${resource.name}` : effectiveCommandDisplay
       ? `GCloud 明文 ${effectiveCommandDisplay}`
       : "GCloud 4013 明文";
     const bodyNode = proto && !proto.uagameBody && proto.bodyNode ? proto.bodyNode : null;
@@ -8720,6 +8867,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       protoBytes,
       proto,
       uagameProbe,
+      uagameResource: resource,
       title: uagameProbe && uagameProbe.packed && uagameProbe.packed.ok
         ? `UAGame 数字 ID 列表 · ${gcloudUagameOpcodeDisplay(meta)}`
         : title,
@@ -8745,10 +8893,14 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         !isUagameGcloudMeta(meta) && proto ? gcloudEventPayloadStatusText(proto, meta) : "",
       ].filter(Boolean),
       rows: [
+        ...(resource ? [{ label: "MRPCS 资源", value: `${resource.name} · ${resource.path} · ZIP ${resource.zipLength}B` },
+          { label: "ZIP blob CRC32", value: `f5=${formatHexValue(resource.wireCrc, 8)} · actual=${formatHexValue(resource.actualCrc, 8)} · ${resource.crcMatch ? "MATCH" : "MISMATCH"}` },
+          { label: "ZIP 目录", value: `${resource.entry.name} · 目录声明解压后 ${resource.entry.size}B；已校验目录边界，未解压条目` },
+          { label: "资源识别边界", value: "仅确认资源字段组、ZIP 目录边界和整个 ZIP blob 的 CRC32；未在浏览器解压或校验 ZIP 条目，不按 opcode 宣称官方业务消息名。f2/f4 整数含义未证。" }] : []),
         ...uagameReportProbeRows(uagameProbe, normalizeGcloudDirection(ev, meta)),
         ...(isUagameGcloudMeta(meta) ? [{
           label: "UAGame 4013",
-          value: `${gcloudUagameOpcodeDisplay(meta)} · direction=${normalizeGcloudDirection(ev, meta)} · 40-byte header · body=${meta.plainLen ? Math.max(0, Number(meta.plainLen) - 40) : protoBytes.length}B`,
+          value: `${gcloudUagameOpcodeDisplay(meta)} · direction=${normalizeGcloudDirection(ev, meta)} · 40-byte header · body=${meta.uagameEnvelope ? meta.uagameEnvelope.bodyLength : protoBytes.length}B`,
         }, {
           label: "Identity anchor",
           value: gcloudUagameEnvelopeAnchorText(),
@@ -8947,6 +9099,14 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
       title: info.meta ? info.meta.raw : "",
     });
   }
+  if (info.uagameResource) {
+    const resource = info.uagameResource;
+    out.push({ kind: "file", text: resource.name, title: `${resource.path} · ZIP ${resource.zipLength}B；正式消息名未证` });
+    out.push({ kind: resource.crcMatch ? "state" : "type", text: `ZIP blob CRC32 ${resource.crcMatch ? "✓" : "✗"}`, title: `仅校验整个 blob；f5=${formatHexValue(resource.wireCrc, 8)} actual=${formatHexValue(resource.actualCrc, 8)}` });
+  }
+  if (info.meta && info.meta.uagameEnvelope && info.meta.uagameEnvelope.carrier === "lz4_raw") {
+    out.push({ kind: "carrier", text: "LZ4已解压", title: "完整 raw-LZ4 后验证 40B 消息头的长度和 abab 标记" });
+  }
   if (info.uagameProbe && info.uagameProbe.packed && info.uagameProbe.packed.ok) {
     out.push({
       kind: "proto",
@@ -8970,6 +9130,10 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
       title: gcloudProtoStatusText(proto),
     });
     if (proto.module) out.push({ kind: "type", text: proto.module, title: "protobuf field[8] module" });
+    if (proto.uagameBody && proto.sourceComplete && proto.ok && !info.uagameResource) {
+      const shape = proto.nodes.slice(0, 5).map((node) => `f${node.field}:${node.wire === 2 ? `${node.len}B` : `wire${node.wire}`}`).join(" · ");
+      if (shape) out.push({ kind: "type", text: shape, title: "完整正文的顶层字段结构；业务语义未证，文本和身份值仅在详情中查看" });
+    }
   } else if (isUagameGcloudMeta(info.meta)) {
     out.push({
       kind: "proto",
@@ -9944,8 +10108,16 @@ function syncSummaryInsightStrip(summaryNode, ev, summaryText = "") {
 
 function shouldHydrateSummaryBadges(ev, summaryText = "") {
   if (!ev || typeof ev !== "object") return false;
-  if (Number(ev.dir) !== 0) return false;
-  if (!isDecodedFlowEvent(ev, summaryText)) return false;
+  const transport = gcloudProducerTransport(ev);
+  const summary = String(summaryText || ev.summary || "");
+  const uagame = (readSummaryValue(summary, "target_port") || String(transport.target_port || "")) === "20001"
+    && parseFlexibleInt(readSummaryValue(summary, "command") || transport.command) === 0x4013
+    && (readSummaryValue(summary, "crypto") === "decrypted" || transport.decrypted === true);
+  // Inbound resources were never hydrated by the request-only badge path.
+  // Keep it within the existing per-render budget and bound automatic bytes.
+  if (Number(ev.dir) !== 0 && !uagame) return false;
+  if (uagame && Number(ev.len) > 1024 * 1024) return false;
+  if (!uagame && !isDecodedFlowEvent(ev, summaryText)) return false;
   if (ev.__tcpvSummaryHydrated || ev.__tcpvSummaryHydrateStarted) return false;
   if (String(ev.pay || "") || String(ev.before_pay || "")) return false;
   return true;
@@ -16770,6 +16942,9 @@ function applyEventPayloadDetail(ev, detail) {
   ev.__tcpvHasCsob = undefined;
   ev.__tcpvAnalysisKey = "";
   ev.__tcpvAnalysis = null;
+  ev.__tcpvUagameEnvelopeCache = null;
+  ev.__tcpvGcloudProtoCache = null;
+  ev.__tcpvGcloudCommandCache = null;
   return true;
 }
 
