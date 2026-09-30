@@ -238,6 +238,11 @@ console.log(JSON.stringify({values:events.map(ev=>{const p=getGcloudPreviewBytes
         result = self.run_js([e], "console.log(JSON.stringify({envelope:getUagameDisplayEnvelope(events[0]),opcode:parseGcloud65010Summary(events[0].summary,events[0]).gcloudOpcode}));")
         self.assertIsNone(result["envelope"])
         self.assertEqual(result["opcode"],"0x08100003")
+        for identity in ({"application_schema":"uagame_binary_v1"}, {"gcloud_proto":"uagame_message"}):
+            e["analysis"]["generic_semantic_reparse"] = "skipped"
+            e["analysis"]["packet"]["shape"] = identity
+            result = self.run_js([e], "console.log(JSON.stringify({envelope:getUagameDisplayEnvelope(events[0])}));")
+            self.assertIsNone(result["envelope"])
 
     def test_zip_signature_without_directory_is_not_a_resource_archive(self) -> None:
         fake = bytes.fromhex("504b0304") + bytes(18)

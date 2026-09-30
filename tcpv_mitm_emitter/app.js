@@ -6549,7 +6549,8 @@ function getUagameDisplayEnvelope(ev, byteValues = null, completeSource = null) 
   // An identified UAGame producer already hands off the extracted business
   // body. It can coincidentally resemble another header; never peel it again.
   if ((analysis && analysis.generic_semantic_reparse === "uagame_body")
-      || String(shape.gcloud_schema || "").startsWith("uagame_")
+      || String(shape.gcloud_schema || shape.application_schema || "").startsWith("uagame_")
+      || String(shape.gcloud_proto || "").startsWith("uagame_")
       || /\bgcloud_schema=uagame_|\bgcloud_proto=uagame_/.test(String(ev && ev.summary || ""))) return null;
   const summary = String(ev && ev.summary || "");
   const port = readSummaryValue(summary, "target_port") || String(transport.target_port || "");
