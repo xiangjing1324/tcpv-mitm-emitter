@@ -31,6 +31,7 @@ const state = {
   hitCursor: -1,
   pendingHitScroll: false,
   filteredCount: 0,
+  display: { hideBusiness: true, renderWindow: 500, olderOffset: 0, hiddenBusinessCount: 0 },
   dumpScrollLeft: new Map(),
   sidebarHidden: false,
   gcloud9001PairIndex: null,
@@ -114,14 +115,18 @@ const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
-const WINDOW_PREFETCH_BUDGET_AUTO = 16;
-const WINDOW_PREFETCH_BUDGET_MANUAL = 48;
-const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 96;
-const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 192;
-const MAX_RENDER_EVENTS_AUTO = 2000;
-const MAX_RENDER_EVENTS_MANUAL = 5000;
-const GCLOUD_MAX_RENDER_EVENTS_AUTO = 5000;
-const GCLOUD_MAX_RENDER_EVENTS_MANUAL = 20000;
+// Lists use the captured summary only. Payload fetch and deep decode are
+// reserved for an explicit hover/open, never a per-render bulk hydration.
+const WINDOW_PREFETCH_BUDGET_AUTO = 0;
+const WINDOW_PREFETCH_BUDGET_MANUAL = 0;
+const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 0;
+const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 0;
+const DISPLAY_RENDER_WINDOW_STEP = 500;
+const DISPLAY_RENDER_WINDOW_MAX = 2000;
+// Generated from src/lobby/gcloud_observation_policy.py:export_gcloud_observation_rules.
+// Category validation only: backend decisions remain the single authority.
+const TCPV_OBSERVATION_RULES = Object.freeze({"hideable_categories":["activity","armed_force","auction","battle_pass","box","challenge","chat","collection","currency","friend","game","guide","hero","inventory","live","mail","map","market","online_heartbeat","patch","payment","player_info","player_prompt","rank","recharge","roundtrip","safehouse","season_info","selected_business","settlement","shop","student_privilege","team_member","video_red_dot","weapon"],"requires_verified_command_names":true,"schema":"dfm.gcloud_observation_rules.v1"});
+const TCPV_HIDEABLE_CATEGORIES = new Set(TCPV_OBSERVATION_RULES.hideable_categories);
 const DUMP_SCROLL_CACHE_MAX = 800;
 const AUTO_EXPAND_ON_COUNT = 3;
 const AUTO_EXPAND_SMART_COUNT = 2;
@@ -1274,6 +1279,17 @@ function installAceFilterControl() {
   });
 }
 
+function installBusinessDisplayControl() {
+  const filterbar = document.querySelector(".filterbar");
+  if (!filterbar) return;
+  state.display.hideBusiness = true;
+  const note = document.createElement("span");
+  note.className = "filter-check";
+  note.textContent = "业务包：抓包入口不记录";
+  note.title = "游戏正常收发；已确认业务包、普通在线心跳及点名的 TSS 心跳通知不发送到查看器、不保存观察记录、不进入代理消息历史。未知、登录、其他安全命令、其他控制、修改及错误仍保留。";
+  filterbar.appendChild(note);
+}
+
 function normalizeFilterDir(rawDir) {
   const dir = String(rawDir || "").trim().toLowerCase();
   if (dir === "req" || dir === "resp") {
@@ -2221,6 +2237,9 @@ function resetEventStateForFlowChange() {
   state.hitEventIds = [];
   state.hitCursor = -1;
   state.filteredCount = 0;
+  state.display.renderWindow = DISPLAY_RENDER_WINDOW_STEP;
+  state.display.olderOffset = 0;
+  state.display.hiddenBusinessCount = 0;
   clearPayloadCache();
 }
 
@@ -8466,16 +8485,25 @@ function gcloudEventClass(ev) {
   if (!ev || typeof ev !== "object") return "other";
   const summary = String(ev.summary || "");
   if (!isGcloud65010Summary(summary, ev)) return "other";
-  const name = gcloudCommandNameForEvent(ev, summary);
-  if (/^CSAccountLogin(?:Req|Res)/i.test(name)) return "account_login";
+  // This is a summary-only display statistic, not a second semantic policy.
+  // Legacy gcloud_type came from a raw-text scan and cannot prove a command.
+  const category = readSummaryValue(summary, "gcloud_observation_category");
+  const name = readSummaryValue(summary, "gcloud_observation_command_names_verified") === "1"
+    ? readSummaryValue(summary, "gcloud_observation_command")
+    : "";
+  // Evidence retention (modified/error) is independent of command identity.
+  // A verified ACE name still belongs in ACE filters after a rewrite; never
+  // recover it from legacy text scans or by decoding the body in this path.
   const aceKind = gcloudAceCommandKind(name);
   if (aceKind) return aceKind;
-  const tssKind = gcloudTssCommandKind(name);
-  if (tssKind) return tssKind;
-  if (/^GCloudHeartbeat(?:Req|Res)/i.test(name)) return "gcloud_heartbeat";
-  if (/^GCloudNetworkStatus(?:Req|Res)/i.test(name)) return "gcloud_network";
-  const meta = parseGcloud65010Summary(summary, ev);
-  if (meta.command === 0x4013) return "gcloud_4013";
+  if (category === "login") return "account_login";
+  if (category === "ace") return "ace_other";
+  if (category === "security_control") return "cstss_all";
+  if (category === "control") {
+    if (/^GCloudHeartbeat(?:Req|Res)/i.test(name)) return "gcloud_heartbeat";
+    if (/^GCloudNetworkStatus(?:Req|Res)/i.test(name)) return "gcloud_network";
+  }
+  if (parseFlexibleInt(readSummaryValue(summary, "command")) === 0x4013) return "gcloud_4013";
   return "tgcp_control";
 }
 
@@ -10094,7 +10122,11 @@ function syncSummaryInsightStrip(summaryNode, ev, summaryText = "") {
   for (const node of summaryNode.querySelectorAll(".summary-insights")) {
     node.remove();
   }
-  const strip = buildSummaryInsightStrip(ev, summaryText);
+  const collapsedGcloud = isGcloud65010Summary(summaryText, ev)
+    && !state.expandedIds.has(getEventId(ev));
+  const strip = collapsedGcloud
+    ? buildCompactGcloudSummaryStrip(ev, summaryText)
+    : buildSummaryInsightStrip(ev, summaryText);
   if (!strip) return;
   const extra = summaryNode.querySelector(".summary-extra");
   const tail = summaryNode.querySelector(".summary-tail");
@@ -10105,6 +10137,25 @@ function syncSummaryInsightStrip(summaryNode, ev, summaryText = "") {
   } else {
     summaryNode.appendChild(strip);
   }
+}
+
+function buildCompactGcloudSummaryStrip(ev, summaryText = "") {
+  const summary = String(summaryText || (ev && ev.summary) || "");
+  const category = readSummaryValue(summary, "gcloud_observation_category");
+  const command = readSummaryValue(summary, "command");
+  const name = readSummaryValue(summary, "gcloud_observation_command");
+  const verified = readSummaryValue(summary, "gcloud_observation_command_names_verified") === "1";
+  // Static name translation only; never fetch/decode a body to label a row.
+  const text = verified && name ? gcloudCommandDisplay(name) : [command, category || "命令未确认"].filter(Boolean).join(" · ");
+  if (!text) return null;
+  const strip = document.createElement("span");
+  strip.className = "summary-insights";
+  const chip = document.createElement("span");
+  chip.className = "summary-insight-chip summary-insight-gcloud";
+  chip.textContent = text;
+  chip.title = "列表仅使用已捕获摘要；展开时才获取正文并解析协议。";
+  strip.appendChild(chip);
+  return strip;
 }
 
 function shouldHydrateSummaryBadges(ev, summaryText = "") {
@@ -17029,6 +17080,7 @@ function collectGcloudAceStats(events = state.events) {
     tgcpControl: 0,
     antiAsciiHex: 0,
     antiBinary: 0,
+    antiUnknown: 0,
   };
   for (const ev of list) {
     const eventClass = gcloudEventClass(ev);
@@ -17046,12 +17098,8 @@ function collectGcloudAceStats(events = state.events) {
     else if (eventClass === "tgcp_control") stats.tgcpControl += 1;
 
     if (eventClass === "ace_antidata") {
-      const preview = getGcloudPreviewBytes(ev);
-      const proto = getGcloudBusinessProtoCached(ev, preview.bytes, preview.complete);
-      const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : preview.bytes;
-      const carrier = analyzeGcloudAceCarrier(proto, protoBytes);
-      if (carrier.mode === "ascii_hex") stats.antiAsciiHex += 1;
-      else stats.antiBinary += 1;
+      // Carrier details are not decoded just to populate a collapsed list.
+      stats.antiUnknown += 1;
     }
   }
   if (cacheable) {
@@ -17110,7 +17158,7 @@ function buildAceFlowOverviewPanel() {
   panel.className = "ace-flow-overview";
   const title = document.createElement("div");
   title.className = "ace-flow-overview-title";
-  title.textContent = `${gcloudPort} · GCloud 命令统计`;
+  title.textContent = `${gcloudPort} · 后端已判定命令统计`;
   panel.appendChild(title);
 
   const chips = document.createElement("div");
@@ -17126,7 +17174,7 @@ function buildAceFlowOverviewPanel() {
     ["cstss_all", `CSTss* ${stats.cstssAll}`],
     ["gcloud_heartbeat", `Heartbeat ${stats.heartbeat}`],
     ["gcloud_network", `Network ${stats.network}`],
-    ["carrier", `AntiData carrier: binary ${stats.antiBinary} / ascii_hex ${stats.antiAsciiHex}`],
+    ["carrier", `AntiData 载体按需展开 · ${stats.antiUnknown} 包`],
     ["loaded", `已载入 ${stats.total} 包`],
   ];
   for (const [value, label] of values) {
@@ -17152,8 +17200,92 @@ function refreshAceOverviewUi() {
   }, 80);
 }
 
+function eventHasProtectedDisplayEvidence(ev) {
+  if (!ev || typeof ev !== "object") return true;
+  if (ev.modified === true || String(ev.modified || "") === "1") return true;
+  if (Array.isArray(ev.modification_evidence) && ev.modification_evidence.length > 0) return true;
+  if (/error|failed|invalid|reject|mismatch|exception|timeout|unknown|partial/i.test(String(ev.decode_status || ""))) return true;
+  const summary = String(ev.summary || "");
+  // Conservative evidence protection, not business-name classification.
+  const verifiedCommand = readSummaryValue(summary, "gcloud_observation_command_names_verified") === "1"
+    ? readSummaryValue(summary, "gcloud_observation_command")
+    : "";
+  if (verifiedCommand !== "CSTssHeartbeatNtf" && /^(?:CSAce|CSTss|CSTSS|CSAccountLogin|CSAccountReconnectLogin)[A-Za-z0-9_]*/.test(verifiedCommand)) return true;
+  if (/\[修改后:|(?:^|\s)(?:\w*modified|wire_rebuilt|wire_changed|backend_rewrite_verified|fail_closed)=1\b/.test(summary)) return true;
+  for (const match of summary.matchAll(/(?:^|\s)([A-Za-z0-9_]*(?:error|failed|invalid|mismatch|rollback)[A-Za-z0-9_]*)=([^\s)]+)/gi)) {
+    if (!/^(?:0|false|none|null|ok|-)$/i.test(match[2])) return true;
+  }
+  return false;
+}
+
+function eventIsConfirmedBusinessHidden(ev) {
+  if (eventHasProtectedDisplayEvidence(ev)) return false;
+  const summary = String(ev.summary || "");
+  if (readSummaryValue(summary, "gcloud_observation_hidden") !== "1") return false;
+  if (readSummaryValue(summary, "gcloud_observation_command_names_verified") !== "1") return false;
+  const category = readSummaryValue(summary, "gcloud_observation_category");
+  if (!TCPV_HIDEABLE_CATEGORIES.has(category)) return false;
+  // Backend tags cannot conceal an encrypted/unknown transport or control.
+  if (parseFlexibleInt(readSummaryValue(summary, "command")) !== 0x4013) return false;
+  if (readSummaryValue(summary, "crypto") !== "decrypted") return false;
+  return true;
+}
+
+function displayRenderWindowRange(events, hitEventIds, hitCursor, requestedWindow, olderOffset = 0) {
+  const list = Array.isArray(events) ? events : [];
+  const size = Math.max(1, Math.min(DISPLAY_RENDER_WINDOW_MAX, Math.floor(Number(requestedWindow) || DISPLAY_RENDER_WINDOW_STEP)));
+  const offset = Math.max(0, Math.floor(Number(olderOffset) || 0));
+  let start = Math.max(0, list.length - size - offset);
+  const hitId = Array.isArray(hitEventIds) && hitCursor >= 0 ? hitEventIds[hitCursor] : "";
+  if (hitId) {
+    const index = list.findIndex((ev) => getEventId(ev) === hitId);
+    if (index >= 0 && (index < start || index >= start + size)) {
+      start = Math.max(0, Math.min(list.length - size, index - Math.floor(size / 2)));
+    }
+  }
+  return { start, end: Math.min(list.length, start + size), size };
+}
+
+function appendDisplayWindowNote(totalCount, visibleCount, range) {
+  const hidden = state.display.hiddenBusinessCount;
+  if (totalCount <= visibleCount && hidden <= 0) return;
+  const note = document.createElement("div");
+  note.className = "render-window-note";
+  note.appendChild(document.createTextNode(`已加载 ${state.events.length} 包；旧记录展示隐藏 ${hidden} 包（新业务包在入口跳过，不抓包）；当前显示筛选后第 ${totalCount ? range.start + 1 : 0}–${range.end} / ${totalCount} 包。搜索扫描已加载的筛选结果，命中导航自动切换有界窗口。 `));
+  if (totalCount > visibleCount) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.textContent = state.display.renderWindow < DISPLAY_RENDER_WINDOW_MAX
+      ? `查看更多（+${DISPLAY_RENDER_WINDOW_STEP}）`
+      : `已达 ${DISPLAY_RENDER_WINDOW_MAX} 条窗口上限`;
+    more.disabled = state.display.renderWindow >= DISPLAY_RENDER_WINDOW_MAX;
+    more.addEventListener("click", () => {
+      state.display.renderWindow = Math.min(DISPLAY_RENDER_WINDOW_MAX, state.display.renderWindow + DISPLAY_RENDER_WINDOW_STEP);
+      renderEvents();
+    });
+    note.appendChild(more);
+    if (!state.search.active) {
+      for (const [label, isOlder] of [["更早一页", true], ["较新一页", false]]) {
+        const page = document.createElement("button");
+        page.type = "button";
+        page.textContent = label;
+        page.disabled = isOlder ? range.start <= 0 : range.end >= totalCount;
+        page.addEventListener("click", () => {
+          state.display.olderOffset = isOlder
+            ? Math.max(0, totalCount - range.start)
+            : Math.max(0, totalCount - range.end - range.size);
+          renderEvents();
+        });
+        note.appendChild(page);
+      }
+    }
+  }
+  el.events.appendChild(note);
+}
+
 function eventMatchesFilters(ev) {
   if (!ev || typeof ev !== "object") return false;
+  if (state.display.hideBusiness && eventIsConfirmedBusinessHidden(ev)) return false;
   const dir = state.filters.dir || "all";
   if (dir === "req" && Number(ev.dir) !== 0) return false;
   if (dir === "resp" && Number(ev.dir) !== 1) return false;
@@ -17281,6 +17413,10 @@ function moveHit(step) {
   const currentNode = findEventNodeById(currentId);
   if (currentNode) {
     currentNode.classList.add("event-hit-current");
+  } else {
+    // Keep the DOM window bounded while navigating hits from the whole
+    // loaded flow. Recenter only when the selected hit is outside it.
+    renderEvents();
   }
   focusCurrentHit("smooth");
 }
@@ -17432,31 +17568,36 @@ function renderEvents() {
   }
 
   const needFullScan = state.search.active && modeSpec.scope === "full";
+  state.display.hiddenBusinessCount = state.display.hideBusiness
+    ? state.events.filter((ev) => eventIsConfirmedBusinessHidden(ev)).length
+    : 0;
   const filteredEvents = state.events.filter((ev) => eventMatchesFilters(ev));
-  let visibleEvents = filteredEvents;
-  let omittedRenderCount = 0;
-  if (!needFullScan && !state.search.active) {
-    const gcloudFlow = currentFlowLooksLikeGcloud65010();
-    const renderLimit = gcloudFlow
-      ? (state.autoRefresh ? GCLOUD_MAX_RENDER_EVENTS_AUTO : GCLOUD_MAX_RENDER_EVENTS_MANUAL)
-      : (state.autoRefresh ? MAX_RENDER_EVENTS_AUTO : MAX_RENDER_EVENTS_MANUAL);
-    if (filteredEvents.length > renderLimit) {
-      omittedRenderCount = filteredEvents.length - renderLimit;
-      visibleEvents = filteredEvents.slice(-renderLimit);
+  const nextHitEventIds = [];
+  if (state.search.active) {
+    // Search all loaded filtered events, but never build an unbounded DOM.
+    // This scans bytes only; protocol/semantic decoding stays in the detail.
+    for (const ev of filteredEvents) {
+      const preview = getPreviewInfo(ev, needFullScan);
+      const target = needFullScan ? preview.scanBytes : preview.previewBytes;
+      if (mergeRuleMatches(target, highlightRules, modeSpec.mode, 24).length > 0) {
+        nextHitEventIds.push(getEventId(ev));
+      }
     }
   }
+  if (nextHitEventIds.length <= 0) state.hitCursor = -1;
+  else if (state.pendingHitScroll) state.hitCursor = 0;
+  else if (prevCurrentHitId && nextHitEventIds.includes(prevCurrentHitId)) state.hitCursor = nextHitEventIds.indexOf(prevCurrentHitId);
+  else state.hitCursor = Math.min(Math.max(state.hitCursor, 0), nextHitEventIds.length - 1);
+  const range = displayRenderWindowRange(filteredEvents, nextHitEventIds, state.hitCursor, state.display.renderWindow, state.display.olderOffset);
+  const visibleEvents = filteredEvents.slice(range.start, range.end);
+  const hitIndexes = new Map(nextHitEventIds.map((id, index) => [id, index]));
   const autoExpandIds = collectAutoExpandIds(visibleEvents, expandMode);
   state.filteredCount = visibleEvents.length;
   const aceOverview = buildAceFlowOverviewPanel();
   if (aceOverview) {
     el.events.appendChild(aceOverview);
   }
-  if (omittedRenderCount > 0) {
-    const note = document.createElement("div");
-    note.className = "render-window-note";
-    note.textContent = `Redis 已加载 ${filteredEvents.length} 包；为保证页面响应，当前渲染最近 ${visibleEvents.length} 包，前面 ${omittedRenderCount} 包未丢失。启用搜索/过滤可扫描已加载全量。`;
-    el.events.appendChild(note);
-  }
+  appendDisplayWindowNote(filteredEvents.length, visibleEvents.length, range);
   if (visibleEvents.length === 0) {
     state.hitEventIds = [];
     state.hitCursor = -1;
@@ -17475,7 +17616,6 @@ function renderEvents() {
   }
 
   const listFrag = document.createDocumentFragment();
-  const nextHitEventIds = [];
   let windowPrefetchBudget = state.autoRefresh ? WINDOW_PREFETCH_BUDGET_AUTO : WINDOW_PREFETCH_BUDGET_MANUAL;
   let summaryHydrateBudget = state.autoRefresh
     ? SUMMARY_BADGE_HYDRATE_BUDGET_AUTO
@@ -17529,9 +17669,8 @@ function renderEvents() {
       });
     const isHit = state.search.active && matchRanges.length > 0;
     if (isHit) {
-      nextHitEventIds.push(eventId);
       wrap.classList.add("event-hit");
-      wrap.dataset.hitIndex = String(nextHitEventIds.length);
+      wrap.dataset.hitIndex = String((hitIndexes.get(eventId) ?? -1) + 1);
     }
 
     const tsSpan = document.createElement("span");
@@ -18035,6 +18174,7 @@ if (systemThemeQuery) {
   installFlowListBadgeStyles();
   installDumpAsciiRowStyles();
   installAceFilterControl();
+  installBusinessDisplayControl();
   loadRules();
   setupSplitter();
   setupWheelRouting();
