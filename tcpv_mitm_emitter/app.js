@@ -124,8 +124,9 @@ const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 0;
 const DISPLAY_RENDER_WINDOW_STEP = 500;
 const DISPLAY_RENDER_WINDOW_MAX = 2000;
 // Generated from src/lobby/gcloud_observation_policy.py:export_gcloud_observation_rules.
-// Category validation only: backend decisions remain the single authority.
-const TCPV_OBSERVATION_RULES = Object.freeze({"hideable_categories":["activity","armed_force","auction","battle_pass","box","challenge","chat","collection","currency","friend","game","guide","hero","inventory","live","mail","map","market","online_heartbeat","patch","payment","player_info","player_prompt","rank","recharge","roundtrip","safehouse","season_info","selected_business","settlement","shop","student_privilege","team_member","video_red_dot","weapon"],"requires_verified_command_names":true,"schema":"dfm.gcloud_observation_rules.v1"});
+// Generated data is owned by the backend policy; old captured summaries
+// can be re-projected for display without importing/reloading that backend.
+const TCPV_OBSERVATION_RULES = Object.freeze({"business_commands":{"CSAccountGetPlayerProfile":"selected_business","CSActivityGet":"activity","CSArmedForceGetCurRentalState":"armed_force","CSArmedForceReportOutfit":"armed_force","CSArmedforceLoadOutfit":"armed_force","CSArmoryGetPlayerData":"weapon","CSAttrGetAllQuality":"selected_business","CSAttrGetPlayerInfo":"selected_business","CSAttributeGetConfig":"selected_business","CSAuctionAutoLoadGuidePrice":"auction","CSAuctionGetGameItemSellPrice":"auction","CSAuctionGetPlayerInfo":"auction","CSAuctionGetSaleList":"auction","CSAuctionGetSaleListBatch":"auction","CSAuctionGetTypeList":"auction","CSAuctionOrderChange":"auction","CSAuctionSell":"auction","CSAuctionWithdraw":"auction","CSBattlePassBpCountryPrice":"battle_pass","CSBattlePassBpGetSeasonId":"battle_pass","CSBattlePassGetInfo":"battle_pass","CSBattlePassLevelUp":"battle_pass","CSBlastGetGrowthPath":"selected_business","CSBlastSeasonGetRankInfo":"selected_business","CSChatGetMsgSumyAllChannel":"chat","CSChatWorldLoadT":"chat","CSCollectionAutoDistribution":"collection","CSCollectionLoadGunSkinRewardsStatus":"collection","CSCollectionLoadMysticalPendantProps":"collection","CSCollectionLoadMysticalSkinProps":"collection","CSCollectionLoadProps":"collection","CSCollectionPropChange":"collection","CSCollectionUnlockAvatars":"collection","CSCollectionUpdateRedPoint":"collection","CSCollectionUseProp":"collection","CSDepositAssemblySyncBodyContainer":"inventory","CSDepositChange":"inventory","CSDepositEquipProp":"inventory","CSDepositGetExtensionProps":"inventory","CSDepositGetProps":"inventory","CSDepositGetRecoveryAmount":"inventory","CSDepositGetShowRoom":"inventory","CSDepositOperateBullet":"inventory","CSDepositSortMultiplePos":"inventory","CSFriendGetApplyList":"selected_business","CSFriendList":"selected_business","CSGetBoxInfo":"box","CSGetCurrency":"currency","CSGetExchangeInfo":"selected_business","CSGetReputationRankAward":"rank","CSGetRoleQualityConfig":"selected_business","CSGuideGetData":"selected_business","CSHeroChangeChallenge":"challenge","CSHeroGetBadgeShow":"hero","CSHeroGetConfig":"hero","CSHeroGetHeroIDList":"hero","CSHeroGetUnlockInfo":"hero","CSHeroGrowLineGoals":"hero","CSHeroGrowLineRewardView":"hero","CSHeroLoadHeroList":"hero","CSHeroUnlock":"hero","CSMPDepositGetPresets":"inventory","CSMPDepositGetProps":"inventory","CSMPGetVehicleData":"selected_business","CSMailGetBaseInfo":"mail","CSMailGetList":"mail","CSMailNewMail":"mail","CSMallDelUnlockExchangeId":"shop","CSMallGetBuyGoods":"shop","CSMallGetCfgVersion":"shop","CSMallGetClickedExchangeId":"shop","CSMallGetLabelNo1Config":"shop","CSMallGetMerchants":"shop","CSMallGetMysteryShopItems":"shop","CSMallGetPlayerDailyLimitGoods":"shop","CSMallGetRecycleGoods":"shop","CSMallGetUnlockExchangeId":"shop","CSMarketGetAndUpdatePreBuyOrder":"market","CSMarketGetPlayerInfo":"market","CSMarketGetTypeList":"market","CSMarketWithdraw":"market","CSMatchGateIsRankEnable":"selected_business","CSMossaiChatFuncInfo":"chat","CSOnlineHeartbeat":"online_heartbeat","CSOpenBox":"box","CSPlayerCopyGetCardWindowInfo":"selected_business","CSPlayerGetBasicInfo":"selected_business","CSPlayerGetJumpConfigData":"selected_business","CSPlayerInfoGetMarkProps":"selected_business","CSPrepareBombMapBoard":"map","CSPrepareMapBoard":"map","CSPrepareTDMMapBoard":"map","CSQuestGetPlayerData":"selected_business","CSQuestGetQuestLineExtraInfo":"selected_business","CSRankGetList":"rank","CSRankGetPlayerHistoricalRecord":"rank","CSRankGetPlayerRankAuxData":"rank","CSRankGetPlayerRankPercentage":"rank","CSRankZoneGet":"rank","CSRollBattlePassGetInfo":"battle_pass","CSRollGetSOLChallConfig":"challenge","CSSafehouseFishGetArchiveCareer":"safehouse","CSSafehouseFuncIsUnlock":"safehouse","CSSafehouseGetAuctionTaxDiscount":"safehouse","CSSafehouseGetConfig":"safehouse","CSSafehouseGetInfo":"safehouse","CSSeasonGetDetailData":"season_info","CSSeasonGetInfo":"season_info","CSSeasonGetPeakAccumulateSKURecords":"season_info","CSSeasonGetPeakReceiveSKURecords":"season_info","CSSeasonGetTotalData":"season_info","CSSeasonRaidMapList":"map","CSSecondPwdGetStatus":"selected_business","CSSerialCheapBuy":"shop","CSSettingGetValueByKey":"selected_business","CSSettingGetValuesByType":"selected_business","CSSettingPutKeyValue":"selected_business","CSShopAutoRetroReward":"shop","CSShopGetBuyRecord":"shop","CSShopGetClickedRedDot":"shop","CSShopGetGameItemConfig":"shop","CSShopGetLotteryInfo":"shop","CSShopGetLuckyNestConfig":"shop","CSShopGetMediaCDNMapping":"shop","CSShopGetThemeBundleTimeConfig":"shop","CSShopGetTournamentBaseInfo":"shop","CSShopGetTournamentGuessInfo":"shop","CSShopGetTournamentRewardInfo":"shop","CSShopGetTournamentScheduleInfo":"shop","CSShopNewGetConfig":"shop","CSStateGetInfo":"selected_business","CSSwitchGetAccountUnlockItems":"selected_business","CSSwitchLoadModuleStatus":"selected_business","CSSwitchLoadSystemUnlockInfo":"selected_business","CSTeamInfoT":"selected_business","CSTlogAgentTglog":"selected_business","CSTssHeartbeatNtf":"selected_business","CSWAssemblyDepositPropUpdate":"weapon","CSWAssemblyGetDesign":"weapon","CSWAssemblyGetUnlockedStyles":"weapon","CSWAssemblySkinInfoGet":"weapon","CSWeaponGetRecommendSharingCode":"weapon","CSWorldChatGetRoomID":"chat","GCloudPlayerLabelChatEvent":"chat","GCloudWorldChatEvent":"chat"},"command_type_keyword_boundary":"following_capital_digit_underscore_or_end","command_type_keywords":{"Activity":"activity","ArmedForce":"armed_force","Armedforce":"armed_force","Chat":"chat","Deposit":"inventory","FriendGameEndsRecommend":"friend","FriendGetBlackList":"friend","FriendRecommend":"friend","GetPlayer":"player_info","GetStu":"student_privilege","GuideGetMatchCount":"guide","Live":"live","LocalizationText":"patch","Mail":"mail","Mall":"shop","Pay":"payment","PlayerGet":"player_info","PlayerInfoAddButtonHasBeenClicked":"player_info","PlayerInfoGet":"player_info","PlayerPrompt":"player_prompt","QuickPatch":"patch","Recharge":"recharge","Roundtrip":"roundtrip","Safehouse":"safehouse","Season":"season_info","Settlement":"settlement","Shop":"shop","StarWeapon":"weapon","StuPriv":"student_privilege","Student":"student_privilege","TeamMember":"team_member","VideoInspectRedDot":"video_red_dot"},"direction_suffixes":["ReqB","ResB","NtfB","AckB","Req","Res","Ntf","Ack"],"hideable_categories":["activity","armed_force","auction","battle_pass","box","challenge","chat","collection","currency","friend","game","guide","hero","inventory","live","mail","map","market","online_heartbeat","patch","payment","player_info","player_prompt","rank","recharge","roundtrip","safehouse","season_info","selected_business","settlement","shop","student_privilege","team_member","transport_heartbeat","video_red_dot","weapon"],"keyword_protected_fragments":["Token","Auth","Authentication","Crypto","Encrypt","Decrypt","Handshake","KeyExchange","SessionKey","Login","Reconnect"],"keyword_protected_prefixes":["CSAce","CSTss","CSTSS","CSAccountLogin","CSAccountReconnectLogin","CSAuth"],"max_plaintext_bytes":262144,"online_heartbeat_excluded_names":["CSOnlineHeartbeatReq","CSOnlineHeartbeatReqB","CSOnlineHeartbeatRes","CSOnlineHeartbeatResB"],"operator_request_response_command_bases":["CSMatchGateIsRankEnable","CSPlayerCopyGetCardWindowInfo","CSSettingPutKeyValue","CSTlogAgentTglog"],"protected_evidence_categories":["error","modified"],"protected_evidence_reasons":["error_evidence","rewrite_evidence"],"request_response_only_command_bases":["CSBlastGetGrowthPath","CSBlastSeasonGetRankInfo","CSGetExchangeInfo","CSGuideGetData","CSMPGetVehicleData","CSQuestGetQuestLineExtraInfo","CSSettingGetValueByKey","CSSettingGetValuesByType"],"request_response_suffixes":["Req","Res","ReqB","ResB"],"requires_verified_command_names":true,"retained_commands":{"CSAccountLogin":"login","CSAccountLoginResFragment":"login","CSAccountUpdatePayToken":"authentication","CSAceAntiData":"ace","CSAceAntiDataTransfer":"ace","CSAceSendAntiData":"ace","CSAceSendLightFeatureData":"ace","CSClientEnterHallMode":"control","CSMatchRoomReconnect":"control","CSTSSPlayerQueryScnLimit":"security_control","CSTssHeartbeat":"security_control","CSTssLoadReportConfig":"security_control","GCloudHeartbeat":"control","GCloudNetworkStatus":"control"},"retained_focus":{"ace_antidata":"ace","ace_antidata_ack":"ace","ace_lightfeature":"ace","ace_transfer":"ace","authentication":"authentication","control":"control","crypto":"crypto","heartbeat_req":"control","heartbeat_res":"control","login_req":"login","login_res":"login","login_res_fragment":"login","network_status_req":"control","network_status_res":"control","reconnect":"control"},"schema":"dfm.gcloud_observation_rules.v1"});
 const TCPV_HIDEABLE_CATEGORIES = new Set(TCPV_OBSERVATION_RULES.hideable_categories);
 const DUMP_SCROLL_CACHE_MAX = 800;
 const AUTO_EXPAND_ON_COUNT = 3;
@@ -1285,8 +1286,8 @@ function installBusinessDisplayControl() {
   state.display.hideBusiness = true;
   const note = document.createElement("span");
   note.className = "filter-check";
-  note.textContent = "业务包：抓包入口不记录";
-  note.title = "游戏正常收发；已确认业务包、普通在线心跳及点名的 TSS 心跳通知不发送到查看器、不保存观察记录、不进入代理消息历史。未知、登录、其他安全命令、其他控制、修改及错误仍保留。";
+  note.textContent = "业务包：已验证类型展示过滤";
+  note.title = "请求、响应按同一份业务规则过滤显示；不改变游戏收发、不删除已存记录。入口是否不发送、不保存，以正在运行的后台规则为准；只刷新页面不会加载新后台规则。未知、登录、其他安全命令、修改及错误仍保留。";
   filterbar.appendChild(note);
 }
 
@@ -1845,8 +1846,7 @@ function formatFlowTimestamp(ts) {
   return `${formatTs(value)}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
-// TCPV_RECENT_FLOW_ACTIVITY_V1: blue means packets were seen recently.
-const FLOW_POST_CLOSE_ACTIVITY_GRACE_MS = 5 * 1000;
+// Packet activity is descriptive, never authority to close/reopen a socket.
 const FLOW_ACTIVITY_FRESH_MS = 90 * 1000;
 
 function getFlowPacketActivity(item, nowMs = Date.now()) {
@@ -1860,32 +1860,20 @@ function getFlowPacketActivity(item, nowMs = Date.now()) {
     tcpEndTs,
     idleMs,
     fresh: lastPacketTs > 0 && idleMs <= FLOW_ACTIVITY_FRESH_MS,
-    postClose: tcpEndTs > 0 && lastPacketTs > tcpEndTs + FLOW_POST_CLOSE_ACTIVITY_GRACE_MS,
   };
 }
 
 function isFlowOpen(item, nowMs = Date.now()) {
   if (!item || typeof item !== "object") return false;
-  const activity = getFlowPacketActivity(item, nowMs);
-  // A reused flow id may keep an old tcp_end while a new socket is actively
-  // appending packets.  Treat it as active only while those writes are fresh;
-  // the grace window excludes normal background-writer tail packets.
-  if (activity.tcpEndTs > 0) return activity.postClose && activity.fresh;
-  let lifecycleOpen = false;
-  if (typeof item.is_open === "boolean") {
-    lifecycleOpen = item.is_open;
-  } else {
-    const status = String(item.status || "").trim().toLowerCase();
-    if (status === "open") lifecycleOpen = true;
-    else if (status === "closed") lifecycleOpen = false;
-    else {
-      const endedTs = Number(item.ended_ts || 0);
-      lifecycleOpen = !Number.isFinite(endedTs) || endedTs <= 0;
-    }
-  }
-  // A missing close event must not leave a ghost row blue forever.  If there
-  // is packet history, blue is reserved for activity within the last 90s.
-  return lifecycleOpen && (activity.lastPacketTs <= 0 || activity.fresh);
+  // The store owns lifecycle. Filtered/idle traffic must not close a live
+  // socket, and queued packets written after tcp_end must not reopen it.
+  if (Number(item.tcp_end_ts) > 0 || Number(item.ended_ts) > 0) return false;
+  if (typeof item.is_open === "boolean") return item.is_open;
+  const status = String(item.status || "").trim().toLowerCase();
+  if (status === "closed") return false;
+  if (status === "open" || Number(item.tcp_start_ts) > 0) return true;
+  // Old imported rows without any lifecycle evidence can only be inferred.
+  return getFlowPacketActivity(item, nowMs).fresh;
 }
 
 const FLOW_PAIR_START_GAP_MS = 15 * 1000;
@@ -1906,14 +1894,9 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
   const endedRaw = Number(item && item.ended_ts);
   const endedTs = Number.isFinite(endedRaw) && endedRaw > 0 ? endedRaw : 0;
   const open = isFlowOpen(item, nowMs);
-  const reopenedByActivity = open && activity.postClose;
-  const lifecycleSaysOpen = tcpEndTs <= 0 && (
-    item && (item.is_open === true || String(item.status || "").trim().toLowerCase() === "open")
-  );
-  const staleOpen = lifecycleSaysOpen && !open && activity.lastPacketTs > 0 && !activity.fresh;
   const recordedEndTs = Math.max(
     firstTs,
-    open ? (lastPacketTs || lastTs) : (reopenedByActivity ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs)),
+    open ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs),
   );
   const displayEndTs = open ? Math.max(firstTs, Number(nowMs) || recordedEndTs) : recordedEndTs;
   const durationRaw = Number(item && item.duration_ms);
@@ -1921,18 +1904,17 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
   const fallbackDuration = hasAuthoritativeDuration ? durationRaw : 0;
   const durationMs = open
     ? (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : fallbackDuration)
-    : (staleOpen && firstTs > 0
-      ? Math.max(recordedEndTs - firstTs, 0)
-      : (hasAuthoritativeDuration
-        ? fallbackDuration
-        : (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : 0)));
+    : (hasAuthoritativeDuration
+      ? fallbackDuration
+      : (firstTs > 0 ? Math.max(displayEndTs - firstTs, 0) : 0));
   const rawStatusSource = String(item && item.status_source || "").trim();
-  const statusSource = reopenedByActivity
-    ? "post_tcp_end_activity"
-    : staleOpen ? "recent_activity_timeout"
-      : tcpEndTs > 0 ? "tcp_end"
-        : (!open && rawStatusSource) ? rawStatusSource
-          : tcpStartTs > 0 ? "tcp_start" : (rawStatusSource || "legacy");
+  const rawStatus = String(item && item.status || "").trim().toLowerCase();
+  const hasLifecycleState = typeof (item && item.is_open) === "boolean"
+    || rawStatus === "open" || rawStatus === "closed";
+  const statusSource = tcpEndTs > 0 ? "tcp_end"
+    : endedTs > 0 ? (rawStatusSource || "ended")
+      : rawStatusSource || (tcpStartTs > 0 ? "tcp_start"
+        : hasLifecycleState ? "lifecycle" : "legacy_activity_inferred");
   return {
     firstTs,
     recordedEndTs,
@@ -1945,19 +1927,15 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
     lastPacketTs,
     statusSource,
     idleMs: activity.idleMs,
-    reopenedByActivity,
   };
 }
 
 function flowLifecycleStateText(time) {
   const source = String(time && time.statusSource || "");
-  if (source === "post_tcp_end_activity") {
-    return "正在写入（旧 tcp_end 后仍收到新包）";
+  if (source === "legacy_activity_inferred") {
+    return time && time.open ? "缺少连接状态，按最近包推测活跃" : "缺少连接状态，最近没有观察到包";
   }
-  if (time && time.open) return "活跃（90秒内收到数据）";
-  if (source === "recent_activity_timeout") {
-    return "超过90秒没有新包，按非活跃显示";
-  }
+  if (time && time.open) return "连接进行中（包是否活跃另行显示）";
   if (source === "tcp_end") return "tcp_end 已确认";
   if (source === "runtime_restart_last_packet") {
     return "MITM 重启时按末包收口（未收到 tcp_end）";
@@ -2203,6 +2181,7 @@ function renderFlowList() {
       `source=${socketTime.statusSource}`,
       socketTime.firstPacketTs > 0 ? `首包 ${formatFlowTimestamp(socketTime.firstPacketTs)}` : "",
       socketTime.lastPacketTs > 0 ? `末包 ${formatFlowTimestamp(socketTime.lastPacketTs)}` : "",
+      socketTime.lastPacketTs > 0 ? `最近观察活动：${socketTime.idleMs <= FLOW_ACTIVITY_FRESH_MS ? "90秒内有包" : "超过90秒无包，不代表断开"}` : "",
     ].filter(Boolean).join("；");
     if (pairTime) {
       const stateText = open ? "进行中" : "已结束";
@@ -8496,6 +8475,12 @@ function gcloudEventClass(ev) {
   // recover it from legacy text scans or by decoding the body in this path.
   const aceKind = gcloudAceCommandKind(name);
   if (aceKind) return aceKind;
+  // These are fixed-offset reports from complete decrypted record headers.
+  // Never classify by finding 010a00 inside preview/ciphertext/business text.
+  if (readSummaryValue(summary, "crypto") === "decrypted"
+      && readSummaryValue(summary, "gcloud_observation_ace_header_verified") === "1"
+      && readSummaryValue(summary, "gcloud_observation_ace_reports").split(",")
+        .some((report) => /^0x010a00[0-9a-f]{2}$/i.test(report))) return "ace_other";
   if (category === "login") return "account_login";
   if (category === "ace") return "ace_other";
   if (category === "security_control") return "cstss_all";
@@ -17207,6 +17192,13 @@ function eventHasProtectedDisplayEvidence(ev) {
   if (/error|failed|invalid|reject|mismatch|exception|timeout|unknown|partial/i.test(String(ev.decode_status || ""))) return true;
   const summary = String(ev.summary || "");
   // Conservative evidence protection, not business-name classification.
+  if (TCPV_OBSERVATION_RULES.protected_evidence_categories.includes(
+        readSummaryValue(summary, "gcloud_observation_category"))) return true;
+  if (TCPV_OBSERVATION_RULES.protected_evidence_reasons.includes(
+        readSummaryValue(summary, "gcloud_observation_reason"))) return true;
+  if (readSummaryValue(summary, "gcloud_observation_ace_header_verified") === "1"
+      && readSummaryValue(summary, "gcloud_observation_ace_reports").split(",")
+        .some((report) => /^0x010a00[0-9a-f]{2}$/i.test(report))) return true;
   const verifiedCommand = readSummaryValue(summary, "gcloud_observation_command_names_verified") === "1"
     ? readSummaryValue(summary, "gcloud_observation_command")
     : "";
@@ -17218,17 +17210,59 @@ function eventHasProtectedDisplayEvidence(ev) {
   return false;
 }
 
+// Display projection of the generated authoritative rule snapshot. This never
+// reads packet bytes, fetches payloads, deletes events, or changes forwarding.
+const TCPV_REQUEST_RESPONSE_BASES = new Set([
+  ...TCPV_OBSERVATION_RULES.request_response_only_command_bases,
+  ...TCPV_OBSERVATION_RULES.operator_request_response_command_bases,
+]);
+const TCPV_ONLINE_HEARTBEAT_NAMES = new Set(TCPV_OBSERVATION_RULES.online_heartbeat_excluded_names);
+const TCPV_RETAINED_CATEGORIES = new Set([
+  ...Object.values(TCPV_OBSERVATION_RULES.retained_commands),
+  ...Object.values(TCPV_OBSERVATION_RULES.retained_focus),
+]);
+function observationKeywordPattern(keyword) {
+  // The source generator rejects non-ASCII identifier keywords.
+  return new RegExp(keyword + "(?=[A-Z0-9_]|$)");
+}
+const TCPV_BUSINESS_KEYWORD_MATCHERS = Object.entries(TCPV_OBSERVATION_RULES.command_type_keywords)
+  .map(([keyword, category]) => [observationKeywordPattern(keyword), category]);
+const TCPV_PROTECTED_KEYWORD_MATCHERS = TCPV_OBSERVATION_RULES.keyword_protected_fragments
+  .map(observationKeywordPattern);
+
+function capturedCommandBusinessCategory(name) {
+  if (!/^(?:CS|GCloud)[A-Za-z][A-Za-z0-9_]{1,95}$/.test(name)) return "";
+  const rules = TCPV_OBSERVATION_RULES;
+  let base = name;
+  if (!Object.hasOwn(rules.business_commands, name) && !Object.hasOwn(rules.retained_commands, name)) {
+    const suffix = rules.direction_suffixes.find((value) => name.endsWith(value));
+    if (suffix) base = name.slice(0, -suffix.length);
+  }
+  if (base === "CSOnlineHeartbeat" && !TCPV_ONLINE_HEARTBEAT_NAMES.has(name)) return "";
+  if (TCPV_REQUEST_RESPONSE_BASES.has(base)
+      && !rules.request_response_suffixes.includes(name.slice(base.length))) return "";
+  if (Object.hasOwn(rules.retained_commands, base)) return "";
+  if (Object.hasOwn(rules.business_commands, base)) return rules.business_commands[base];
+  if (rules.keyword_protected_prefixes.some((prefix) => name.startsWith(prefix))
+      || TCPV_PROTECTED_KEYWORD_MATCHERS.some((pattern) => pattern.test(name))) return "";
+  return TCPV_BUSINESS_KEYWORD_MATCHERS.find(([pattern]) => pattern.test(name))?.[1] || "";
+}
+
 function eventIsConfirmedBusinessHidden(ev) {
   if (eventHasProtectedDisplayEvidence(ev)) return false;
   const summary = String(ev.summary || "");
-  if (readSummaryValue(summary, "gcloud_observation_hidden") !== "1") return false;
   if (readSummaryValue(summary, "gcloud_observation_command_names_verified") !== "1") return false;
-  const category = readSummaryValue(summary, "gcloud_observation_category");
-  if (!TCPV_HIDEABLE_CATEGORIES.has(category)) return false;
-  // Backend tags cannot conceal an encrypted/unknown transport or control.
+  // A verified command name is required even for old records tagged hidden=0.
+  // Do not trust legacy gcloud_type, preview strings, or translated row labels.
   if (parseFlexibleInt(readSummaryValue(summary, "command")) !== 0x4013) return false;
   if (readSummaryValue(summary, "crypto") !== "decrypted") return false;
-  return true;
+  if (readSummaryValue(summary, "gcloud_observation_reason") === "game_filter_disabled") return false;
+  if (TCPV_RETAINED_CATEGORIES.has(readSummaryValue(summary, "gcloud_observation_category"))) return false;
+  const focuses = [readSummaryValue(summary, "tcpview_focus"), readSummaryValue(summary, "gcloud_focus")];
+  if (focuses.some((focus) => Object.hasOwn(TCPV_OBSERVATION_RULES.retained_focus, focus))) return false;
+  const name = readSummaryValue(summary, "gcloud_observation_command");
+  const category = capturedCommandBusinessCategory(name);
+  return !!category && TCPV_HIDEABLE_CATEGORIES.has(category);
 }
 
 function displayRenderWindowRange(events, hitEventIds, hitCursor, requestedWindow, olderOffset = 0) {
@@ -17251,7 +17285,7 @@ function appendDisplayWindowNote(totalCount, visibleCount, range) {
   if (totalCount <= visibleCount && hidden <= 0) return;
   const note = document.createElement("div");
   note.className = "render-window-note";
-  note.appendChild(document.createTextNode(`已加载 ${state.events.length} 包；旧记录展示隐藏 ${hidden} 包（新业务包在入口跳过，不抓包）；当前显示筛选后第 ${totalCount ? range.start + 1 : 0}–${range.end} / ${totalCount} 包。搜索扫描已加载的筛选结果，命中导航自动切换有界窗口。 `));
+  note.appendChild(document.createTextNode(`已加载 ${state.events.length} 包；按当前规则展示隐藏 ${hidden} 包（已存记录不删除；入口过滤以运行中的后台规则为准）；当前显示筛选后第 ${totalCount ? range.start + 1 : 0}–${range.end} / ${totalCount} 包。搜索扫描已加载的筛选结果，命中导航自动切换有界窗口。 `));
   if (totalCount > visibleCount) {
     const more = document.createElement("button");
     more.type = "button";
