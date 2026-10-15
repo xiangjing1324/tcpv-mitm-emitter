@@ -115,6 +115,12 @@ const PREVIEW_OFFSET_MAX = 4096;
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
+const MRPCS_OBSERVATION_CONCURRENCY = 4;
+const MRPCS_TRANSFER_WINDOW = 224;
+const MRPCS_REFERENCE_WINDOW = 32;
+const MRPCS_OBSERVATION_SCAN_CANDIDATES = 512;
+const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;
+const MRPCS_REFERENCE_MAX_GAP_MS = 30 * 1000;
 // Lists use the captured summary only. Payload fetch and deep decode are
 // reserved for an explicit hover/open, never a per-render bulk hydration.
 const WINDOW_PREFETCH_BUDGET_AUTO = 0;
@@ -207,6 +213,22 @@ const KNOWN_0102000A_TIMESTAMP_LAYOUTS = [
 
 const payloadCache = new Map();
 const payloadInFlight = new Map();
+const mrpcsObservationIndex = {
+  flowId: "",
+  syncToken: 0,
+  generation: 0,
+  queue: [],
+  candidateIds: new Set(),
+  queuedIds: new Set(),
+  processedIds: new Set(),
+  retryCounts: new Map(),
+  failedIds: new Set(),
+  observations: new Map(),
+  annotations: new Map(),
+  truncated: false,
+  rebuildTimer: 0,
+};
+let mrpcsObservationActive = 0;
 let payloadCacheBytes = 0;
 let previewOffsetRenderTimer = 0;
 const UTF8_DECODER_FATAL =
@@ -369,6 +391,38 @@ function installPreviewSummaryStyles() {
     .summary-insights:has(.summary-insight-ace) .summary-insight-carrier,
     .summary-insights:has(.summary-insight-ace) .summary-insight-type {
       max-width: none;
+    }
+    .summary-mrpcs-badge {
+      flex: 0 1 48ch;
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 48ch;
+      padding: 1px 7px;
+      border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--line));
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--accent) 11%, var(--panel));
+      color: color-mix(in srgb, var(--text) 88%, var(--accent));
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.35;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .summary-mrpcs-badge-complete {
+      border-color: color-mix(in srgb, #10b981 56%, var(--line));
+      background: color-mix(in srgb, #10b981 12%, var(--panel));
+      color: color-mix(in srgb, var(--text) 86%, #059669);
+    }
+    .summary-mrpcs-badge-reference {
+      border-color: color-mix(in srgb, #d97706 56%, var(--line));
+      background: color-mix(in srgb, #f59e0b 12%, var(--panel));
+      color: color-mix(in srgb, var(--text) 86%, #b45309);
+    }
+    .summary-mrpcs-badge-unmatched {
+      border-style: dashed;
+      opacity: 0.92;
     }
     .preview-hex {
       max-width: none;
@@ -1529,7 +1583,7 @@ async function fetchEventPayload(account, eventId) {
       return replay || detail;
     })
     .finally(() => {
-      payloadInFlight.delete(key);
+      if (payloadInFlight.get(key) === task) payloadInFlight.delete(key);
     });
 
   payloadInFlight.set(key, task);
@@ -2189,6 +2243,7 @@ function renderFlowList() {
 }
 
 function resetEventStateForFlowChange() {
+  resetMrpcsObservationIndex();
   state.dumpScrollLeft.clear();
   state.events = [];
   state.gcloud9001PairIndex = null;
@@ -2440,6 +2495,7 @@ async function syncLatestEvents(options = {}) {
 
     if (changed || shouldRenderEmpty) {
       renderEvents();
+      scheduleMrpcsObservationIndex();
     }
   } catch (e) {
     if (requestFlowId === state.flowId && requestToken === state.syncToken) {
@@ -10902,20 +10958,37 @@ function tssCrc32(byteValues) {
 function parseTssEncryptedEnvelope(record) {
   if (!Array.isArray(record) || record.length < 28) return null;
   const report = detectTssReport(record);
-  if (!report || report.offset !== 6 || ![0x010a0008, 0x010a0009].includes(Number(report.value))) return null;
+  const reportCode = report ? Number(report.value) : null;
+  if (!report || report.offset !== 6 || ![0x010a0008, 0x010a0009, 0x010a0037].includes(reportCode)) return null;
   const version = readBe32(record, 0);
   const total = readBe16(record, 4);
-  if (version !== 1 || !Number.isFinite(total) || Math.abs(Number(total) - record.length) > 4) return null;
+  const strictRetaggedEnvelope = reportCode === 0x010a0037;
+  if (
+    version !== 1
+    || !Number.isFinite(total)
+    || (strictRetaggedEnvelope
+      ? Number(total) !== record.length
+      : Math.abs(Number(total) - record.length) > 4)
+  ) return null;
   const family = Number(record[20]);
   const slot = Number(record[21]);
   const expectedCrc = readBe32(record, 22);
   const cipherLength = readBe16(record, 26);
   const availableLength = Math.max(0, record.length - 28);
-  const validFamily = family >= 0 && family <= 2;
+  // The live 0009 -> 0037 rewrite is a family0 envelope.  Native 0037 records
+  // may reuse these offsets, so do not generalize the retagged shape without
+  // CRC-verified evidence for another family.
+  const validFamily = strictRetaggedEnvelope ? family === 0 : family >= 0 && family <= 2;
   const validSlot = slot >= 0 && slot < TSS_CRYPTO_KEY_LABELS.length;
-  const validLength = Number.isFinite(cipherLength) && cipherLength >= 0 && cipherLength <= availableLength;
+  const validLength = Number.isFinite(cipherLength)
+    && (strictRetaggedEnvelope ? cipherLength > 0 && cipherLength === availableLength : cipherLength >= 0 && cipherLength <= availableLength);
+  // 0x010a0037 also exists as a native direct record.  Only the exact
+  // 0009-style envelope shape is accepted here, so a report-code rewrite
+  // cannot turn an unrelated 0037 record into fake decrypted evidence.
+  if (strictRetaggedEnvelope && (!validFamily || !validSlot || !validLength)) return null;
   return {
-    report: report.value,
+    report: reportCode,
+    strictRetaggedEnvelope,
     family,
     familyName: family === 0 ? "family0_gene" : family === 1 ? "family1_mars" : family === 2 ? "family2_rc6" : `family${family}`,
     slot,
@@ -10951,6 +11024,20 @@ function decryptTssEncryptedEnvelope(record) {
     innerRoot,
     reason: crcMatch ? "" : `CRC mismatch: expected ${formatHexValue(envelope.expectedCrc, 8)} actual ${formatHexValue(actualCrc, 8)}`,
   };
+}
+
+function decryptDisplayableTssEnvelope(record) {
+  const decrypted = decryptTssEncryptedEnvelope(record);
+  if (!decrypted) return null;
+  if (Number(decrypted.report) !== 0x010a0037) return decrypted;
+  const inner = decrypted.innerRoot;
+  return decrypted.supported
+    && decrypted.crcMatch
+    && inner
+    && Number(inner.offset) === 6
+    && isLikelyTssReportCode(inner.value)
+    ? decrypted
+    : null;
 }
 
 function parseTssTlvRecord0013(record) {
@@ -11026,7 +11113,7 @@ function classifyRecordBytes(byteValues, reportCode) {
 
 function formatRecordValuePreview(byteValues, reportCode) {
   if (!Array.isArray(byteValues) || byteValues.length <= 0) return "";
-  const encrypted = parseTssEncryptedEnvelope(byteValues);
+  const encrypted = decryptDisplayableTssEnvelope(byteValues);
   if (encrypted) {
     return `${encrypted.familyName} · slot[${encrypted.slot}]${encrypted.keyLabel ? `=${encrypted.keyLabel}` : ""} · cipher ${encrypted.cipherLength}B · CRC32 ${formatHexValue(encrypted.expectedCrc, 8)}`;
   }
@@ -11086,7 +11173,10 @@ function semanticAsciiView(byteValues) {
 function localChildSemanticProfile(record, reportCode) {
   const report = Number(reportCode);
   const rawLower = semanticAsciiView(record).toLowerCase();
-  if (parseTssEncryptedEnvelope(record)) {
+  if (decryptDisplayableTssEnvelope(record)) {
+    if (report === 0x010a0037) {
+      return semanticProfileValue("retagged_encrypted_tss_control", "control.crypto_envelope", "TSS 0009→0037 改码加密控制封套", "confirmed", ["report_010a0037", "family0", "crc32_verified", "trusted_inner_report"]);
+    }
     return report === 0x010a0008
       ? semanticProfileValue("nested_encrypted_tss_response", "response.crypto_envelope", "TSS 内层加密响应封套", "observed", ["report_010a0008", "family_slot_crc_cipher_len"])
       : semanticProfileValue("nested_encrypted_tss_control", "control.crypto_envelope", "TSS 内层加密控制封套", "observed", ["report_010a0009", "family_slot_crc_cipher_len"]);
@@ -11585,7 +11675,10 @@ function tssRecurseWalk(byteValues, state) {
     });
   }
 
-  if ((reportCode === 0x010a0008 || reportCode === 0x010a0009) && depth < TSS_RECURSE_MAX_DEPTH) {
+  const encryptedEnvelope = depth < TSS_RECURSE_MAX_DEPTH
+    ? decryptDisplayableTssEnvelope(byteValues)
+    : null;
+  if (encryptedEnvelope) {
     return tssRecurseEnvelope(byteValues, reportCode, declaredTotal, path, depth, state);
   }
   if (reportCode === 0x010a0023 && depth < TSS_RECURSE_MAX_DEPTH) {
@@ -11666,7 +11759,9 @@ function tssRecurseEnvelope(byteValues, reportCode, declaredTotal, path, depth, 
 
   const node = tssRecurseNode({
     kind: "nested-unwrap-envelope",
-    name: TSS_RECURSE_REPORT_NAMES[reportCode] || tssRecurseHexReport(reportCode),
+    name: reportCode === 0x010a0037
+      ? "retagged-control-envelope"
+      : TSS_RECURSE_REPORT_NAMES[reportCode] || tssRecurseHexReport(reportCode),
     path, depth, carrier: "family-decrypted", sourceOffset: 0,
     declaredLen: declaredTotal, actualLen: byteValues.length,
     stage: innerTrusted ? "decrypted" : "xor-decoded", reportCode,
@@ -13755,7 +13850,7 @@ function shouldPreferPlainDecodedOverlay(byteValues, reportCode, plainOverlay) {
 
 function childBestDecodedOverlay(childBytes) {
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return null;
-  if (parseTssEncryptedEnvelope(childBytes)) return null;
+  if (decryptDisplayableTssEnvelope(childBytes)) return null;
   const detected = detectTssReport(childBytes);
   const plainOverlay = buildPlainDecodedOverlay(childBytes);
   if (shouldPreferPlainDecodedOverlay(childBytes, detected ? Number(detected.value) : NaN, plainOverlay)) {
@@ -13995,7 +14090,7 @@ function childHexStructure(child, childBytes, options = {}) {
       );
     }
 
-    const encrypted = parseTssEncryptedEnvelope(childBytes);
+    const encrypted = decryptDisplayableTssEnvelope(childBytes);
     if (encrypted) {
       valueStart = 28;
       addChildHexField(fields, 20, 1, `crypto family ${encrypted.family} · ${encrypted.familyName}`, "cryptoFamily");
@@ -14251,7 +14346,7 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
   const model = buildChildHexModel(child, childBytes, options);
   const rows = model.rows;
   if (!rows.length) return;
-  const encryptedEnvelope = parseTssEncryptedEnvelope(childBytes);
+  const encryptedEnvelope = decryptDisplayableTssEnvelope(childBytes);
 
 	  const wrap = document.createElement("div");
 	  wrap.className = "child-hex-table";
@@ -15563,6 +15658,590 @@ function analyzeGcloudBeforeSecurityVariant(ev, summaryText, currentCommandName)
   return { info, command, carrier: command.carrier };
 }
 
+function parseMrpcsTransferChunk(record) {
+  if (!Array.isArray(record) || record.length < 50) return null;
+  const version = readBe32(record, 0);
+  const declaredLength = readBe16(record, 4);
+  const reportCode = readBe32(record, 6);
+  if (version !== 1 || declaredLength !== record.length || reportCode !== 0x010a005f) return null;
+
+  const transferA = readBe32(record, 20);
+  const transferB = readBe32(record, 24);
+  const totalLength = readBe32(record, 28);
+  const count = readBe16(record, 32);
+  const index = readBe16(record, 34);
+  const fullCrc = readBe32(record, 36);
+  const chunkCrc = readBe32(record, 40);
+  const reserved = readBe32(record, 44);
+  const chunkLength = readBe16(record, 48);
+  if (
+    !Number.isFinite(totalLength) || totalLength <= 0 || totalLength > 256 * 1024 * 1024
+    || !Number.isFinite(count) || count <= 0 || count > 4096
+    || !Number.isFinite(index) || index < 0 || index >= count
+    || !Number.isFinite(chunkLength) || chunkLength < 0
+    || 50 + chunkLength !== record.length
+    || chunkLength > totalLength
+  ) return null;
+
+  const chunk = record.slice(50);
+  const actualChunkCrc = tssCrc32(chunk);
+  const chunkCrcMatch = actualChunkCrc === chunkCrc;
+  return {
+    valid: chunkCrcMatch,
+    reason: chunkCrcMatch
+      ? ""
+      : `chunk CRC mismatch: expected ${formatHexValue(chunkCrc, 8)} actual ${formatHexValue(actualChunkCrc, 8)}`,
+    version,
+    declaredLength,
+    reportCode,
+    transferA,
+    transferB,
+    totalLength,
+    count,
+    index,
+    fullCrc,
+    chunkCrc,
+    actualChunkCrc,
+    chunkCrcMatch,
+    reserved,
+    chunkLength,
+    chunk,
+  };
+}
+
+function isMrpcsResourceFilename(value) {
+  return /^mrp[a-z0-9_.-]{1,95}\.data$/i.test(String(value || ""));
+}
+
+function extractMrpcsWrapperName(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length < 7 || readBe16(bytes, 0) !== 1) return "";
+  const nameLength = readBe32(bytes, 2);
+  if (!Number.isFinite(nameLength) || nameLength < 2 || nameLength > 128 || 6 + nameLength > bytes.length) return "";
+  const raw = bytes.slice(6, 6 + nameLength);
+  if (raw[raw.length - 1] !== 0) return "";
+  const nameBytes = raw.slice(0, -1);
+  if (nameBytes.length <= 0 || nameBytes.some((byte) => Number(byte) < 0x21 || Number(byte) > 0x7e)) return "";
+  const name = String.fromCharCode(...nameBytes);
+  return isMrpcsResourceFilename(name) ? name : "";
+}
+
+function extractMrpcsResourceNames(byteValues) {
+  const names = [];
+  const seen = new Set();
+  for (const run of extractPrintableRuns(
+    (Array.isArray(byteValues) ? byteValues : []).slice(0, 8192),
+    4,
+    48,
+    { fullText: true },
+  )) {
+    for (const match of String(run.text || "").matchAll(/(?:^|[^a-z0-9_.-])(mrp[a-z0-9_.-]{1,95}\.data)(?=$|[^a-z0-9_.-])/gi)) {
+      const name = String(match[1] || "");
+      const key = name.toLowerCase();
+      if (!isMrpcsResourceFilename(name) || seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+      if (names.length >= 8) return names;
+    }
+  }
+  return names;
+}
+
+function mrpcsObservationFileKey(item, chunk) {
+  return [
+    String(item && item.flowKey || ""),
+    String(item && item.cid || ""),
+    String(item && item.dir !== undefined ? item.dir : ""),
+    Number(chunk.totalLength),
+    Number(chunk.count),
+    Number(chunk.fullCrc) >>> 0,
+  ].join("|");
+}
+
+function mrpcsObservationAttemptKey(fileKey, chunk) {
+  return `${fileKey}|${Number(chunk.transferA) >>> 0}|${Number(chunk.transferB) >>> 0}`;
+}
+
+function mrpcsChunksMatchCrc(chunkMap, count, totalLength, expectedCrc) {
+  if (!(chunkMap instanceof Map) || chunkMap.size !== count) return false;
+  if (!tssCrc32TableCache) tssCrc32([]);
+  let crc = 0xffffffff;
+  let length = 0;
+  for (let index = 0; index < count; index += 1) {
+    const entry = chunkMap.get(index);
+    if (!entry || !Array.isArray(entry.chunk)) return false;
+    length += entry.chunk.length;
+    if (length > totalLength) return false;
+    for (const byte of entry.chunk) {
+      crc = (tssCrc32TableCache[(crc ^ Number(byte)) & 0xff] ^ (crc >>> 8)) >>> 0;
+    }
+  }
+  return length === totalLength && ((crc ^ 0xffffffff) >>> 0) === (Number(expectedCrc) >>> 0);
+}
+
+function buildMrpcsTransferAnnotations(observations) {
+  const annotations = new Map();
+  const fileMap = new Map();
+  const addChunk = (group, chunk) => {
+    const index = Number(chunk.index);
+    const existing = group.chunks.get(index);
+    if (!existing) group.chunks.set(index, chunk);
+    else if (Number(existing.chunkCrc) !== Number(chunk.chunkCrc)
+      || !gcloudBytesEqual(existing.chunk, chunk.chunk)) group.conflicts.add(index);
+  };
+  const finish = (group) => {
+    group.fullCrcMatch = group.conflicts.size <= 0 && mrpcsChunksMatchCrc(
+      group.chunks,
+      group.count,
+      group.totalLength,
+      group.fullCrc,
+    );
+    group.completed = group.fullCrcMatch;
+  };
+
+  for (const item of Array.isArray(observations) ? observations : []) {
+    const eventId = String(item && item.eventId || "");
+    const chunk = item && item.chunk;
+    if (!eventId || !chunk || Number(chunk.reportCode) !== 0x010a005f) continue;
+    if (!chunk.valid || !chunk.chunkCrcMatch) {
+      annotations.set(eventId, {
+        type: "transfer", filename: "", dir: Number(item.dir), index: Number(chunk.index), count: Number(chunk.count),
+        totalLength: Number(chunk.totalLength), attemptSeenCount: 0, fileSeenCount: 0,
+        attemptVerified: false, fileVerified: false, chunkCrcMatch: false,
+        reason: String(chunk.reason || "chunk CRC mismatch"),
+      });
+      continue;
+    }
+
+    const fileKey = mrpcsObservationFileKey(item, chunk);
+    const attemptKey = mrpcsObservationAttemptKey(fileKey, chunk);
+    let file = fileMap.get(fileKey);
+    if (!file) {
+      file = {
+        key: fileKey, flowKey: String(item.flowKey || ""), cid: String(item.cid || ""),
+        dir: Number(item.dir), totalLength: Number(chunk.totalLength), count: Number(chunk.count),
+        fullCrc: Number(chunk.fullCrc) >>> 0, chunks: new Map(), conflicts: new Set(),
+        filename: "", events: [], attempts: new Map(), completed: false, fullCrcMatch: false,
+      };
+      fileMap.set(fileKey, file);
+    }
+    let attempt = file.attempts.get(attemptKey);
+    if (!attempt) {
+      attempt = {
+        key: attemptKey, fileKey, flowKey: file.flowKey, cid: file.cid, dir: file.dir,
+        totalLength: file.totalLength, count: file.count, fullCrc: file.fullCrc,
+        chunks: new Map(), conflicts: new Set(), startTs: Number(item.ts), endTs: Number(item.ts),
+        completed: false, fullCrcMatch: false, filename: "",
+      };
+      file.attempts.set(attemptKey, attempt);
+    }
+    attempt.startTs = Math.min(attempt.startTs, Number(item.ts));
+    attempt.endTs = Math.max(attempt.endTs, Number(item.ts));
+    addChunk(file, chunk);
+    addChunk(attempt, chunk);
+    file.events.push({ eventId, index: Number(chunk.index), attemptKey });
+    if (!file.filename && Number(chunk.index) === 0) file.filename = extractMrpcsWrapperName(chunk.chunk);
+  }
+
+  const transfers = [];
+  for (const file of fileMap.values()) {
+    finish(file);
+    for (const attempt of file.attempts.values()) {
+      finish(attempt);
+      attempt.filename = file.filename;
+      transfers.push(attempt);
+    }
+    for (const event of file.events) {
+      const attempt = file.attempts.get(event.attemptKey);
+      annotations.set(event.eventId, {
+        type: "transfer", filename: file.filename, dir: file.dir, index: event.index, count: file.count,
+        totalLength: file.totalLength, attemptSeenCount: attempt ? attempt.chunks.size : 0,
+        fileSeenCount: file.chunks.size, attemptVerified: !!(attempt && attempt.completed),
+        fileVerified: file.fullCrcMatch, chunkCrcMatch: true, fullCrc: file.fullCrc,
+      });
+    }
+  }
+  transfers.sort((left, right) => left.startTs - right.startTs);
+  return { annotations, files: Array.from(fileMap.values()), transfers };
+}
+
+function correlateMrpcsReferenceAnnotations(references, transferBuild, existingAnnotations = null, indexComplete = true) {
+  const annotations = existingAnnotations instanceof Map
+    ? new Map(existingAnnotations)
+    : new Map();
+  const transfers = transferBuild && Array.isArray(transferBuild.transfers)
+    ? transferBuild.transfers
+    : [];
+  for (const reference of Array.isArray(references) ? references : []) {
+    const eventId = String(reference && reference.eventId || "");
+    if (!eventId || annotations.has(eventId)) continue;
+    const beforeNames = Array.isArray(reference.beforeNames) ? reference.beforeNames.filter(Boolean) : [];
+    const currentNames = Array.isArray(reference.currentNames) ? reference.currentNames.filter(Boolean) : [];
+    const wanted = new Set([...beforeNames, ...currentNames].map((value) => String(value).toLowerCase()));
+    if (wanted.size <= 0) continue;
+    const ts = Number(reference.ts);
+    let matchedTransfer = null;
+    let matchedDelta = null;
+    for (const transfer of transfers) {
+      const filename = String(transfer && transfer.filename || "");
+      if (!filename || Number(transfer.dir) !== 1 || !wanted.has(filename.toLowerCase())) continue;
+      if (reference.flowKey && transfer.flowKey && String(reference.flowKey) !== String(transfer.flowKey)) continue;
+      if (reference.cid && transfer.cid && String(reference.cid) !== String(transfer.cid)) continue;
+      const delta = Number(transfer.startTs) - ts;
+      if (!Number.isFinite(delta) || delta < 0 || delta > MRPCS_REFERENCE_MAX_GAP_MS) continue;
+      if (matchedDelta === null || delta < matchedDelta) {
+        matchedTransfer = transfer;
+        matchedDelta = delta;
+      }
+    }
+    annotations.set(eventId, {
+      type: "reference",
+      filename: matchedTransfer
+        ? String(matchedTransfer.filename || "")
+        : String(beforeNames[0] || currentNames[0] || ""),
+      currentNames,
+      beforeNames,
+      packetLength: Number(reference.packetLength),
+      smallPacket: Number(reference.packetLength) > 0 && Number(reference.packetLength) < 200,
+      matched: !!matchedTransfer,
+      deltaMs: matchedDelta,
+      indexComplete: !!indexComplete,
+    });
+  }
+  return annotations;
+}
+
+function collectMrpcsCarrierObservation(carrier) {
+  const payload = carrier && Array.isArray(carrier.payload) ? carrier.payload : [];
+  const layers = payload.length > 0 ? [payload] : [];
+  const decrypted = payload.length > 0 ? decryptDisplayableTssEnvelope(payload) : null;
+  if (decrypted && decrypted.supported && decrypted.crcMatch && Array.isArray(decrypted.plain)) {
+    layers.push(decrypted.plain);
+  }
+
+  const names = [];
+  const seen = new Set();
+  for (const layer of layers) {
+    for (const name of extractMrpcsResourceNames(layer)) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+    }
+  }
+  for (const layer of layers) {
+    const chunk = parseMrpcsTransferChunk(layer);
+    if (chunk) return { names, chunk };
+  }
+  return { names, chunk: null };
+}
+
+function inspectMrpcsEvent(ev) {
+  if (!ev || typeof ev !== "object") return null;
+  const summaryText = String(ev.summary || "");
+  const info = analyzeGcloudEvent(ev, summaryText);
+  const command = gcloudSecurityCommandFromInfo(info);
+  if (!command || !command.carrier) return null;
+  const current = collectMrpcsCarrierObservation(command.carrier);
+  const beforeVariant = analyzeGcloudBeforeSecurityVariant(ev, summaryText, command.commandName);
+  const before = beforeVariant
+    ? collectMrpcsCarrierObservation(beforeVariant.carrier)
+    : { names: [], chunk: null };
+  return {
+    eventId: getEventId(ev),
+    ts: Number(ev.ts),
+    flowKey: String(state.flowId || ""),
+    cid: String(ev.cid || ""),
+    dir: Number(ev.dir),
+    packetLength: Number(ev.len),
+    currentNames: current.names,
+    beforeNames: before.names,
+    chunk: current.chunk,
+  };
+}
+
+function isMrpcsObservationCandidate(ev) {
+  const eventClass = gcloudEventClass(ev);
+  const length = Number(ev && ev.len);
+  if (eventClass === "ace_transfer") {
+    return Number.isFinite(length) && length > 0 && length <= MRPCS_OBSERVATION_MAX_EVENT_BYTES;
+  }
+  if (eventClass !== "ace_antidata") return false;
+  // The questioned preparatory packet is explicitly a sub-200B AntiData row.
+  // Keep the automatic observer narrow; larger rows still decode on expansion.
+  return Number.isFinite(length) && length > 0 && length < 200;
+}
+
+function resetMrpcsObservationIndex() {
+  if (mrpcsObservationIndex.rebuildTimer) window.clearTimeout(mrpcsObservationIndex.rebuildTimer);
+  mrpcsObservationIndex.flowId = String(state.flowId || "");
+  mrpcsObservationIndex.syncToken = Number(state.syncToken || 0);
+  mrpcsObservationIndex.generation += 1;
+  mrpcsObservationIndex.queue = [];
+  mrpcsObservationIndex.candidateIds.clear();
+  mrpcsObservationIndex.queuedIds.clear();
+  mrpcsObservationIndex.processedIds.clear();
+  mrpcsObservationIndex.retryCounts.clear();
+  mrpcsObservationIndex.failedIds.clear();
+  mrpcsObservationIndex.observations.clear();
+  mrpcsObservationIndex.annotations.clear();
+  mrpcsObservationIndex.truncated = false;
+  mrpcsObservationIndex.rebuildTimer = 0;
+  mrpcsObservationIndex.annotationSignature = "";
+}
+
+function mrpcsAnnotationSignature(annotations) {
+  if (!(annotations instanceof Map)) return "";
+  return `${mrpcsObservationIndex.truncated ? 1 : 0}|${mrpcsObservationIndex.failedIds.size}|${Array.from(annotations.entries()).map(([eventId, item]) => [
+    eventId,
+    item && item.type,
+    item && item.filename,
+    item && item.index,
+    item && item.count,
+    item && item.attemptSeenCount,
+    item && item.fileSeenCount,
+    item && item.attemptVerified,
+    item && item.fileVerified,
+    item && item.matched,
+    item && item.deltaMs,
+    item && item.indexComplete,
+  ].join(":")).join("|")}`;
+}
+
+function refreshMrpcsSummaryBadges() {
+  if (!el.events || typeof el.events.querySelectorAll !== "function") return;
+  for (const row of el.events.querySelectorAll("details[data-event-id]")) {
+    const summary = row.querySelector(":scope > summary");
+    if (summary) syncMrpcsSummaryBadge(summary, String(row.dataset.eventId || ""));
+  }
+}
+
+function rebuildMrpcsObservationAnnotations(generation) {
+  if (generation !== mrpcsObservationIndex.generation) return;
+  const observations = Array.from(mrpcsObservationIndex.observations.values());
+  const transfers = observations.filter((item) => item && item.chunk);
+  const references = observations.filter((item) => (
+    item && !item.chunk
+    && ((Array.isArray(item.beforeNames) && item.beforeNames.length > 0)
+      || (Array.isArray(item.currentNames) && item.currentNames.length > 0))
+  ));
+  const transferBuild = buildMrpcsTransferAnnotations(transfers);
+  const indexComplete = !mrpcsObservationIndex.truncated
+    && mrpcsObservationIndex.failedIds.size === 0
+    && mrpcsObservationActive === 0
+    && mrpcsObservationIndex.queue.length === 0
+    && mrpcsObservationIndex.processedIds.size >= mrpcsObservationIndex.candidateIds.size;
+  const annotations = correlateMrpcsReferenceAnnotations(
+    references,
+    transferBuild,
+    transferBuild.annotations,
+    indexComplete,
+  );
+  const signature = mrpcsAnnotationSignature(annotations);
+  mrpcsObservationIndex.annotations = annotations;
+  if (signature === mrpcsObservationIndex.annotationSignature) return;
+  mrpcsObservationIndex.annotationSignature = signature;
+  refreshMrpcsSummaryBadges();
+}
+
+function scheduleMrpcsObservationRebuild(generation) {
+  if (generation !== mrpcsObservationIndex.generation || mrpcsObservationIndex.rebuildTimer) return;
+  mrpcsObservationIndex.rebuildTimer = window.setTimeout(() => {
+    mrpcsObservationIndex.rebuildTimer = 0;
+    rebuildMrpcsObservationAnnotations(generation);
+  }, 60);
+}
+
+function pumpMrpcsObservationQueue() {
+  const generation = mrpcsObservationIndex.generation;
+  while (
+    mrpcsObservationActive < MRPCS_OBSERVATION_CONCURRENCY
+    && mrpcsObservationIndex.queue.length > 0
+  ) {
+    const queued = mrpcsObservationIndex.queue.shift();
+    const eventId = String(queued && queued.eventId || "");
+    const compactEvent = queued && queued.ev;
+    if (!eventId || !compactEvent) continue;
+    mrpcsObservationActive += 1;
+    let succeeded = false;
+    fetchEventPayload(mrpcsObservationIndex.flowId, eventId)
+      .then((detail) => {
+        if (
+          generation !== mrpcsObservationIndex.generation
+          || !mrpcsObservationIndex.candidateIds.has(eventId)
+        ) return;
+        const hydrated = { ...compactEvent, ...(detail && typeof detail === "object" ? detail : {}) };
+        for (const key of Object.keys(hydrated)) {
+          if (String(key).startsWith("__tcpv")) delete hydrated[key];
+        }
+        const observation = inspectMrpcsEvent(hydrated);
+        if (observation) mrpcsObservationIndex.observations.set(eventId, observation);
+        else mrpcsObservationIndex.observations.delete(eventId);
+        mrpcsObservationIndex.processedIds.add(eventId);
+        mrpcsObservationIndex.retryCounts.delete(eventId);
+        mrpcsObservationIndex.failedIds.delete(eventId);
+        succeeded = true;
+      })
+      .catch((_error) => {
+        if (generation !== mrpcsObservationIndex.generation) return;
+        const attempts = Number(mrpcsObservationIndex.retryCounts.get(eventId) || 0) + 1;
+        mrpcsObservationIndex.retryCounts.set(eventId, attempts);
+        if (attempts > 2) mrpcsObservationIndex.failedIds.add(eventId);
+      })
+      .finally(() => {
+        mrpcsObservationActive = Math.max(0, mrpcsObservationActive - 1);
+        if (generation !== mrpcsObservationIndex.generation) {
+          pumpMrpcsObservationQueue();
+          return;
+        }
+        mrpcsObservationIndex.queuedIds.delete(eventId);
+        const attempts = Number(mrpcsObservationIndex.retryCounts.get(eventId) || 0);
+        if (!succeeded && attempts <= 2 && mrpcsObservationIndex.candidateIds.has(eventId)) {
+          window.setTimeout(() => {
+            if (generation === mrpcsObservationIndex.generation) scheduleMrpcsObservationIndex();
+          }, 250 * (2 ** Math.max(0, attempts - 1)));
+        }
+        pumpMrpcsObservationQueue();
+        if (mrpcsObservationActive === 0 && mrpcsObservationIndex.queue.length === 0) {
+          scheduleMrpcsObservationRebuild(generation);
+        }
+      });
+  }
+}
+
+function scheduleMrpcsObservationIndex() {
+  if (!state.flowId || !currentFlowLooksLikeGcloud65010()) return;
+  if (
+    mrpcsObservationIndex.flowId !== state.flowId
+    || mrpcsObservationIndex.syncToken !== state.syncToken
+  ) resetMrpcsObservationIndex();
+
+  const transfers = [];
+  const references = [];
+  let truncated = false;
+  let examinedCandidates = 0;
+  for (let index = state.events.length - 1; index >= 0; index -= 1) {
+    const ev = state.events[index];
+    if (!isMrpcsObservationCandidate(ev)) continue;
+    examinedCandidates += 1;
+    if (examinedCandidates > MRPCS_OBSERVATION_SCAN_CANDIDATES) {
+      truncated = true;
+      break;
+    }
+    if (gcloudEventClass(ev) === "ace_transfer") {
+      if (transfers.length < MRPCS_TRANSFER_WINDOW) transfers.push(ev);
+      else truncated = true;
+    } else if (references.length < MRPCS_REFERENCE_WINDOW) {
+      references.push(ev);
+    } else {
+      truncated = true;
+    }
+    if (truncated
+      && transfers.length >= MRPCS_TRANSFER_WINDOW
+      && references.length >= MRPCS_REFERENCE_WINDOW) break;
+  }
+  const bounded = [...transfers, ...references].sort((left, right) => Number(left.ts) - Number(right.ts));
+  const candidateIds = new Set(bounded.map((ev) => getEventId(ev)).filter(Boolean));
+  mrpcsObservationIndex.truncated = truncated;
+  mrpcsObservationIndex.candidateIds = candidateIds;
+
+  for (const collection of [
+    mrpcsObservationIndex.processedIds,
+    mrpcsObservationIndex.queuedIds,
+    mrpcsObservationIndex.failedIds,
+  ]) {
+    for (const eventId of collection) {
+      if (!candidateIds.has(eventId)) collection.delete(eventId);
+    }
+  }
+  for (const map of [
+    mrpcsObservationIndex.retryCounts,
+    mrpcsObservationIndex.observations,
+    mrpcsObservationIndex.annotations,
+  ]) {
+    for (const eventId of map.keys()) {
+      if (!candidateIds.has(eventId)) map.delete(eventId);
+    }
+  }
+  mrpcsObservationIndex.queue = mrpcsObservationIndex.queue.filter((item) => (
+    item && candidateIds.has(String(item.eventId || ""))
+  ));
+
+  for (const ev of bounded) {
+    const eventId = getEventId(ev);
+    if (
+      !eventId
+      || mrpcsObservationIndex.queuedIds.has(eventId)
+      || mrpcsObservationIndex.processedIds.has(eventId)
+      || Number(mrpcsObservationIndex.retryCounts.get(eventId) || 0) > 2
+    ) continue;
+    mrpcsObservationIndex.queuedIds.add(eventId);
+    mrpcsObservationIndex.queue.push({ eventId, ev });
+  }
+  pumpMrpcsObservationQueue();
+  if (mrpcsObservationActive === 0 && mrpcsObservationIndex.queue.length === 0) {
+    scheduleMrpcsObservationRebuild(mrpcsObservationIndex.generation);
+  }
+}
+
+function syncMrpcsSummaryBadge(summaryNode, eventOrId) {
+  if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
+  for (const node of summaryNode.querySelectorAll(".summary-mrpcs-badge")) node.remove();
+  const eventId = typeof eventOrId === "string" ? eventOrId : getEventId(eventOrId);
+  const annotation = mrpcsObservationIndex.annotations.get(eventId);
+  if (!annotation) return;
+  const badge = document.createElement("span");
+  badge.className = "summary-mrpcs-badge";
+  if (annotation.type === "transfer") {
+    if (annotation.attemptVerified) badge.classList.add("summary-mrpcs-badge-complete");
+    const direction = Number(annotation.dir) === 1 ? "↓" : Number(annotation.dir) === 0 ? "↑" : "↕";
+    const filename = String(annotation.filename || "MRPCS 文件");
+    const position = Number.isFinite(Number(annotation.index)) && Number.isFinite(Number(annotation.count))
+      ? `${Number(annotation.index) + 1}/${Number(annotation.count)}`
+      : "分块";
+    const attemptProgress = `${Number(annotation.attemptSeenCount || 0)}/${Number(annotation.count || 0)}`;
+    const fileProgress = `${Number(annotation.fileSeenCount || 0)}/${Number(annotation.count || 0)}`;
+    const proof = annotation.chunkCrcMatch === false
+      ? "块CRC✗"
+      : annotation.attemptVerified
+        ? "本轮整文件CRC✓"
+        : annotation.fileVerified
+          ? `本轮${attemptProgress} · 跨重试CRC✓`
+          : `本轮${attemptProgress} · 文件已见${fileProgress} · 块CRC✓`;
+    badge.textContent = `MRPCS${direction} ${filename} · ${position} · ${Number(annotation.totalLength || 0)}B · ${proof}`;
+    badge.title = annotation.chunkCrcMatch === false
+      ? `0x010a005f 分块结构成立，但 ${annotation.reason || "chunk CRC 校验失败"}；未提升为文件证据。`
+      : `0x010a005f 分块；index=${annotation.index} count=${annotation.count} full_crc=${formatHexValue(annotation.fullCrc, 8)}。本轮 A/B 分组已见 ${attemptProgress}；同文件跨重试已见 ${fileProgress}。只有本轮完整且整文件 CRC32 匹配时徽标才变绿。`;
+  } else if (annotation.type === "reference") {
+    badge.classList.add("summary-mrpcs-badge-reference");
+    if (!annotation.matched) badge.classList.add("summary-mrpcs-badge-unmatched");
+    const beforeText = Array.isArray(annotation.beforeNames) ? annotation.beforeNames.join(",") : "";
+    const currentText = Array.isArray(annotation.currentNames) ? annotation.currentNames.join(",") : "";
+    const changed = beforeText && currentText && beforeText !== currentText
+      ? `${beforeText} → ${currentText}`
+      : String(annotation.filename || beforeText || currentText || "MRPCS 文件");
+    const timing = annotation.matched && Number.isFinite(Number(annotation.deltaMs))
+      ? ` · ${(Number(annotation.deltaMs) / 1000).toFixed(3)}s 后下发`
+      : !annotation.indexComplete
+        ? " · 索引未完成，暂不能判断"
+        : " · 已加载30s内未匹配";
+    badge.textContent = `${annotation.smallPacket ? "MRPCS前置引用?" : "MRPCS文件引用"} · ${changed}${timing}`;
+    const windowNote = mrpcsObservationIndex.truncated
+      ? `当前自动索引分开保留最近 ${MRPCS_TRANSFER_WINDOW} 个传输包和 ${MRPCS_REFERENCE_WINDOW} 个小包引用，不能据此证明更早包不存在。`
+      : "当前自动索引覆盖已加载候选。";
+    badge.title = annotation.matched
+      ? `当前包直接包含 MRPCS 文件名；它位于同连接同名 0x010a005f 下发之前，因此标为前置引用候选。这里只证明引用与时序，不把它冒充下行 head 包。${windowNote}`
+      : annotation.indexComplete
+        ? `当前包直接包含 MRPCS 文件名，但在已完整索引的后续30秒内未匹配到同连接同名入站 0x010a005f 下发。${windowNote}`
+        : `当前包直接包含 MRPCS 文件名；详情索引仍在加载、重试或已截断，暂不能判断后续下发是否存在。${windowNote}`;
+  } else {
+    return;
+  }
+  const tail = summaryNode.querySelector(".summary-tail");
+  if (tail) summaryNode.insertBefore(badge, tail);
+  else summaryNode.appendChild(badge);
+}
+
 function makeGcloudOpaqueCarrierNode(carrier, payload, channelLabel) {
   const readable = Array.isArray(carrier && carrier.readable) && carrier.readable.length > 0
     ? carrier.readable.join(" | ")
@@ -15667,8 +16346,8 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
     ? `${reportKey}=${formatHexValue(root.value, 8)}`
     : `profile=${carrier.profile || "unclassified"}`;
   const beforeReportText = beforeRoot ? formatHexValue(beforeRoot.value, 8) : "";
-  const encrypted = root ? decryptTssEncryptedEnvelope(displayPayload) : null;
-  const beforeEncrypted = beforeRoot ? decryptTssEncryptedEnvelope(beforePayload) : null;
+  const encrypted = root ? decryptDisplayableTssEnvelope(displayPayload) : null;
+  const beforeEncrypted = beforeRoot ? decryptDisplayableTssEnvelope(beforePayload) : null;
   const panelTitle = gcloudSecurityDeepPanelTitle(info, securityCommand);
   const panel = root
     ? buildChildComparePanel(compareRoot ? beforePayloadBase64 : "", payloadBase64, "", {
@@ -17688,6 +18367,7 @@ function renderEvents() {
       summaryHydrateBudget -= 1;
     }
     syncEventModificationIndicator(wrap, summary, ev, summaryText);
+    syncMrpcsSummaryBadge(summary, ev);
 
     wrap.appendChild(summary);
     let prefetchTimer = 0;
