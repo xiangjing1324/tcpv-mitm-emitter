@@ -29,6 +29,9 @@ def js_runtime() -> str:
         "walkGcloudProtoNodes", "parseGcloudProtoNodes", "decodeGcloudLz4Block",
         "getGcloudBusinessProtoCached", "inspectUagameMrpcsResource", "uagameDisplayCrc32",
         "getUagameDisplayEnvelope", "shouldHydrateSummaryBadges",
+        "gcloudEventClass", "isMrpcsResourceFilename", "extractMrpcsResourceNames",
+        "hasMrpcsCompactResourceHint", "isMrpcsGcloudResourceCandidate",
+        "isMrpcsObservationCandidate",
     }
     selected = [name for name in names if name in core or "Uagame" in name or name.startswith("uagame") or re.match(r"(?:gcloud|analyzeGcloud|analyzeUagame|parseGcloud|readGcloud|isUagame|isGcloud|normalizeGcloud|getGcloud|detectGcloud)", name)]
     def extract(name: str) -> str:
@@ -63,6 +66,8 @@ def js_runtime() -> str:
     maps.append(source[start:source.index("];", start) + 2])
     return "\n".join([
         "const state = {events: [], flows: [], flowId: ''};",
+        "const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;",
+        "const MRPCS_REFERENCE_EVENT_CLASSES = new Set(['account_login','ace_antidata','ace_ack','ace_light','ace_other','cstss_all']);",
         functions, *maps,
         "function getCurrentFlowMeta() { return null; }",
     ])
@@ -158,6 +163,28 @@ const results = events.map(ev => {
             self.assertIn("ZIP blob CRC32 ✓", row["chips"])
             self.assertTrue(row["unchanged"])
         self.assertEqual([row["carrier"] for row in result["results"]], ["direct", "lz4_raw"])
+
+    def test_mrpcs_observer_candidate_includes_verified_inbound_uagame_resource(self) -> None:
+        direct = event(envelope(self.body))
+        compact = dict(direct, pay="")
+        compressed = event(literal_lz4(envelope(self.body)))
+        unrelated = event(envelope(b"", 0x08F30001))
+        result = self.run_js([direct, compact, compressed, unrelated], """
+console.log(JSON.stringify({values:events.map(ev=>({
+  cls:gcloudEventClass(ev),
+  hint:hasMrpcsCompactResourceHint(ev),
+  resource:isMrpcsGcloudResourceCandidate(ev),
+  candidate:isMrpcsObservationCandidate(ev),
+}))}));
+""")
+        for row in result["values"][:3]:
+            self.assertEqual(row["cls"], "gcloud_4013")
+            self.assertTrue(row["resource"])
+            self.assertTrue(row["candidate"])
+        self.assertTrue(result["values"][0]["hint"])
+        self.assertTrue(result["values"][1]["hint"])
+        self.assertFalse(result["values"][3]["resource"])
+        self.assertFalse(result["values"][3]["candidate"])
 
     def test_crc_mismatch_is_explicit_not_verified(self) -> None:
         bad = self.tuple[:-1] + bytes([self.tuple[-1] ^ 1])

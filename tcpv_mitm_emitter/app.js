@@ -118,11 +118,20 @@ const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
 const MRPCS_OBSERVATION_CONCURRENCY = 4;
 const MRPCS_TRANSFER_WINDOW = 224;
 const MRPCS_REFERENCE_WINDOW = 32;
+const MRPCS_LOGIN_WINDOW = 16;
 const MRPCS_OBSERVATION_SCAN_CANDIDATES = 512;
 const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;
 const MRPCS_REFERENCE_MAX_GAP_MS = 30 * 1000;
-// Lists use the captured summary only. Payload fetch and deep decode are
-// reserved for an explicit hover/open, never a per-render bulk hydration.
+const MRPCS_REFERENCE_EVENT_CLASSES = new Set([
+  "account_login",
+  "ace_antidata",
+  "ace_ack",
+  "ace_light",
+  "ace_other",
+  "cstss_all",
+]);
+// Lists use the captured summary except for the separately bounded MRPCS
+// observation index. Other payload fetch/deep decode remains hover/open only.
 const WINDOW_PREFETCH_BUDGET_AUTO = 0;
 const WINDOW_PREFETCH_BUDGET_MANUAL = 0;
 const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 0;
@@ -15648,17 +15657,31 @@ function gcloudSecurityThirdLayerTitle(securityCommand) {
 }
 
 function analyzeGcloudBeforeSecurityVariant(ev, summaryText, currentCommandName) {
-  const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
-  if (!beforePay) return null;
-  const variant = { ...ev, pay: beforePay, pfx: "", before_pfx: "", full_pfx: "", raw_pfx: "" };
-  for (const key of Object.keys(variant)) {
-    if (String(key).startsWith("__tcpvGcloud")) delete variant[key];
-  }
-  const info = analyzeGcloudEvent(variant, summaryText);
+  const info = analyzeGcloudBeforeVariant(ev, summaryText);
   const command = gcloudSecurityCommandFromInfo(info);
   if (!command || !command.carrier) return null;
   if (String(command.commandName || "") !== String(currentCommandName || "")) return null;
   return { info, command, carrier: command.carrier };
+}
+
+function analyzeGcloudBeforeVariant(ev, summaryText) {
+  const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
+  if (!beforePay) return null;
+  const beforeBytes = b64ToBytes(beforePay);
+  if (beforeBytes.length <= 0) return null;
+  const variant = {
+    ...ev,
+    len: beforeBytes.length,
+    pay: beforePay,
+    pfx: "",
+    before_pfx: "",
+    full_pfx: "",
+    raw_pfx: "",
+  };
+  for (const key of Object.keys(variant)) {
+    if (String(key).startsWith("__tcpv")) delete variant[key];
+  }
+  return analyzeGcloudEvent(variant, summaryText);
 }
 
 function parseMrpcsTransferChunk(record) {
@@ -15713,7 +15736,7 @@ function parseMrpcsTransferChunk(record) {
 }
 
 function isMrpcsResourceFilename(value) {
-  return /^mrp[a-z0-9_.-]{1,95}\.data$/i.test(String(value || ""));
+  return /^mrpcs[a-z0-9_.-]{0,117}\.data$/i.test(String(value || ""));
 }
 
 function extractMrpcsWrapperName(byteValues) {
@@ -15730,21 +15753,39 @@ function extractMrpcsWrapperName(byteValues) {
 }
 
 function extractMrpcsResourceNames(byteValues) {
+  const bytes = (Array.isArray(byteValues) ? byteValues : [])
+    .slice(0, MRPCS_OBSERVATION_MAX_EVENT_BYTES);
   const names = [];
   const seen = new Set();
-  for (const run of extractPrintableRuns(
-    (Array.isArray(byteValues) ? byteValues : []).slice(0, 8192),
-    4,
-    48,
-    { fullText: true },
-  )) {
-    for (const match of String(run.text || "").matchAll(/(?:^|[^a-z0-9_.-])(mrp[a-z0-9_.-]{1,95}\.data)(?=$|[^a-z0-9_.-])/gi)) {
-      const name = String(match[1] || "");
-      const key = name.toLowerCase();
-      if (!isMrpcsResourceFilename(name) || seen.has(key)) continue;
-      seen.add(key);
-      names.push(name);
-      if (names.length >= 8) return names;
+  const lower = (byte) => (byte >= 0x41 && byte <= 0x5a ? byte + 0x20 : byte);
+  const allowed = (byte) => (
+    (lower(byte) >= 0x61 && lower(byte) <= 0x7a)
+    || (byte >= 0x30 && byte <= 0x39)
+    || byte === 0x5f || byte === 0x2e || byte === 0x2d
+  );
+  const matches = (offset, text) => {
+    if (offset < 0 || offset + text.length > bytes.length) return false;
+    for (let index = 0; index < text.length; index += 1) {
+      if (lower(Number(bytes[offset + index])) !== text.charCodeAt(index)) return false;
+    }
+    return true;
+  };
+  for (let start = 0; start + 10 <= bytes.length; start += 1) {
+    if ((start > 0 && allowed(Number(bytes[start - 1]))) || !matches(start, "mrpcs")) continue;
+    const maxEnd = Math.min(bytes.length - 5, start + 122);
+    for (let suffix = start + 5; suffix <= maxEnd; suffix += 1) {
+      if (matches(suffix, ".data") && (suffix + 5 >= bytes.length || !allowed(Number(bytes[suffix + 5])))) {
+        const name = String.fromCharCode(...bytes.slice(start, suffix + 5));
+        const key = name.toLowerCase();
+        if (isMrpcsResourceFilename(name) && !seen.has(key)) {
+          seen.add(key);
+          names.push(name);
+          if (names.length >= 8) return names;
+        }
+        start = suffix + 4;
+        break;
+      }
+      if (!allowed(Number(bytes[suffix]))) break;
     }
   }
   return names;
@@ -15888,8 +15929,14 @@ function correlateMrpcsReferenceAnnotations(references, transferBuild, existingA
     for (const transfer of transfers) {
       const filename = String(transfer && transfer.filename || "");
       if (!filename || Number(transfer.dir) !== 1 || !wanted.has(filename.toLowerCase())) continue;
-      if (reference.flowKey && transfer.flowKey && String(reference.flowKey) !== String(transfer.flowKey)) continue;
-      if (reference.cid && transfer.cid && String(reference.cid) !== String(transfer.cid)) continue;
+      const referenceFlow = String(reference && reference.flowKey || "");
+      const transferFlow = String(transfer && transfer.flowKey || "");
+      const referenceCid = String(reference && reference.cid || "");
+      const transferCid = String(transfer && transfer.cid || "");
+      if (!referenceFlow || !transferFlow || referenceFlow !== transferFlow) continue;
+      // Missing CID is not proof that two events share the same connection.
+      // Keep the filename marker but leave the temporal association unproven.
+      if (!referenceCid || !transferCid || referenceCid !== transferCid) continue;
       const delta = Number(transfer.startTs) - ts;
       if (!Number.isFinite(delta) || delta < 0 || delta > MRPCS_REFERENCE_MAX_GAP_MS) continue;
       if (matchedDelta === null || delta < matchedDelta) {
@@ -15914,16 +15961,27 @@ function correlateMrpcsReferenceAnnotations(references, transferBuild, existingA
   return annotations;
 }
 
-function collectMrpcsCarrierObservation(carrier) {
-  const payload = carrier && Array.isArray(carrier.payload) ? carrier.payload : [];
-  const layers = payload.length > 0 ? [payload] : [];
-  const decrypted = payload.length > 0 ? decryptDisplayableTssEnvelope(payload) : null;
-  if (decrypted && decrypted.supported && decrypted.crcMatch && Array.isArray(decrypted.plain)) {
-    layers.push(decrypted.plain);
-  }
-
+function collectMrpcsLayerObservation(byteLayers, hintedNames = []) {
+  const layers = [];
+  const addLayer = (candidate) => {
+    if (!Array.isArray(candidate) || candidate.length <= 0) return;
+    if (layers.includes(candidate)) return;
+    layers.push(candidate);
+    const decrypted = decryptDisplayableTssEnvelope(candidate);
+    if (decrypted && decrypted.supported && decrypted.crcMatch && Array.isArray(decrypted.plain)) {
+      if (!layers.includes(decrypted.plain)) layers.push(decrypted.plain);
+    }
+  };
+  for (const layer of Array.isArray(byteLayers) ? byteLayers : []) addLayer(layer);
   const names = [];
   const seen = new Set();
+  for (const name of Array.isArray(hintedNames) ? hintedNames : []) {
+    const text = String(name || "");
+    const key = text.toLowerCase();
+    if (!isMrpcsResourceFilename(text) || seen.has(key)) continue;
+    seen.add(key);
+    names.push(text);
+  }
   for (const layer of layers) {
     for (const name of extractMrpcsResourceNames(layer)) {
       const key = name.toLowerCase();
@@ -15939,17 +15997,29 @@ function collectMrpcsCarrierObservation(carrier) {
   return { names, chunk: null };
 }
 
+function collectMrpcsInfoObservation(info) {
+  if (!info || typeof info !== "object") return { names: [], chunk: null };
+  const layers = [];
+  const command = gcloudSecurityCommandFromInfo(info);
+  if (command && command.carrier && Array.isArray(command.carrier.payload)) {
+    layers.push(command.carrier.payload);
+  }
+  if (Array.isArray(info.protoBytes)) layers.push(info.protoBytes);
+  if (Array.isArray(info.bytes)) layers.push(info.bytes);
+  const hintedNames = [];
+  if (info.uagameResource && info.uagameResource.name) hintedNames.push(info.uagameResource.name);
+  return collectMrpcsLayerObservation(layers, hintedNames);
+}
+
 function inspectMrpcsEvent(ev) {
   if (!ev || typeof ev !== "object") return null;
   const summaryText = String(ev.summary || "");
   const info = analyzeGcloudEvent(ev, summaryText);
-  const command = gcloudSecurityCommandFromInfo(info);
-  if (!command || !command.carrier) return null;
-  const current = collectMrpcsCarrierObservation(command.carrier);
-  const beforeVariant = analyzeGcloudBeforeSecurityVariant(ev, summaryText, command.commandName);
-  const before = beforeVariant
-    ? collectMrpcsCarrierObservation(beforeVariant.carrier)
-    : { names: [], chunk: null };
+  if (!info) return null;
+  const current = collectMrpcsInfoObservation(info);
+  const beforeInfo = analyzeGcloudBeforeVariant(ev, summaryText);
+  const before = beforeInfo ? collectMrpcsInfoObservation(beforeInfo) : { names: [], chunk: null };
+  if (current.names.length <= 0 && !current.chunk && before.names.length <= 0 && !before.chunk) return null;
   return {
     eventId: getEventId(ev),
     ts: Number(ev.ts),
@@ -15963,16 +16033,34 @@ function inspectMrpcsEvent(ev) {
   };
 }
 
-function isMrpcsObservationCandidate(ev) {
-  const eventClass = gcloudEventClass(ev);
-  const length = Number(ev && ev.len);
-  if (eventClass === "ace_transfer") {
-    return Number.isFinite(length) && length > 0 && length <= MRPCS_OBSERVATION_MAX_EVENT_BYTES;
+function hasMrpcsCompactResourceHint(ev) {
+  for (const key of ["pfx", "before_pfx", "full_pfx", "raw_pfx"]) {
+    const bytes = bytesFromHexPrefix(ev && ev[key], 2048);
+    if (bytes.length > 0 && extractMrpcsResourceNames(bytes).length > 0) return true;
   }
-  if (eventClass !== "ace_antidata") return false;
-  // The questioned preparatory packet is explicitly a sub-200B AntiData row.
-  // Keep the automatic observer narrow; larger rows still decode on expansion.
-  return Number.isFinite(length) && length > 0 && length < 200;
+  return false;
+}
+
+function isMrpcsGcloudResourceCandidate(ev) {
+  if (hasMrpcsCompactResourceHint(ev)) return true;
+  const summary = String(ev && ev.summary || "");
+  const meta = parseGcloud65010Summary(summary, ev);
+  return String(meta && meta.targetPort || "") === "20001"
+    && Number(meta && meta.command) === 0x4013
+    && String(meta && meta.crypto || "").toLowerCase() === "decrypted"
+    && String(meta && meta.direction || "").toLowerCase() === "inbound"
+    // Verified live shape: this inbound opcode carries the iOS MRPCS resource
+    // tuple even though direction prevents calling it CSAccountLoginReq.
+    && parseFlexibleInt(meta && meta.gcloudOpcode) === 0x08000001;
+}
+
+function isMrpcsObservationCandidate(ev) {
+  const length = Number(ev && ev.len);
+  if (!Number.isFinite(length) || length <= 0 || length > MRPCS_OBSERVATION_MAX_EVENT_BYTES) return false;
+  const eventClass = gcloudEventClass(ev);
+  const genericResource = eventClass === "gcloud_4013" && isMrpcsGcloudResourceCandidate(ev);
+  if (eventClass !== "ace_transfer" && !MRPCS_REFERENCE_EVENT_CLASSES.has(eventClass) && !genericResource) return false;
+  return true;
 }
 
 function resetMrpcsObservationIndex() {
@@ -16121,6 +16209,7 @@ function scheduleMrpcsObservationIndex() {
 
   const transfers = [];
   const references = [];
+  const logins = [];
   let truncated = false;
   let examinedCandidates = 0;
   for (let index = state.events.length - 1; index >= 0; index -= 1) {
@@ -16131,8 +16220,12 @@ function scheduleMrpcsObservationIndex() {
       truncated = true;
       break;
     }
-    if (gcloudEventClass(ev) === "ace_transfer") {
+    const eventClass = gcloudEventClass(ev);
+    if (eventClass === "ace_transfer") {
       if (transfers.length < MRPCS_TRANSFER_WINDOW) transfers.push(ev);
+      else truncated = true;
+    } else if (eventClass === "account_login" || eventClass === "gcloud_4013") {
+      if (logins.length < MRPCS_LOGIN_WINDOW) logins.push(ev);
       else truncated = true;
     } else if (references.length < MRPCS_REFERENCE_WINDOW) {
       references.push(ev);
@@ -16141,9 +16234,11 @@ function scheduleMrpcsObservationIndex() {
     }
     if (truncated
       && transfers.length >= MRPCS_TRANSFER_WINDOW
-      && references.length >= MRPCS_REFERENCE_WINDOW) break;
+      && references.length >= MRPCS_REFERENCE_WINDOW
+      && logins.length >= MRPCS_LOGIN_WINDOW) break;
   }
-  const bounded = [...transfers, ...references].sort((left, right) => Number(left.ts) - Number(right.ts));
+  const bounded = [...transfers, ...references, ...logins]
+    .sort((left, right) => Number(left.ts) - Number(right.ts));
   const candidateIds = new Set(bounded.map((ev) => getEventId(ev)).filter(Boolean));
   mrpcsObservationIndex.truncated = truncated;
   mrpcsObservationIndex.candidateIds = candidateIds;
@@ -16238,7 +16333,7 @@ function syncMrpcsSummaryBadge(summaryNode, eventOrId) {
         : " · 30s未匹配";
     badge.textContent = `${annotation.smallPacket ? "MRPCS前置?" : "MRPCS引用"} ${changed}${timing}`;
     const windowNote = mrpcsObservationIndex.truncated
-      ? `当前自动索引分开保留最近 ${MRPCS_TRANSFER_WINDOW} 个传输包和 ${MRPCS_REFERENCE_WINDOW} 个小包引用，不能据此证明更早包不存在。`
+      ? `当前自动索引分开保留最近 ${MRPCS_TRANSFER_WINDOW} 个传输包、${MRPCS_REFERENCE_WINDOW} 个安全引用和 ${MRPCS_LOGIN_WINDOW} 个登录/资源引用，不能据此证明更早包不存在。`
       : "当前自动索引覆盖已加载候选。";
     const referenceTitle = `${badge.textContent}。`;
     badge.title = referenceTitle + (annotation.matched

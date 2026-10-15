@@ -308,6 +308,7 @@ function extractPrintableRuns(bytes, minLen) {{
 }}
 let tssCrc32TableCache = null;
 const MRPCS_REFERENCE_MAX_GAP_MS = 30 * 1000;
+const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;
 {functions}
 function put16(out, offset, value) {{ out[offset] = (value >>> 8) & 255; out[offset + 1] = value & 255; }}
 function put32(out, offset, value) {{ const word = Number(value) >>> 0; out[offset] = word >>> 24; out[offset + 1] = (word >>> 16) & 255; out[offset + 2] = (word >>> 8) & 255; out[offset + 3] = word & 255; }}
@@ -347,8 +348,9 @@ for (const [eventId, expectedIndex] of [['event-index-0', 0], ['event-index-1', 
   if (annotation.attemptVerified || !annotation.fileVerified || !annotation.chunkCrcMatch || annotation.fullCrc !== fullCrc) throw new Error('cross-retry CRC semantics are wrong for ' + eventId);
 }}
 const references = [
-  {{ eventId: 'reference-within', ts: base + 15000, packetLength: 162, currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [filename] }},
-  {{ eventId: 'reference-timeout', ts: base + 5000, packetLength: 162, currentNames: [filename], beforeNames: [] }},
+  {{ eventId: 'reference-within', ts: base + 15000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [filename] }},
+  {{ eventId: 'reference-timeout', ts: base + 5000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, currentNames: [filename], beforeNames: [] }},
+  {{ eventId: 'reference-missing-cid', ts: base + 15000, flowKey: 'flow-A', packetLength: 162, currentNames: [filename], beforeNames: [] }},
 ];
 const correlated = correlateMrpcsReferenceAnnotations(references, built, built.annotations);
 if (!(correlated instanceof Map)) throw new Error('correlation did not return a Map');
@@ -358,6 +360,8 @@ if (within.deltaMs !== 25000 || within.smallPacket !== true) throw new Error('wi
 if (JSON.stringify(within.currentNames) !== JSON.stringify(['mrpcs_i_v_tl.data']) || JSON.stringify(within.beforeNames) !== JSON.stringify([filename])) throw new Error('reference name lineage was lost');
 const timeout = correlated.get('reference-timeout');
 if (!timeout || timeout.type !== 'reference' || timeout.matched || timeout.deltaMs !== null) throw new Error('reference older than 30 seconds was associated');
+const missingCid = correlated.get('reference-missing-cid');
+if (!missingCid || missingCid.matched || missingCid.deltaMs !== null) throw new Error('missing CID was treated as same connection');
 
 const outboundBuilt = buildMrpcsTransferAnnotations(observations.map((item) => ({{ ...item, dir: 0 }})));
 const outboundCorrelation = correlateMrpcsReferenceAnnotations([references[0]], outboundBuilt, outboundBuilt.annotations);
@@ -367,6 +371,34 @@ const cleanNameBytes = Array.from(Buffer.from(' mrpcs_i_v_ic.data ', 'ascii'));
 const prefixedNameBytes = Array.from(Buffer.from('notmrpcs_i_v_ic.data', 'ascii'));
 if (JSON.stringify(extractMrpcsResourceNames(cleanNameBytes)) !== JSON.stringify([filename])) throw new Error('bounded resource name was not found');
 if (extractMrpcsResourceNames(prefixedNameBytes).length !== 0) throw new Error('resource name was cut out of a larger token');
+for (const genericName of [
+  'mrpcs_i_c.data',
+  'mrpcs_a_l.data',
+  'mrpcs-uam-ios-167.data',
+  'mrpcs.data',
+  'MRPCS_I_F.DATA',
+]) {{
+  if (!isMrpcsResourceFilename(genericName)) throw new Error('generic MRPCS name rejected: ' + genericName);
+  const genericBytes = Array.from(Buffer.from(' ' + genericName + ' ', 'ascii'));
+  if (JSON.stringify(extractMrpcsResourceNames(genericBytes)) !== JSON.stringify([genericName])) throw new Error('generic MRPCS name not extracted: ' + genericName);
+  const rawName = Array.from(Buffer.from(genericName, 'ascii'));
+  const genericWrapper = [0, 1, 0, 0, 0, rawName.length + 1, ...rawName, 0, 0x41, 0x42];
+  if (extractMrpcsWrapperName(genericWrapper) !== genericName) throw new Error('generic wrapper name not preserved: ' + genericName);
+  const genericCrc = tssCrc32(genericWrapper);
+  const genericChunk = parseMrpcsTransferChunk(makeRecord(genericWrapper, {{
+    a: 0x33333333, b: 0x44444444, total: genericWrapper.length, count: 1, index: 0, fullCrc: genericCrc,
+  }}));
+  const genericBuilt = buildMrpcsTransferAnnotations([{{
+    eventId: 'generic-' + genericName, ts: base + 41000, flowKey: 'flow-A', cid: 'cid-A', dir: 1, chunk: genericChunk,
+  }}]);
+  const genericAnnotation = genericBuilt.annotations.get('generic-' + genericName);
+  if (!genericAnnotation || genericAnnotation.filename !== genericName || !genericAnnotation.fileVerified) throw new Error('generic name did not propagate to transfer marker: ' + genericName);
+}}
+for (const invalidName of ['mrpfoo.data', 'notmrpcs_i_v_ic.data', 'mrpcs_i_v_ic.bin', 'mrpcs bad.data']) {{
+  if (isMrpcsResourceFilename(invalidName)) throw new Error('non-MRPCS name accepted: ' + invalidName);
+}}
+if (!isMrpcsResourceFilename('mrpcs' + 'x'.repeat(117) + '.data')) throw new Error('maximum wrapper filename rejected');
+if (isMrpcsResourceFilename('mrpcs' + 'x'.repeat(118) + '.data')) throw new Error('oversized wrapper filename accepted');
 
 const corrupt1 = {{ ...parsed1, chunkCrc: (parsed1.chunkCrc ^ 1) >>> 0, chunkCrcMatch: false }};
 const badBuilt = buildMrpcsTransferAnnotations([
@@ -382,4 +414,90 @@ console.log(JSON.stringify({{ ok: true, fullCrc: fullCrc >>> 0, annotations: bui
     result = _run_node_harness(tmp_path, "mrpcs-transfer-annotations.js", program)
     assert result["ok"] is True
     assert result["annotations"] == 2
+
+
+def test_mrpcs_observer_reads_all_verified_carriers_without_mutating_names(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    functions = "\n\n".join(
+        _extract_function(source, name)
+        for name in (
+            "isMrpcsResourceFilename",
+            "extractMrpcsResourceNames",
+            "collectMrpcsLayerObservation",
+            "collectMrpcsInfoObservation",
+        )
+    )
+    program = f"""
+function extractPrintableRuns(bytes, minLen) {{
+  const out = []; let start = -1;
+  for (let index = 0; index <= bytes.length; index += 1) {{
+    const printable = index < bytes.length && bytes[index] >= 0x20 && bytes[index] <= 0x7e;
+    if (printable && start < 0) start = index;
+    if (!printable && start >= 0) {{
+      if (index - start >= minLen) out.push({{ off: start, text: String.fromCharCode(...bytes.slice(start, index)) }});
+      start = -1;
+    }}
+  }}
+  return out;
+}}
+function parseMrpcsTransferChunk() {{ return null; }}
+function decryptDisplayableTssEnvelope(bytes) {{
+  if (bytes[0] !== 0xfe) return null;
+  return {{ supported: true, crcMatch: true, plain: Array.from(Buffer.from('mrpcs_decrypted.data', 'ascii')) }};
+}}
+function gcloudSecurityCommandFromInfo(info) {{ return info.command || null; }}
+const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;
+{functions}
+const carrierName = 'mrpcs_i_c.data';
+const protoName = 'mrpcs_i_f.data';
+const rawName = 'mrpcs-a-l.data';
+const hintName = 'mrpcs-uam-ios-167.data';
+const info = {{
+  command: {{ carrier: {{ payload: Array.from(Buffer.from(carrierName, 'ascii')) }} }},
+  protoBytes: [...new Array(9000).fill(0), ...Array.from(Buffer.from(protoName, 'ascii'))],
+  bytes: [0xfe, ...Array.from(Buffer.from(rawName, 'ascii'))],
+  uagameResource: {{ name: hintName }},
+}};
+const observed = collectMrpcsInfoObservation(info);
+const actual = new Set(observed.names);
+for (const expected of [carrierName, protoName, rawName, hintName, 'mrpcs_decrypted.data']) {{
+  if (!actual.has(expected)) throw new Error('missing observed name: ' + expected);
+}}
+if (observed.chunk !== null) throw new Error('non-transfer carrier became a transfer chunk');
+if (JSON.stringify(info.command.carrier.payload) !== JSON.stringify(Array.from(Buffer.from(carrierName, 'ascii')))) throw new Error('observer mutated carrier bytes');
+console.log(JSON.stringify({{ ok: true, names: observed.names.length }}));
+"""
+    result = _run_node_harness(tmp_path, "mrpcs-generic-observer.js", program)
+    assert result == {"ok": True, "names": 5}
+
+
+def test_mrpcs_candidate_gate_covers_login_and_security_families(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    function = _extract_function(source, "isMrpcsObservationCandidate")
+    program = f"""
+const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;
+const MRPCS_REFERENCE_EVENT_CLASSES = new Set([
+  'account_login', 'ace_antidata', 'ace_ack', 'ace_light', 'ace_other', 'cstss_all',
+]);
+function gcloudEventClass(ev) {{ return ev.eventClass; }}
+function isMrpcsGcloudResourceCandidate(ev) {{ return ev.mrpcsResourceCandidate === true; }}
+{function}
+for (const eventClass of ['account_login', 'ace_transfer', 'ace_antidata', 'ace_ack', 'ace_light', 'ace_other', 'cstss_all']) {{
+  if (!isMrpcsObservationCandidate({{ eventClass, len: 700 }})) throw new Error('candidate class rejected: ' + eventClass);
+}}
+for (const eventClass of ['gcloud_heartbeat', 'gcloud_network', 'tgcp_control', 'other']) {{
+  if (isMrpcsObservationCandidate({{ eventClass, len: 700 }})) throw new Error('unrelated class accepted: ' + eventClass);
+}}
+if (!isMrpcsObservationCandidate({{ eventClass: 'gcloud_4013', len: 700, mrpcsResourceCandidate: true }})) throw new Error('verified generic resource candidate rejected');
+if (isMrpcsObservationCandidate({{ eventClass: 'gcloud_4013', len: 700, mrpcsResourceCandidate: false }})) throw new Error('unscoped generic 4013 accepted');
+if (isMrpcsObservationCandidate({{ eventClass: 'ace_antidata', len: 0 }})) throw new Error('zero-length candidate accepted');
+if (isMrpcsObservationCandidate({{ eventClass: 'account_login', len: 128 * 1024 + 1 }})) throw new Error('oversized candidate accepted');
+console.log(JSON.stringify({{ ok: true }}));
+"""
+    result = _run_node_harness(tmp_path, "mrpcs-candidate-gate.js", program)
+    assert result == {"ok": True}
 
