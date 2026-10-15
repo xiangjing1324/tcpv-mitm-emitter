@@ -11,6 +11,46 @@ import unittest
 APP_JS = Path(__file__).resolve().parents[1] / "tcpv_mitm_emitter" / "app.js"
 
 
+class PacketVisibilityUiTests(unittest.TestCase):
+    def test_stored_packets_are_not_automatically_hidden_by_business_rules(self) -> None:
+        source = APP_JS.read_text()
+        for retired_symbol in (
+            "hideBusiness", "hiddenBusinessCount", "eventIsConfirmedBusinessHidden",
+            "installBusinessDisplayControl", "按当前规则展示隐藏",
+        ):
+            with self.subTest(retired_symbol=retired_symbol):
+                self.assertNotIn(retired_symbol, source)
+        event_filter = source[source.index("function eventMatchesFilters("):
+                              source.index("function findEventNodeById(")]
+        self.assertIn('state.filters.dir || "all"', event_filter)
+        self.assertNotIn("gcloud_observation", event_filter)
+
+    def test_backend_business_label_does_not_hide_a_loaded_row(self) -> None:
+        source = APP_JS.read_text()
+        event_filter = source[source.index("function eventMatchesFilters("):
+                              source.index("function findEventNodeById(")]
+        runtime = """
+const state = {filters: {dir: "all", minLen: "", maxLen: "", csobOnly: false, aceMode: "all"}};
+function eventHasCsob() { return false; }
+function normalizeAceFilterMode() { return "all"; }
+function currentFlowLooksLikeGcloud65010() { return true; }
+function gcloudEventClass() { return ""; }
+""" + event_filter + """
+const ev = {dir: 0, len: 87, summary: "gcloud_observation_hidden=1 gcloud_observation_command=CSQuestGetAcceptedQuestsRes"};
+const visibleByDefault = eventMatchesFilters(ev);
+state.filters.dir = "resp";
+const hiddenByManualDirection = !eventMatchesFilters(ev);
+console.log(JSON.stringify({visibleByDefault, hiddenByManualDirection}));
+"""
+        result = subprocess.run(
+            ["node", "-e", runtime], check=True, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"visibleByDefault": True, "hiddenByManualDirection": True},
+        )
+
+
 class FlowLifecycleUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

@@ -31,7 +31,7 @@ const state = {
   hitCursor: -1,
   pendingHitScroll: false,
   filteredCount: 0,
-  display: { hideBusiness: true, renderWindow: 500, olderOffset: 0, hiddenBusinessCount: 0 },
+  display: { renderWindow: 500, olderOffset: 0 },
   dumpScrollLeft: new Map(),
   sidebarHidden: false,
   gcloud9001PairIndex: null,
@@ -123,11 +123,6 @@ const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 0;
 const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 0;
 const DISPLAY_RENDER_WINDOW_STEP = 500;
 const DISPLAY_RENDER_WINDOW_MAX = 2000;
-// Generated from src/lobby/gcloud_observation_policy.py:export_gcloud_observation_rules.
-// Generated data is owned by the backend policy; old captured summaries
-// can be re-projected for display without importing/reloading that backend.
-const TCPV_OBSERVATION_RULES = Object.freeze({"business_commands":{"CSAccountGetPlayerProfile":"selected_business","CSActivityGet":"activity","CSArmedForceGetCurRentalState":"armed_force","CSArmedForceReportOutfit":"armed_force","CSArmedforceLoadOutfit":"armed_force","CSArmoryGetPlayerData":"weapon","CSAttrGetAllQuality":"selected_business","CSAttrGetPlayerInfo":"selected_business","CSAttributeGetConfig":"selected_business","CSAuctionAutoLoadGuidePrice":"auction","CSAuctionGetGameItemSellPrice":"auction","CSAuctionGetPlayerInfo":"auction","CSAuctionGetSaleList":"auction","CSAuctionGetSaleListBatch":"auction","CSAuctionGetTypeList":"auction","CSAuctionOrderChange":"auction","CSAuctionSell":"auction","CSAuctionWithdraw":"auction","CSBattlePassBpCountryPrice":"battle_pass","CSBattlePassBpGetSeasonId":"battle_pass","CSBattlePassGetInfo":"battle_pass","CSBattlePassLevelUp":"battle_pass","CSBlastGetGrowthPath":"selected_business","CSBlastSeasonGetRankInfo":"selected_business","CSChatGetMsgSumyAllChannel":"chat","CSChatWorldLoadT":"chat","CSCollectionAutoDistribution":"collection","CSCollectionLoadGunSkinRewardsStatus":"collection","CSCollectionLoadMysticalPendantProps":"collection","CSCollectionLoadMysticalSkinProps":"collection","CSCollectionLoadProps":"collection","CSCollectionPropChange":"collection","CSCollectionUnlockAvatars":"collection","CSCollectionUpdateRedPoint":"collection","CSCollectionUseProp":"collection","CSDepositAssemblySyncBodyContainer":"inventory","CSDepositChange":"inventory","CSDepositEquipProp":"inventory","CSDepositGetExtensionProps":"inventory","CSDepositGetProps":"inventory","CSDepositGetRecoveryAmount":"inventory","CSDepositGetShowRoom":"inventory","CSDepositOperateBullet":"inventory","CSDepositSortMultiplePos":"inventory","CSFriendGetApplyList":"selected_business","CSFriendList":"selected_business","CSGetBoxInfo":"box","CSGetCurrency":"currency","CSGetExchangeInfo":"selected_business","CSGetReputationRankAward":"rank","CSGetRoleQualityConfig":"selected_business","CSGuideGetData":"selected_business","CSHeroChangeChallenge":"challenge","CSHeroGetBadgeShow":"hero","CSHeroGetConfig":"hero","CSHeroGetHeroIDList":"hero","CSHeroGetUnlockInfo":"hero","CSHeroGrowLineGoals":"hero","CSHeroGrowLineRewardView":"hero","CSHeroLoadHeroList":"hero","CSHeroUnlock":"hero","CSMPDepositGetPresets":"inventory","CSMPDepositGetProps":"inventory","CSMPGetVehicleData":"selected_business","CSMailGetBaseInfo":"mail","CSMailGetList":"mail","CSMailNewMail":"mail","CSMallDelUnlockExchangeId":"shop","CSMallGetBuyGoods":"shop","CSMallGetCfgVersion":"shop","CSMallGetClickedExchangeId":"shop","CSMallGetLabelNo1Config":"shop","CSMallGetMerchants":"shop","CSMallGetMysteryShopItems":"shop","CSMallGetPlayerDailyLimitGoods":"shop","CSMallGetRecycleGoods":"shop","CSMallGetUnlockExchangeId":"shop","CSMarketGetAndUpdatePreBuyOrder":"market","CSMarketGetPlayerInfo":"market","CSMarketGetTypeList":"market","CSMarketWithdraw":"market","CSMatchGateIsRankEnable":"selected_business","CSMossaiChatFuncInfo":"chat","CSOnlineHeartbeat":"online_heartbeat","CSOpenBox":"box","CSPlayerCopyGetCardWindowInfo":"selected_business","CSPlayerGetBasicInfo":"selected_business","CSPlayerGetJumpConfigData":"selected_business","CSPlayerInfoGetMarkProps":"selected_business","CSPrepareBombMapBoard":"map","CSPrepareMapBoard":"map","CSPrepareTDMMapBoard":"map","CSQuestGetPlayerData":"selected_business","CSQuestGetQuestLineExtraInfo":"selected_business","CSRankGetList":"rank","CSRankGetPlayerHistoricalRecord":"rank","CSRankGetPlayerRankAuxData":"rank","CSRankGetPlayerRankPercentage":"rank","CSRankZoneGet":"rank","CSRollBattlePassGetInfo":"battle_pass","CSRollGetSOLChallConfig":"challenge","CSSafehouseFishGetArchiveCareer":"safehouse","CSSafehouseFuncIsUnlock":"safehouse","CSSafehouseGetAuctionTaxDiscount":"safehouse","CSSafehouseGetConfig":"safehouse","CSSafehouseGetInfo":"safehouse","CSSeasonGetDetailData":"season_info","CSSeasonGetInfo":"season_info","CSSeasonGetPeakAccumulateSKURecords":"season_info","CSSeasonGetPeakReceiveSKURecords":"season_info","CSSeasonGetTotalData":"season_info","CSSeasonRaidMapList":"map","CSSecondPwdGetStatus":"selected_business","CSSerialCheapBuy":"shop","CSSettingGetValueByKey":"selected_business","CSSettingGetValuesByType":"selected_business","CSSettingPutKeyValue":"selected_business","CSShopAutoRetroReward":"shop","CSShopGetBuyRecord":"shop","CSShopGetClickedRedDot":"shop","CSShopGetGameItemConfig":"shop","CSShopGetLotteryInfo":"shop","CSShopGetLuckyNestConfig":"shop","CSShopGetMediaCDNMapping":"shop","CSShopGetThemeBundleTimeConfig":"shop","CSShopGetTournamentBaseInfo":"shop","CSShopGetTournamentGuessInfo":"shop","CSShopGetTournamentRewardInfo":"shop","CSShopGetTournamentScheduleInfo":"shop","CSShopNewGetConfig":"shop","CSStateGetInfo":"selected_business","CSSwitchGetAccountUnlockItems":"selected_business","CSSwitchLoadModuleStatus":"selected_business","CSSwitchLoadSystemUnlockInfo":"selected_business","CSTeamInfoT":"selected_business","CSTlogAgentTglog":"selected_business","CSTssHeartbeatNtf":"selected_business","CSWAssemblyDepositPropUpdate":"weapon","CSWAssemblyGetDesign":"weapon","CSWAssemblyGetUnlockedStyles":"weapon","CSWAssemblySkinInfoGet":"weapon","CSWeaponGetRecommendSharingCode":"weapon","CSWorldChatGetRoomID":"chat","GCloudPlayerLabelChatEvent":"chat","GCloudWorldChatEvent":"chat"},"command_type_keyword_boundary":"following_capital_digit_underscore_or_end","command_type_keywords":{"Activity":"activity","ArmedForce":"armed_force","Armedforce":"armed_force","Chat":"chat","Deposit":"inventory","FriendGameEndsRecommend":"friend","FriendGetBlackList":"friend","FriendRecommend":"friend","GetPlayer":"player_info","GetStu":"student_privilege","GuideGetMatchCount":"guide","Live":"live","LocalizationText":"patch","Mail":"mail","Mall":"shop","Pay":"payment","PlayerGet":"player_info","PlayerInfoAddButtonHasBeenClicked":"player_info","PlayerInfoGet":"player_info","PlayerPrompt":"player_prompt","QuickPatch":"patch","Recharge":"recharge","Roundtrip":"roundtrip","Safehouse":"safehouse","Season":"season_info","Settlement":"settlement","Shop":"shop","StarWeapon":"weapon","StuPriv":"student_privilege","Student":"student_privilege","TeamMember":"team_member","VideoInspectRedDot":"video_red_dot"},"direction_suffixes":["ReqB","ResB","NtfB","AckB","Req","Res","Ntf","Ack"],"hideable_categories":["activity","armed_force","auction","battle_pass","box","challenge","chat","collection","currency","friend","game","guide","hero","inventory","live","mail","map","market","online_heartbeat","patch","payment","player_info","player_prompt","rank","recharge","roundtrip","safehouse","season_info","selected_business","settlement","shop","student_privilege","team_member","transport_heartbeat","video_red_dot","weapon"],"keyword_protected_fragments":["Token","Auth","Authentication","Crypto","Encrypt","Decrypt","Handshake","KeyExchange","SessionKey","Login","Reconnect"],"keyword_protected_prefixes":["CSAce","CSTss","CSTSS","CSAccountLogin","CSAccountReconnectLogin","CSAuth"],"max_plaintext_bytes":262144,"online_heartbeat_excluded_names":["CSOnlineHeartbeatReq","CSOnlineHeartbeatReqB","CSOnlineHeartbeatRes","CSOnlineHeartbeatResB"],"operator_request_response_command_bases":["CSMatchGateIsRankEnable","CSPlayerCopyGetCardWindowInfo","CSSettingPutKeyValue","CSTlogAgentTglog"],"protected_evidence_categories":["error","modified"],"protected_evidence_reasons":["error_evidence","rewrite_evidence"],"request_response_only_command_bases":["CSBlastGetGrowthPath","CSBlastSeasonGetRankInfo","CSGetExchangeInfo","CSGuideGetData","CSMPGetVehicleData","CSQuestGetQuestLineExtraInfo","CSSettingGetValueByKey","CSSettingGetValuesByType"],"request_response_suffixes":["Req","Res","ReqB","ResB"],"requires_verified_command_names":true,"retained_commands":{"CSAccountLogin":"login","CSAccountLoginResFragment":"login","CSAccountUpdatePayToken":"authentication","CSAceAntiData":"ace","CSAceAntiDataTransfer":"ace","CSAceSendAntiData":"ace","CSAceSendLightFeatureData":"ace","CSClientEnterHallMode":"control","CSMatchRoomReconnect":"control","CSTSSPlayerQueryScnLimit":"security_control","CSTssHeartbeat":"security_control","CSTssLoadReportConfig":"security_control","GCloudHeartbeat":"control","GCloudNetworkStatus":"control"},"retained_focus":{"ace_antidata":"ace","ace_antidata_ack":"ace","ace_lightfeature":"ace","ace_transfer":"ace","authentication":"authentication","control":"control","crypto":"crypto","heartbeat_req":"control","heartbeat_res":"control","login_req":"login","login_res":"login","login_res_fragment":"login","network_status_req":"control","network_status_res":"control","reconnect":"control"},"schema":"dfm.gcloud_observation_rules.v1"});
-const TCPV_HIDEABLE_CATEGORIES = new Set(TCPV_OBSERVATION_RULES.hideable_categories);
 const DUMP_SCROLL_CACHE_MAX = 800;
 const AUTO_EXPAND_ON_COUNT = 3;
 const AUTO_EXPAND_SMART_COUNT = 2;
@@ -1280,17 +1275,6 @@ function installAceFilterControl() {
   });
 }
 
-function installBusinessDisplayControl() {
-  const filterbar = document.querySelector(".filterbar");
-  if (!filterbar) return;
-  state.display.hideBusiness = true;
-  const note = document.createElement("span");
-  note.className = "filter-check";
-  note.textContent = "业务包：已验证类型展示过滤";
-  note.title = "请求、响应按同一份业务规则过滤显示；不改变游戏收发、不删除已存记录。入口是否不发送、不保存，以正在运行的后台规则为准；只刷新页面不会加载新后台规则。未知、登录、其他安全命令、修改及错误仍保留。";
-  filterbar.appendChild(note);
-}
-
 function normalizeFilterDir(rawDir) {
   const dir = String(rawDir || "").trim().toLowerCase();
   if (dir === "req" || dir === "resp") {
@@ -2218,7 +2202,6 @@ function resetEventStateForFlowChange() {
   state.filteredCount = 0;
   state.display.renderWindow = DISPLAY_RENDER_WINDOW_STEP;
   state.display.olderOffset = 0;
-  state.display.hiddenBusinessCount = 0;
   clearPayloadCache();
 }
 
@@ -17185,86 +17168,6 @@ function refreshAceOverviewUi() {
   }, 80);
 }
 
-function eventHasProtectedDisplayEvidence(ev) {
-  if (!ev || typeof ev !== "object") return true;
-  if (ev.modified === true || String(ev.modified || "") === "1") return true;
-  if (Array.isArray(ev.modification_evidence) && ev.modification_evidence.length > 0) return true;
-  if (/error|failed|invalid|reject|mismatch|exception|timeout|unknown|partial/i.test(String(ev.decode_status || ""))) return true;
-  const summary = String(ev.summary || "");
-  // Conservative evidence protection, not business-name classification.
-  if (TCPV_OBSERVATION_RULES.protected_evidence_categories.includes(
-        readSummaryValue(summary, "gcloud_observation_category"))) return true;
-  if (TCPV_OBSERVATION_RULES.protected_evidence_reasons.includes(
-        readSummaryValue(summary, "gcloud_observation_reason"))) return true;
-  if (readSummaryValue(summary, "gcloud_observation_ace_header_verified") === "1"
-      && readSummaryValue(summary, "gcloud_observation_ace_reports").split(",")
-        .some((report) => /^0x010a00[0-9a-f]{2}$/i.test(report))) return true;
-  const verifiedCommand = readSummaryValue(summary, "gcloud_observation_command_names_verified") === "1"
-    ? readSummaryValue(summary, "gcloud_observation_command")
-    : "";
-  if (verifiedCommand !== "CSTssHeartbeatNtf" && /^(?:CSAce|CSTss|CSTSS|CSAccountLogin|CSAccountReconnectLogin)[A-Za-z0-9_]*/.test(verifiedCommand)) return true;
-  if (/\[修改后:|(?:^|\s)(?:\w*modified|wire_rebuilt|wire_changed|backend_rewrite_verified|fail_closed)=1\b/.test(summary)) return true;
-  for (const match of summary.matchAll(/(?:^|\s)([A-Za-z0-9_]*(?:error|failed|invalid|mismatch|rollback)[A-Za-z0-9_]*)=([^\s)]+)/gi)) {
-    if (!/^(?:0|false|none|null|ok|-)$/i.test(match[2])) return true;
-  }
-  return false;
-}
-
-// Display projection of the generated authoritative rule snapshot. This never
-// reads packet bytes, fetches payloads, deletes events, or changes forwarding.
-const TCPV_REQUEST_RESPONSE_BASES = new Set([
-  ...TCPV_OBSERVATION_RULES.request_response_only_command_bases,
-  ...TCPV_OBSERVATION_RULES.operator_request_response_command_bases,
-]);
-const TCPV_ONLINE_HEARTBEAT_NAMES = new Set(TCPV_OBSERVATION_RULES.online_heartbeat_excluded_names);
-const TCPV_RETAINED_CATEGORIES = new Set([
-  ...Object.values(TCPV_OBSERVATION_RULES.retained_commands),
-  ...Object.values(TCPV_OBSERVATION_RULES.retained_focus),
-]);
-function observationKeywordPattern(keyword) {
-  // The source generator rejects non-ASCII identifier keywords.
-  return new RegExp(keyword + "(?=[A-Z0-9_]|$)");
-}
-const TCPV_BUSINESS_KEYWORD_MATCHERS = Object.entries(TCPV_OBSERVATION_RULES.command_type_keywords)
-  .map(([keyword, category]) => [observationKeywordPattern(keyword), category]);
-const TCPV_PROTECTED_KEYWORD_MATCHERS = TCPV_OBSERVATION_RULES.keyword_protected_fragments
-  .map(observationKeywordPattern);
-
-function capturedCommandBusinessCategory(name) {
-  if (!/^(?:CS|GCloud)[A-Za-z][A-Za-z0-9_]{1,95}$/.test(name)) return "";
-  const rules = TCPV_OBSERVATION_RULES;
-  let base = name;
-  if (!Object.hasOwn(rules.business_commands, name) && !Object.hasOwn(rules.retained_commands, name)) {
-    const suffix = rules.direction_suffixes.find((value) => name.endsWith(value));
-    if (suffix) base = name.slice(0, -suffix.length);
-  }
-  if (base === "CSOnlineHeartbeat" && !TCPV_ONLINE_HEARTBEAT_NAMES.has(name)) return "";
-  if (TCPV_REQUEST_RESPONSE_BASES.has(base)
-      && !rules.request_response_suffixes.includes(name.slice(base.length))) return "";
-  if (Object.hasOwn(rules.retained_commands, base)) return "";
-  if (Object.hasOwn(rules.business_commands, base)) return rules.business_commands[base];
-  if (rules.keyword_protected_prefixes.some((prefix) => name.startsWith(prefix))
-      || TCPV_PROTECTED_KEYWORD_MATCHERS.some((pattern) => pattern.test(name))) return "";
-  return TCPV_BUSINESS_KEYWORD_MATCHERS.find(([pattern]) => pattern.test(name))?.[1] || "";
-}
-
-function eventIsConfirmedBusinessHidden(ev) {
-  if (eventHasProtectedDisplayEvidence(ev)) return false;
-  const summary = String(ev.summary || "");
-  if (readSummaryValue(summary, "gcloud_observation_command_names_verified") !== "1") return false;
-  // A verified command name is required even for old records tagged hidden=0.
-  // Do not trust legacy gcloud_type, preview strings, or translated row labels.
-  if (parseFlexibleInt(readSummaryValue(summary, "command")) !== 0x4013) return false;
-  if (readSummaryValue(summary, "crypto") !== "decrypted") return false;
-  if (readSummaryValue(summary, "gcloud_observation_reason") === "game_filter_disabled") return false;
-  if (TCPV_RETAINED_CATEGORIES.has(readSummaryValue(summary, "gcloud_observation_category"))) return false;
-  const focuses = [readSummaryValue(summary, "tcpview_focus"), readSummaryValue(summary, "gcloud_focus")];
-  if (focuses.some((focus) => Object.hasOwn(TCPV_OBSERVATION_RULES.retained_focus, focus))) return false;
-  const name = readSummaryValue(summary, "gcloud_observation_command");
-  const category = capturedCommandBusinessCategory(name);
-  return !!category && TCPV_HIDEABLE_CATEGORIES.has(category);
-}
-
 function displayRenderWindowRange(events, hitEventIds, hitCursor, requestedWindow, olderOffset = 0) {
   const list = Array.isArray(events) ? events : [];
   const size = Math.max(1, Math.min(DISPLAY_RENDER_WINDOW_MAX, Math.floor(Number(requestedWindow) || DISPLAY_RENDER_WINDOW_STEP)));
@@ -17281,11 +17184,10 @@ function displayRenderWindowRange(events, hitEventIds, hitCursor, requestedWindo
 }
 
 function appendDisplayWindowNote(totalCount, visibleCount, range) {
-  const hidden = state.display.hiddenBusinessCount;
-  if (totalCount <= visibleCount && hidden <= 0) return;
+  if (totalCount <= visibleCount) return;
   const note = document.createElement("div");
   note.className = "render-window-note";
-  note.appendChild(document.createTextNode(`已加载 ${state.events.length} 包；按当前规则展示隐藏 ${hidden} 包（已存记录不删除；入口过滤以运行中的后台规则为准）；当前显示筛选后第 ${totalCount ? range.start + 1 : 0}–${range.end} / ${totalCount} 包。搜索扫描已加载的筛选结果，命中导航自动切换有界窗口。 `));
+  note.appendChild(document.createTextNode(`已加载 ${state.events.length} 包；当前显示筛选后第 ${totalCount ? range.start + 1 : 0}–${range.end} / ${totalCount} 包。搜索扫描已加载的筛选结果，命中导航自动切换有界窗口。 `));
   if (totalCount > visibleCount) {
     const more = document.createElement("button");
     more.type = "button";
@@ -17319,7 +17221,6 @@ function appendDisplayWindowNote(totalCount, visibleCount, range) {
 
 function eventMatchesFilters(ev) {
   if (!ev || typeof ev !== "object") return false;
-  if (state.display.hideBusiness && eventIsConfirmedBusinessHidden(ev)) return false;
   const dir = state.filters.dir || "all";
   if (dir === "req" && Number(ev.dir) !== 0) return false;
   if (dir === "resp" && Number(ev.dir) !== 1) return false;
@@ -17602,9 +17503,6 @@ function renderEvents() {
   }
 
   const needFullScan = state.search.active && modeSpec.scope === "full";
-  state.display.hiddenBusinessCount = state.display.hideBusiness
-    ? state.events.filter((ev) => eventIsConfirmedBusinessHidden(ev)).length
-    : 0;
   const filteredEvents = state.events.filter((ev) => eventMatchesFilters(ev));
   const nextHitEventIds = [];
   if (state.search.active) {
@@ -18208,7 +18106,6 @@ if (systemThemeQuery) {
   installFlowListBadgeStyles();
   installDumpAsciiRowStyles();
   installAceFilterControl();
-  installBusinessDisplayControl();
   loadRules();
   setupSplitter();
   setupWheelRouting();
