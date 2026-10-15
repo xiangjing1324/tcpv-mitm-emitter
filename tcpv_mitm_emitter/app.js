@@ -392,13 +392,16 @@ function installPreviewSummaryStyles() {
     .summary-insights:has(.summary-insight-ace) .summary-insight-type {
       max-width: none;
     }
+    .summary-has-mrpcs > .summary-insights {
+      flex: 0 1 auto;
+    }
     .summary-mrpcs-badge {
       flex: 0 1 48ch;
       display: inline-flex;
       align-items: center;
       min-width: 0;
       max-width: 48ch;
-      padding: 1px 7px;
+      padding: 1px 5px;
       border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--line));
       border-radius: 999px;
       background: color-mix(in srgb, var(--accent) 11%, var(--panel));
@@ -16187,6 +16190,7 @@ function scheduleMrpcsObservationIndex() {
 function syncMrpcsSummaryBadge(summaryNode, eventOrId) {
   if (!summaryNode || typeof summaryNode.querySelectorAll !== "function") return;
   for (const node of summaryNode.querySelectorAll(".summary-mrpcs-badge")) node.remove();
+  summaryNode.classList.remove("summary-has-mrpcs");
   const eventId = typeof eventOrId === "string" ? eventOrId : getEventId(eventOrId);
   const annotation = mrpcsObservationIndex.annotations.get(eventId);
   if (!annotation) return;
@@ -16202,41 +16206,50 @@ function syncMrpcsSummaryBadge(summaryNode, eventOrId) {
     const attemptProgress = `${Number(annotation.attemptSeenCount || 0)}/${Number(annotation.count || 0)}`;
     const fileProgress = `${Number(annotation.fileSeenCount || 0)}/${Number(annotation.count || 0)}`;
     const proof = annotation.chunkCrcMatch === false
-      ? "块CRC✗"
+      ? "块✗"
       : annotation.attemptVerified
-        ? "本轮整文件CRC✓"
+        ? "CRC✓"
         : annotation.fileVerified
-          ? `本轮${attemptProgress} · 跨重试CRC✓`
-          : `本轮${attemptProgress} · 文件已见${fileProgress} · 块CRC✓`;
-    badge.textContent = `MRPCS${direction} ${filename} · ${position} · ${Number(annotation.totalLength || 0)}B · ${proof}`;
-    badge.title = annotation.chunkCrcMatch === false
+          ? `跨轮CRC✓`
+          : `进度${attemptProgress} · 块✓`;
+    badge.textContent = `MRPCS${direction} ${filename} · ${position} · ${proof}`;
+    const transferTitle = `${badge.textContent} · 总长${Number(annotation.totalLength || 0)}B。`;
+    badge.title = transferTitle + (annotation.chunkCrcMatch === false
       ? `0x010a005f 分块结构成立，但 ${annotation.reason || "chunk CRC 校验失败"}；未提升为文件证据。`
-      : `0x010a005f 分块；index=${annotation.index} count=${annotation.count} full_crc=${formatHexValue(annotation.fullCrc, 8)}。本轮 A/B 分组已见 ${attemptProgress}；同文件跨重试已见 ${fileProgress}。只有本轮完整且整文件 CRC32 匹配时徽标才变绿。`;
+      : `0x010a005f 分块；index=${annotation.index} count=${annotation.count} full_crc=${formatHexValue(annotation.fullCrc, 8)}。本轮 A/B 分组已见 ${attemptProgress}；同文件跨重试已见 ${fileProgress}。只有本轮完整且整文件 CRC32 匹配时徽标才变绿。`);
   } else if (annotation.type === "reference") {
     badge.classList.add("summary-mrpcs-badge-reference");
     if (!annotation.matched) badge.classList.add("summary-mrpcs-badge-unmatched");
     const beforeText = Array.isArray(annotation.beforeNames) ? annotation.beforeNames.join(",") : "";
     const currentText = Array.isArray(annotation.currentNames) ? annotation.currentNames.join(",") : "";
-    const changed = beforeText && currentText && beforeText !== currentText
-      ? `${beforeText} → ${currentText}`
-      : String(annotation.filename || beforeText || currentText || "MRPCS 文件");
-    const timing = annotation.matched && Number.isFinite(Number(annotation.deltaMs))
-      ? ` · ${(Number(annotation.deltaMs) / 1000).toFixed(3)}s 后下发`
+    let changed = String(annotation.filename || beforeText || currentText || "MRPCS 文件");
+    if (beforeText && currentText && beforeText !== currentText) {
+      const singleNameChange = Array.isArray(annotation.beforeNames) && annotation.beforeNames.length === 1
+        && Array.isArray(annotation.currentNames) && annotation.currentNames.length === 1;
+      changed = singleNameChange
+        ? `${beforeText.replace(/^mrpcs_/i, "").replace(/\.data$/i, "")}→${currentText.replace(/^mrpcs_/i, "").replace(/\.data$/i, "")}`
+        : `${beforeText} → ${currentText}`;
+    }
+    const deltaMs = Number(annotation.deltaMs);
+    const timing = annotation.matched && Number.isFinite(deltaMs)
+      ? ` · +${deltaMs < 1000 ? `${Math.round(deltaMs)}ms` : `${(deltaMs / 1000).toFixed(2)}s`}`
       : !annotation.indexComplete
-        ? " · 索引未完成，暂不能判断"
-        : " · 已加载30s内未匹配";
-    badge.textContent = `${annotation.smallPacket ? "MRPCS前置引用?" : "MRPCS文件引用"} · ${changed}${timing}`;
+        ? " · 索引中"
+        : " · 30s未匹配";
+    badge.textContent = `${annotation.smallPacket ? "MRPCS前置?" : "MRPCS引用"} ${changed}${timing}`;
     const windowNote = mrpcsObservationIndex.truncated
       ? `当前自动索引分开保留最近 ${MRPCS_TRANSFER_WINDOW} 个传输包和 ${MRPCS_REFERENCE_WINDOW} 个小包引用，不能据此证明更早包不存在。`
       : "当前自动索引覆盖已加载候选。";
-    badge.title = annotation.matched
+    const referenceTitle = `${badge.textContent}。`;
+    badge.title = referenceTitle + (annotation.matched
       ? `当前包直接包含 MRPCS 文件名；它位于同连接同名 0x010a005f 下发之前，因此标为前置引用候选。这里只证明引用与时序，不把它冒充下行 head 包。${windowNote}`
       : annotation.indexComplete
         ? `当前包直接包含 MRPCS 文件名，但在已完整索引的后续30秒内未匹配到同连接同名入站 0x010a005f 下发。${windowNote}`
-        : `当前包直接包含 MRPCS 文件名；详情索引仍在加载、重试或已截断，暂不能判断后续下发是否存在。${windowNote}`;
+        : `当前包直接包含 MRPCS 文件名；详情索引仍在加载、重试或已截断，暂不能判断后续下发是否存在。${windowNote}`);
   } else {
     return;
   }
+  summaryNode.classList.add("summary-has-mrpcs");
   const tail = summaryNode.querySelector(".summary-tail");
   if (tail) summaryNode.insertBefore(badge, tail);
   else summaryNode.appendChild(badge);
