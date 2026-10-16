@@ -118,6 +118,50 @@ def _strict_0037_family0_envelope(plain: bytes, slot: int = 0) -> bytes:
     )
 
 
+def _payload_with_crc32(length: int, target: int, prefix: bytes = b"") -> bytes:
+    """Build a deterministic equal-length fixture with the requested CRC32."""
+    assert length >= len(prefix) + 4
+    head = prefix + bytes(length - len(prefix) - 4)
+    base = zlib.crc32(head + b"\0\0\0\0") & 0xFFFFFFFF
+    vectors: list[int] = []
+    for bit_index in range(32):
+        suffix = bytearray(4)
+        suffix[bit_index // 8] = 1 << (bit_index % 8)
+        vectors.append((zlib.crc32(head + suffix) & 0xFFFFFFFF) ^ base)
+
+    basis = [0] * 32
+    combinations = [0] * 32
+    for bit_index, vector in enumerate(vectors):
+        combination = 1 << bit_index
+        for pivot in range(31, -1, -1):
+            if not (vector & (1 << pivot)):
+                continue
+            if basis[pivot]:
+                vector ^= basis[pivot]
+                combination ^= combinations[pivot]
+            else:
+                basis[pivot] = vector
+                combinations[pivot] = combination
+                break
+
+    wanted = (target & 0xFFFFFFFF) ^ base
+    solution = 0
+    for pivot in range(31, -1, -1):
+        if not (wanted & (1 << pivot)):
+            continue
+        assert basis[pivot], "CRC32 suffix transform was not invertible"
+        wanted ^= basis[pivot]
+        solution ^= combinations[pivot]
+    assert wanted == 0
+    suffix = bytes(
+        sum(((solution >> (byte_index * 8 + bit)) & 1) << bit for bit in range(8))
+        for byte_index in range(4)
+    )
+    payload = head + suffix
+    assert zlib.crc32(payload) & 0xFFFFFFFF == target & 0xFFFFFFFF
+    return payload
+
+
 def test_strict_0037_family0_envelope_decrypts_and_rejects_lookalikes(
     tmp_path: Path,
 ) -> None:
@@ -208,9 +252,17 @@ def test_mrpcs_transfer_chunk_parses_strict_lengths_indexes_and_crc(
     tmp_path: Path,
 ) -> None:
     source = APP_JS.read_text(encoding="utf-8")
+    live_name = b"mrpcs_i_v_tl.data"
+    live_wrapper = b"\x00\x01" + (len(live_name) + 1).to_bytes(4, "big") + live_name + b"\x00"
+    live_chunks = {
+        114: _payload_with_crc32(940, 0xA07020D7),
+        116: _payload_with_crc32(588, 0x716E9888),
+        119: _payload_with_crc32(940, 0x11F61FEF, live_wrapper),
+        120: _payload_with_crc32(940, 0xA31B524A),
+    }
     functions = "\n\n".join(
         _extract_function(source, name)
-        for name in ("tssCrc32", "parseMrpcsTransferChunk")
+        for name in ("tssCrc32", "parseMrpcsTransferChunk", "findMrpcsTransferChunk")
     )
     program = f"""
 function readBe16(bytes, offset) {{
@@ -241,6 +293,7 @@ function makeRecord(chunk, options = {{}}) {{
   for (let index = 0; index < chunk.length; index += 1) out[0x32 + index] = chunk[index];
   return out;
 }}
+function bytesFromHex(hex) {{ return Array.from(Buffer.from(hex, 'hex')); }}
 const chunk = Array.from({{ length: 73 }}, (_value, index) => (index * 29 + 7) & 255);
 const record = makeRecord(chunk, {{ total: 151, count: 3, index: 1, fullCrc: 0x2ad44bc4 }});
 const parsed = parseMrpcsTransferChunk(record);
@@ -256,11 +309,48 @@ if (parseMrpcsTransferChunk(badIndex) !== null) throw new Error('index >= count 
 const badCrc = makeRecord(chunk, {{ chunkCrc: (tssCrc32(chunk) ^ 1) >>> 0 }});
 const badParsed = parseMrpcsTransferChunk(badCrc);
 if (!badParsed || badParsed.valid !== false || badParsed.chunkCrcMatch !== false || badParsed.actualChunkCrc === badParsed.chunkCrc) throw new Error('bad chunk CRC was not retained as a mismatch');
-console.log(JSON.stringify({{ ok: true, chunkCrc: parsed.chunkCrc >>> 0 }}));
+
+const liveIdentity = {{ a: 0x6850b6e7, b: 0x0bb2e00b, total: 7171, count: 8, fullCrc: 0xbeedb1ff }};
+const liveFixtures = [
+  {{ seq: 114, index: 5, gap: 2, lengthOffset: 0x2e, declaredChunk: 940, missing: 0, layout: 'live_005f', storedCrc: 0xa07020d7, actualCrc: 0xa07020d7, header: '0000000103de010a005f000100f0096850b6e70bb2e00b00001c0300080005beedb1ffa07020d72100f0ffffffa203ac', chunk: {json.dumps(list(live_chunks[114]))} }},
+  {{ seq: 116, index: 7, gap: 6, lengthOffset: 0x2d, declaredChunk: 591, missing: 3, layout: 'live_005f_truncated_tail', storedCrc: 0x60f6f7ad, actualCrc: 0x716e9888, header: '000000010281010a005f000100f0096850b6e70bb2e00b00001c0300080007beedb1ff60f6f7ad2100f0ffff11024f', chunk: {json.dumps(list(live_chunks[116]))} }},
+  {{ seq: 119, index: 0, gap: 5, lengthOffset: 0x2b, declaredChunk: 940, missing: 0, layout: 'live_005f', storedCrc: 0x688c07e7, actualCrc: 0x11f61fef, header: '0000000103de010a005f000100f0096850b6e70bb2e00b00001c0300080000beedb1ff688c07e72100f15f03ac', chunk: {json.dumps(list(live_chunks[119]))} }},
+  {{ seq: 120, index: 4, gap: 2, lengthOffset: 0x2e, declaredChunk: 940, missing: 0, layout: 'live_005f', storedCrc: 0xa31b524a, actualCrc: 0xa31b524a, header: '0000000103de010a005f000100f0096850b6e70bb2e00b00001c0300080004beedb1ffa31b524a2100f0ffffffa203ac', chunk: {json.dumps(list(live_chunks[120]))} }},
+];
+for (const fixture of liveFixtures) {{
+  const liveRecord = bytesFromHex(fixture.header).concat(fixture.chunk);
+  const prefix = new Array(0x27).fill(0x5a);
+  const found = findMrpcsTransferChunk(prefix.concat(liveRecord));
+  if (!found || found.layout !== fixture.layout || found.recordOffset !== prefix.length) throw new Error('live fixture was not scanned: seq' + fixture.seq);
+  if (found.transferA !== liveIdentity.a || found.transferB !== liveIdentity.b || found.totalLength !== 7171 || found.count !== 8 || found.index !== fixture.index || found.fullCrc !== liveIdentity.fullCrc) throw new Error('live typed fields mismatch: seq' + fixture.seq);
+  if (found.declaredGap !== fixture.gap || found.chunkLengthOffset !== fixture.lengthOffset || found.chunkLength !== fixture.declaredChunk || found.actualChunkLength !== fixture.chunk.length || found.missingChunkBytes !== fixture.missing || JSON.stringify(found.chunk) !== JSON.stringify(fixture.chunk)) throw new Error('live header boundary mismatch: seq' + fixture.seq);
+  if (found.chunkCrc !== fixture.storedCrc || found.actualChunkCrc !== fixture.actualCrc || found.chunkCrcMatch !== (fixture.missing === 0 && fixture.storedCrc === fixture.actualCrc)) throw new Error('live chunk CRC state mismatch: seq' + fixture.seq);
+  if (fixture.missing > 0 && (!found.truncated || found.valid || !found.reason.includes('missing 3B'))) throw new Error('truncated tail was promoted as verified: seq' + fixture.seq);
+}}
+const wrongLiveLength = bytesFromHex(liveFixtures[0].header).concat(liveFixtures[0].chunk);
+put16(wrongLiveLength, 0x04, wrongLiveLength.length + 3);
+if (findMrpcsTransferChunk(wrongLiveLength) !== null) throw new Error('live record with unverified declared-length delta was accepted');
+const wrongShortIndex = bytesFromHex(liveFixtures[1].header).concat(liveFixtures[1].chunk);
+put16(wrongShortIndex, 0x1d, 6);
+if (findMrpcsTransferChunk(wrongShortIndex) !== null) throw new Error('gap-6 tail was accepted outside the final index');
+const wrongTailRemainder = bytesFromHex(liveFixtures[1].header).concat(liveFixtures[1].chunk);
+put32(wrongTailRemainder, 0x17, 7172);
+if (findMrpcsTransferChunk(wrongTailRemainder) !== null) throw new Error('gap-6 tail with inconsistent total remainder was accepted');
+const wrongTailMissing = bytesFromHex(liveFixtures[1].header).concat(liveFixtures[1].chunk, [0]);
+put16(wrongTailMissing, 0x04, wrongTailMissing.length + 6);
+if (findMrpcsTransferChunk(wrongTailMissing) !== null) throw new Error('gap-6 tail with missing-byte count other than three was accepted');
+const wrongShortIndex0 = bytesFromHex(liveFixtures[2].header).concat(liveFixtures[2].chunk);
+put16(wrongShortIndex0, 0x1d, 1);
+if (findMrpcsTransferChunk(wrongShortIndex0) !== null) throw new Error('gap-5 short header was accepted outside index 0');
+console.log(JSON.stringify({{ ok: true, chunkCrc: parsed.chunkCrc >>> 0, live: liveFixtures.length }}));
 """
     result = _run_node_harness(tmp_path, "parse-005f-transfer-chunk.js", program)
     expected_chunk = bytes((index * 29 + 7) & 0xFF for index in range(73))
-    assert result == {"ok": True, "chunkCrc": zlib.crc32(expected_chunk) & 0xFFFFFFFF}
+    assert result == {
+        "ok": True,
+        "chunkCrc": zlib.crc32(expected_chunk) & 0xFFFFFFFF,
+        "live": 4,
+    }
 
 
 def test_mrpcs_annotations_reassemble_out_of_order_and_correlate_only_within_30s(
@@ -276,6 +366,7 @@ def test_mrpcs_annotations_reassemble_out_of_order_and_correlate_only_within_30s
             "isMrpcsResourceFilename",
             "extractMrpcsWrapperName",
             "extractMrpcsResourceNames",
+            "normalizeMrpcsNames",
             "mrpcsObservationFileKey",
             "mrpcsObservationAttemptKey",
             "mrpcsChunksMatchCrc",
@@ -322,6 +413,18 @@ function makeRecord(chunk, options) {{
   for (let index = 0; index < chunk.length; index += 1) out[0x32 + index] = chunk[index];
   return out;
 }}
+function makeLiveRecord(chunk, options) {{
+  const missing = Number(options.missing || 0);
+  const availableLength = chunk.length - missing;
+  const out = new Array(options.lengthOffset + 2 + availableLength).fill(0);
+  put32(out, 0x00, 1); put16(out, 0x04, out.length + (options.declaredGap === undefined ? 2 : options.declaredGap)); put32(out, 0x06, 0x010a005f);
+  put32(out, 0x0f, options.a); put32(out, 0x13, options.b);
+  put32(out, 0x17, options.total); put16(out, 0x1b, options.count); put16(out, 0x1d, options.index);
+  put32(out, 0x1f, options.fullCrc); put32(out, 0x23, options.chunkCrc === undefined ? tssCrc32(chunk) : options.chunkCrc);
+  put16(out, options.lengthOffset, chunk.length);
+  for (let index = 0; index < availableLength; index += 1) out[options.lengthOffset + 2 + index] = chunk[index];
+  return out;
+}}
 const filename = 'mrpcs_i_v_ic.data';
 const nameBytes = Array.from(Buffer.from(filename, 'ascii'));
 const wrapper = [0, 1, 0, 0, 0, nameBytes.length + 1, ...nameBytes, 0];
@@ -344,9 +447,91 @@ for (const [eventId, expectedIndex] of [['event-index-0', 0], ['event-index-1', 
   const annotation = built.annotations.get(eventId);
   if (!annotation || annotation.type !== 'transfer' || annotation.filename !== filename) throw new Error('missing filename annotation for ' + eventId);
   if (annotation.dir !== 1 || annotation.index !== expectedIndex || annotation.count !== 2 || annotation.totalLength !== whole.length) throw new Error('bad chunk identity annotation for ' + eventId);
+  if (!annotation.structuredChunk || annotation.layout !== 'canonical') throw new Error('canonical parser evidence was not retained for ' + eventId);
   if (annotation.attemptSeenCount !== 1 || annotation.fileSeenCount !== 2) throw new Error('attempt/file progress was conflated for ' + eventId);
   if (annotation.attemptVerified || !annotation.fileVerified || !annotation.chunkCrcMatch || annotation.fullCrc !== fullCrc) throw new Error('cross-retry CRC semantics are wrong for ' + eventId);
 }}
+
+const lineageBefore = 'mrpcs_i_v_alpha.data';
+const lineageCurrent = 'mrpcs_i_v_beta.data';
+const lineageNameBytes = Array.from(Buffer.from(lineageCurrent, 'ascii'));
+const lineageChunk0 = [0, 1, 0, 0, 0, lineageNameBytes.length + 1, ...lineageNameBytes, 0, 0x55];
+const lineageChunk1 = [0x61, 0x62, 0x63];
+const lineageWhole = lineageChunk0.concat(lineageChunk1);
+const lineageFullCrc = tssCrc32(lineageWhole);
+const lineageA = parseMrpcsTransferChunk(makeRecord(lineageChunk0, {{ a: 7, b: 8, total: lineageWhole.length, count: 2, index: 0, fullCrc: lineageFullCrc }}));
+const lineageB = parseMrpcsTransferChunk(makeRecord(lineageChunk1, {{ a: 7, b: 8, total: lineageWhole.length, count: 2, index: 1, fullCrc: lineageFullCrc }}));
+const localLineageBuilt = buildMrpcsTransferAnnotations([
+  {{ eventId: 'local-change', ts: base + 45000, flowKey: 'flow-lineage', cid: 'cid-lineage', dir: 1, chunk: lineageA, beforeNames: [lineageBefore], currentNames: [lineageCurrent] }},
+  {{ eventId: 'local-sibling', ts: base + 45001, flowKey: 'flow-lineage', cid: 'cid-lineage', dir: 1, chunk: lineageB, beforeNames: [], currentNames: [] }},
+]);
+const localChange = localLineageBuilt.annotations.get('local-change');
+const localSibling = localLineageBuilt.annotations.get('local-sibling');
+if (JSON.stringify(localChange.beforeNames) !== JSON.stringify([lineageBefore]) || JSON.stringify(localChange.currentNames) !== JSON.stringify([lineageCurrent])) throw new Error('event-local alpha/beta lineage was lost');
+if (localSibling.filename !== lineageCurrent || localSibling.beforeNames.length || localSibling.currentNames.length) throw new Error('file sibling inherited another event lineage instead of filename-only fallback');
+
+const anonymousCrossAttempt = buildMrpcsTransferAnnotations([
+  {{ eventId: 'anonymous-a', ts: base + 46000, flowKey: 'flow-anonymous', cid: '', dir: 1, chunk: parsed0 }},
+  {{ eventId: 'anonymous-b', ts: base + 46001, flowKey: 'flow-anonymous', cid: '', dir: 1, chunk: parsed1 }},
+]);
+if (anonymousCrossAttempt.files.length !== 2 || anonymousCrossAttempt.transfers.length !== 2) throw new Error('missing-CID attempts were merged into one file identity');
+for (const eventId of ['anonymous-a', 'anonymous-b']) {{
+  const annotation = anonymousCrossAttempt.annotations.get(eventId);
+  if (!annotation || annotation.fileVerified || annotation.attemptVerified || annotation.fileSeenCount !== 1 || annotation.attemptSeenCount !== 1) throw new Error('missing CID cross-attempt chunks produced false verification: ' + eventId);
+}}
+const parsed1SameAttempt = parseMrpcsTransferChunk(makeRecord(chunk1, {{
+  a: 0x11111111, b: 0x22222222, total: whole.length, count: 2, index: 1, fullCrc,
+}}));
+const anonymousSameAttempt = buildMrpcsTransferAnnotations([
+  {{ eventId: 'anonymous-same-0', ts: base + 47000, flowKey: 'flow-anonymous', cid: '', dir: 1, chunk: parsed0 }},
+  {{ eventId: 'anonymous-same-1', ts: base + 47001, flowKey: 'flow-anonymous', cid: '', dir: 1, chunk: parsed1SameAttempt }},
+]);
+if (anonymousSameAttempt.files.length !== 1) throw new Error('same anonymous A/B attempt was split');
+for (const eventId of ['anonymous-same-0', 'anonymous-same-1']) {{
+  const annotation = anonymousSameAttempt.annotations.get(eventId);
+  if (!annotation || !annotation.attemptVerified) throw new Error('same anonymous attempt could not complete: ' + eventId);
+}}
+
+const liveName = 'mrpcs_i_v_tl.data';
+const liveNameBytes = Array.from(Buffer.from(liveName, 'ascii'));
+const liveWrapperPrefix = [0, 1, 0, 0, 0, liveNameBytes.length + 1, ...liveNameBytes, 0, 0x31, 0x32];
+const liveWrapper = liveWrapperPrefix.concat(new Array(940 - liveWrapperPrefix.length).fill(0x41));
+const liveIdentity = {{ a: 0x6850b6e7, b: 0x0bb2e00b, total: 7171, count: 8, fullCrc: 0xbeedb1ff }};
+const live5Bytes = Array.from({{ length: 940 }}, (_value, index) => (index * 11 + 5) & 255);
+const live7Bytes = Array.from({{ length: 591 }}, (_value, index) => (index * 7 + 0x23) & 255);
+const live4Bytes = Array.from({{ length: 940 }}, (_value, index) => (index * 13 + 0xa0) & 255);
+const live5 = parseMrpcsTransferChunk(makeLiveRecord(live5Bytes, {{ ...liveIdentity, index: 5, lengthOffset: 0x2e }}));
+const live7 = parseMrpcsTransferChunk(makeLiveRecord(live7Bytes, {{
+  ...liveIdentity, index: 7, lengthOffset: 0x2d, declaredGap: 6, missing: 3,
+}}));
+const live0 = parseMrpcsTransferChunk(makeLiveRecord(liveWrapper, {{
+  ...liveIdentity, index: 0, lengthOffset: 0x2b, declaredGap: 5, chunkCrc: (tssCrc32(liveWrapper) ^ 1) >>> 0,
+}}));
+const live4 = parseMrpcsTransferChunk(makeLiveRecord(live4Bytes, {{ ...liveIdentity, index: 4, lengthOffset: 0x2e }}));
+if (!live5 || !live7 || !live0 || !live4 || live0.chunkCrcMatch || live7.chunkCrcMatch || !live7.truncated || !live5.chunkCrcMatch || !live4.chunkCrcMatch) throw new Error('live 005f fixtures did not retain CRC/truncation evidence');
+const liveBuilt = buildMrpcsTransferAnnotations([
+  {{ eventId: 'seq114', ts: base + 50000, flowKey: 'flow-live', cid: 'cid-live', dir: 1, msgIndex: 160, chunkIndex: 0, summaryVerifiedTransfer: true, currentNames: [], beforeNames: [], chunk: live5 }},
+  {{ eventId: 'seq116', ts: base + 50002, flowKey: 'flow-live', cid: 'cid-live', dir: 1, msgIndex: 160, chunkIndex: 2, summaryVerifiedTransfer: true, currentNames: [], beforeNames: [], chunk: live7 }},
+  {{ eventId: 'seq119', ts: base + 50005, flowKey: 'flow-live', cid: 'cid-live', dir: 1, msgIndex: 160, chunkIndex: 5, summaryVerifiedTransfer: true, currentNames: [liveName], beforeNames: [], chunk: live0 }},
+  {{ eventId: 'seq120', ts: base + 50006, flowKey: 'flow-live', cid: 'cid-live', dir: 1, msgIndex: 161, chunkIndex: 0, summaryVerifiedTransfer: true, currentNames: [], beforeNames: [], chunk: live4 }},
+  {{ eventId: 'summary-only', ts: base + 50007, flowKey: 'flow-live', cid: 'cid-live', dir: 1, msgIndex: 160, chunkIndex: 6, summaryVerifiedTransfer: true, currentNames: ['mrpcs_i_v_ic.data'], beforeNames: [] }},
+]);
+if (liveBuilt.files.length !== 1 || liveBuilt.transfers.length !== 1) throw new Error('live file/attempt identity was not aggregated across msg_idx');
+if (liveBuilt.files[0].chunks.size !== 2 || liveBuilt.files[0].filename !== liveName) throw new Error('bad-CRC head was not kept for lineage or entered the CRC set');
+for (const eventId of ['seq114', 'seq119', 'seq120']) {{
+  const annotation = liveBuilt.annotations.get(eventId);
+  if (!annotation || !annotation.structuredChunk || annotation.layout !== 'live_005f') throw new Error('live structured annotation missing for ' + eventId);
+  const expectedCurrentNames = eventId === 'seq119' ? [liveName] : [];
+  if (annotation.filename !== liveName || JSON.stringify(annotation.currentNames) !== JSON.stringify(expectedCurrentNames) || annotation.beforeNames.length !== 0) throw new Error('event-local lineage or file fallback is wrong for ' + eventId);
+  if (annotation.fileSeenCount !== 2 || annotation.attemptSeenCount !== 2 || annotation.fileVerified || annotation.attemptVerified) throw new Error('live CRC collection admitted an unverified block for ' + eventId);
+}}
+const tailAnnotation = liveBuilt.annotations.get('seq116');
+if (!tailAnnotation || !tailAnnotation.structuredChunk || tailAnnotation.layout !== 'live_005f_truncated_tail' || tailAnnotation.index !== 7 || tailAnnotation.count !== 8) throw new Error('truncated tail was not retained as structured index 7/8');
+if (tailAnnotation.filename !== liveName || tailAnnotation.currentNames.length !== 0 || tailAnnotation.beforeNames.length !== 0) throw new Error('truncated tail lost filename fallback or inherited fake event lineage');
+if (tailAnnotation.chunkCrcMatch || tailAnnotation.fileSeenCount !== 2 || tailAnnotation.fileVerified || tailAnnotation.attemptVerified || !tailAnnotation.reason.includes('missing 3B')) throw new Error('truncated tail entered the CRC completion set');
+if (liveBuilt.annotations.get('seq119').chunkCrcMatch !== false || liveBuilt.annotations.get('seq114').chunkCrcMatch !== true) throw new Error('per-event live CRC evidence was lost');
+const summaryOnly = liveBuilt.annotations.get('summary-only');
+if (!summaryOnly || summaryOnly.structuredChunk || summaryOnly.filename || summaryOnly.currentNames.length || summaryOnly.beforeNames.length) throw new Error('summary-only observation inherited an unproven filename');
 const references = [
   {{ eventId: 'reference-within', ts: base + 15000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [filename] }},
   {{ eventId: 'reference-timeout', ts: base + 5000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, currentNames: [filename], beforeNames: [] }},
@@ -442,7 +627,7 @@ function extractPrintableRuns(bytes, minLen) {{
   }}
   return out;
 }}
-function parseMrpcsTransferChunk() {{ return null; }}
+function findMrpcsTransferChunk() {{ return null; }}
 function decryptDisplayableTssEnvelope(bytes) {{
   if (bytes[0] !== 0xfe) return null;
   return {{ supported: true, crcMatch: true, plain: Array.from(Buffer.from('mrpcs_decrypted.data', 'ascii')) }};
@@ -500,4 +685,163 @@ console.log(JSON.stringify({{ ok: true }}));
 """
     result = _run_node_harness(tmp_path, "mrpcs-candidate-gate.js", program)
     assert result == {"ok": True}
+
+
+def test_verified_005f_summary_falls_back_without_inventing_a_file(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    function = _extract_function(source, "isVerifiedMrpcsTransferSummary")
+    program = f"""
+function readSummaryValue(summaryText, key) {{
+  const match = String(summaryText || '').match(new RegExp('(?:^|\\\\s)' + key + '=([^\\\\s)]+)'));
+  return match ? match[1] : '';
+}}
+function gcloudEventClass(ev) {{ return ev.eventClass; }}
+{function}
+const verified = {{
+  eventClass: 'ace_transfer',
+  summary: 'crypto=decrypted gcloud_observation_ace_header_verified=1 gcloud_observation_ace_reports=0x010a0011,0x010A005F',
+}};
+if (!isVerifiedMrpcsTransferSummary(verified, verified.summary)) throw new Error('verified 005f transfer summary rejected');
+for (const candidate of [
+  {{ ...verified, eventClass: 'ace_other' }},
+  {{ ...verified, summary: verified.summary.replace('header_verified=1', 'header_verified=0') }},
+  {{ ...verified, summary: verified.summary.replace('0x010A005F', '0x010a005e') }},
+]) {{
+  if (isVerifiedMrpcsTransferSummary(candidate, candidate.summary)) throw new Error('unverified summary promoted');
+}}
+console.log(JSON.stringify({{ ok: true }}));
+"""
+    result = _run_node_harness(tmp_path, "mrpcs-verified-summary.js", program)
+    assert result == {"ok": True}
+
+
+def test_visible_old_mrpcs_candidate_is_merged_ahead_of_recent_window(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    functions = "\n\n".join(
+        _extract_function(source, name)
+        for name in (
+            "syncMrpcsVisibleObservationCandidates",
+            "mergeMrpcsObservationCandidateEvents",
+        )
+    )
+    program = f"""
+const state = {{ flowId: 'flow-A' }};
+const mrpcsObservationIndex = {{ visibleCandidates: new Map(), visibleFlowId: '' }};
+function isMrpcsObservationCandidate(ev) {{ return ev && ev.candidate === true; }}
+function getEventId(ev) {{ return String(ev && ev.id || ''); }}
+{functions}
+const oldVisible = {{ id: 'seq114', ts: 114, candidate: true }};
+if (!syncMrpcsVisibleObservationCandidates([oldVisible, {{ id: 'noise', ts: 1, candidate: false }}])) throw new Error('visible change was not detected');
+if (syncMrpcsVisibleObservationCandidates([oldVisible])) throw new Error('stable visible set triggered a render/schedule loop');
+const recent = Array.from({{ length: 224 }}, (_value, index) => ({{ id: 'recent-' + index, ts: 1000 + index, candidate: true }}));
+const merged = mergeMrpcsObservationCandidateEvents(mrpcsObservationIndex.visibleCandidates, [recent, [recent[0]], []]);
+if (merged.length !== 225 || merged[0].id !== 'seq114' || !merged.some((ev) => ev.id === 'recent-223')) throw new Error('old visible candidate was dropped behind the recent-224 window');
+if (!syncMrpcsVisibleObservationCandidates([]) || mrpcsObservationIndex.visibleCandidates.size !== 0) throw new Error('paged-away visible candidates were retained');
+console.log(JSON.stringify({{ ok: true, merged: merged.length }}));
+"""
+    result = _run_node_harness(tmp_path, "mrpcs-visible-priority.js", program)
+    assert result == {"ok": True, "merged": 225}
+
+
+def test_mrpcs_badge_renders_truthful_lineage_colors_and_summary_only_state(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    functions = "\n\n".join(
+        _extract_function(source, name)
+        for name in (
+            "isMrpcsResourceFilename",
+            "normalizeMrpcsNames",
+            "mrpcsCompactResourceName",
+            "appendMrpcsLineage",
+            "syncMrpcsSummaryBadge",
+        )
+    )
+    program = f"""
+class FakeNode {{
+  constructor(tag = '', text = '') {{
+    this.tagName = tag; this.children = []; this.parentNode = null; this._text = String(text || ''); this._classes = new Set(); this.title = '';
+    this.classList = {{
+      add: (...names) => names.forEach((name) => this._classes.add(name)),
+      remove: (...names) => names.forEach((name) => this._classes.delete(name)),
+      contains: (name) => this._classes.has(name),
+    }};
+  }}
+  set className(value) {{ this._classes = new Set(String(value || '').split(/\\s+/).filter(Boolean)); }}
+  get className() {{ return Array.from(this._classes).join(' '); }}
+  set textContent(value) {{ this.children = []; this._text = String(value || ''); }}
+  get textContent() {{ return this._text + this.children.map((child) => child.textContent).join(''); }}
+  appendChild(child) {{ child.parentNode = this; this.children.push(child); return child; }}
+  insertBefore(child, anchor) {{ const index = this.children.indexOf(anchor); child.parentNode = this; if (index < 0) this.children.push(child); else this.children.splice(index, 0, child); return child; }}
+  remove() {{ if (!this.parentNode) return; const index = this.parentNode.children.indexOf(this); if (index >= 0) this.parentNode.children.splice(index, 1); this.parentNode = null; }}
+  querySelectorAll(selector) {{
+    const className = selector.startsWith('.') ? selector.slice(1) : '';
+    const out = [];
+    const visit = (node) => {{ for (const child of node.children || []) {{ if (className && child.classList && child.classList.contains(className)) out.push(child); visit(child); }} }};
+    visit(this); return out;
+  }}
+  querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
+}}
+const document = {{
+  createElement: (tag) => new FakeNode(tag),
+  createTextNode: (text) => new FakeNode('#text', text),
+}};
+const MRPCS_TRANSFER_WINDOW = 224;
+const MRPCS_REFERENCE_WINDOW = 32;
+const MRPCS_LOGIN_WINDOW = 16;
+const mrpcsObservationIndex = {{ annotations: new Map(), truncated: false }};
+function getEventId(ev) {{ return String(ev && ev.id || ''); }}
+function formatHexValue(value, width) {{ return '0x' + (Number(value) >>> 0).toString(16).padStart(Number(width || 0), '0'); }}
+{functions}
+function makeSummary() {{
+  const summary = new FakeNode('summary');
+  const preview = new FakeNode('span'); preview.className = 'summary-preview'; summary.appendChild(preview);
+  const tail = new FakeNode('span'); tail.className = 'summary-tail'; summary.appendChild(tail);
+  return {{ summary, preview }};
+}}
+function render(annotation) {{
+  mrpcsObservationIndex.annotations = new Map([['event', annotation]]);
+  const fixture = makeSummary();
+  syncMrpcsSummaryBadge(fixture.summary, 'event');
+  const badge = fixture.summary.querySelector('.summary-mrpcs-badge');
+  if (!badge) throw new Error('badge missing');
+  if (fixture.summary.children.indexOf(badge) >= fixture.summary.children.indexOf(fixture.preview)) throw new Error('badge was not kept left of preview');
+  return badge;
+}}
+const base = {{
+  type: 'transfer', dir: 1, structuredChunk: true, layout: 'live_005f', filename: 'mrpcs_i_v_tl.data',
+  index: 0, count: 8, totalLength: 7171, attemptSeenCount: 2, fileSeenCount: 2,
+  attemptVerified: false, fileVerified: false, chunkCrcMatch: true, fullCrc: 0xbeedb1ff,
+  beforeNames: [], currentNames: [],
+}};
+let badge = render(base);
+if (badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'v_tl') throw new Error('filename-only sibling fallback was not compact/green');
+if (badge.querySelector('.summary-mrpcs-lineage-before') || badge.querySelector('.summary-mrpcs-lineage-arrow') || badge.textContent.includes('v_ic')) throw new Error('filename-only sibling fallback invented event lineage');
+badge = render({{ ...base, beforeNames: ['mrpcs_i_v_alpha.data'], currentNames: ['mrpcs_i_v_beta.data'], filename: 'mrpcs_i_v_beta.data' }});
+if (badge.querySelector('.summary-mrpcs-lineage-before').textContent !== 'v_alpha' || badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'v_beta' || badge.querySelector('.summary-mrpcs-lineage-arrow').textContent !== '→') throw new Error('real before/current lineage was not rendered in stage order');
+badge = render({{ ...base, beforeNames: ['mrpcs_i_v_alpha.data'], currentNames: [], filename: 'mrpcs_i_v_beta.data' }});
+if (badge.querySelector('.summary-mrpcs-lineage-before') || badge.querySelector('.summary-mrpcs-lineage-arrow') || badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'v_beta') throw new Error('before-only event was paired with file fallback as fake lineage');
+badge = render({{ ...base, beforeNames: ['mrpcs_i_v_tl.data'] }});
+if (badge.querySelector('.summary-mrpcs-lineage-before') || badge.querySelector('.summary-mrpcs-lineage-arrow') || badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'v_tl') throw new Error('identical before/current was rendered as a fake change');
+badge = render({{ type: 'transfer', dir: 1, structuredChunk: false, summaryVerifiedTransfer: true, chunkIndex: 5, currentNames: [], beforeNames: [] }});
+if (!badge.textContent.includes('005f 未完整解析') || badge.textContent.includes('v_ic') || badge.querySelector('.summary-mrpcs-lineage-current') || badge.querySelector('.summary-mrpcs-lineage-before')) throw new Error('summary-only state invented file evidence');
+console.log(JSON.stringify({{ ok: true, text: badge.textContent }}));
+"""
+    result = _run_node_harness(tmp_path, "mrpcs-badge-lineage.js", program)
+    assert result["ok"] is True
+    assert "005f 未完整解析" in str(result["text"])
+    assert re.search(
+        r"\.summary-mrpcs-lineage-before\s*\{[^}]*color:\s*#fb7185",
+        source,
+        re.S,
+    )
+    assert re.search(
+        r"\.summary-mrpcs-lineage-current\s*\{[^}]*color:\s*#34d399",
+        source,
+        re.S,
+    )
 
