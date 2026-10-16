@@ -199,9 +199,12 @@ def test_strict_0037_family0_envelope_decrypts_and_rejects_lookalikes(
     bad_crc = bytearray(envelope)
     bad_crc[22] ^= 1
     wrong_family = bytearray(envelope)
-    wrong_family[20] = 1
+    wrong_family[20] = 3
     opaque_plain = b"not-a-framed-inner-record"
     opaque_envelope = _strict_0037_family0_envelope(opaque_plain)
+    malformed_inner_plain = bytearray(plain)
+    malformed_inner_plain[4:6] = (len(malformed_inner_plain) - 1).to_bytes(2, "big")
+    malformed_inner_envelope = _strict_0037_family0_envelope(malformed_inner_plain)
 
     program = f"""
 function readBe16(bytes, offset) {{
@@ -233,7 +236,8 @@ if (!decrypted.innerRoot || decrypted.innerRoot.value !== 0x010a005f || decrypte
 if (!decryptDisplayableTssEnvelope(strict)) throw new Error('verified retagged envelope was not displayable');
 if (decryptDisplayableTssEnvelope({json.dumps(list(bad_crc))}) !== null) throw new Error('bad CRC 0037 was promoted');
 if (decryptDisplayableTssEnvelope({json.dumps(list(opaque_envelope))}) !== null) throw new Error('0037 without trusted inner report was promoted');
-if (parseTssEncryptedEnvelope({json.dumps(list(wrong_family))}) !== null) throw new Error('unverified 0037 family was accepted');
+if (decryptDisplayableTssEnvelope({json.dumps(list(malformed_inner_envelope))}) !== null) throw new Error('0037 with a non-closing inner record was promoted');
+if (parseTssEncryptedEnvelope({json.dumps(list(wrong_family))}) !== null) throw new Error('unsupported 0037 family was accepted');
 for (const candidate of [
   {json.dumps(list(non_strict_total))},
   {json.dumps(list(non_strict_trailer))},
@@ -246,6 +250,93 @@ console.log(JSON.stringify({{ ok: true, crc: decrypted.actualCrc >>> 0 }}));
 """
     result = _run_node_harness(tmp_path, "strict-0037-family0.js", program)
     assert result == {"ok": True, "crc": zlib.crc32(plain) & 0xFFFFFFFF}
+
+
+def test_live_retagged_0037_family1_decrypts_third_layer_mrpcs_reference(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    deep_panel = _extract_function(source, "buildGcloudAceCarrierDeepPanel")
+    assert "decryptDisplayableTssEnvelope(displayPayload)" in deep_panel
+    assert "gcloudSecurityThirdLayerTitle(securityCommand)" in deep_panel
+    assert "stack.appendChild(innerPanel)" in deep_panel
+    assert "buildTssRecursiveDecodeTree(displayPayload" in deep_panel
+    crypto_constants = source[
+        source.index("const TSS_CRYPTO_KEY_LABELS"):
+        source.index("function tssRol32(")
+    ]
+    functions = "\n\n".join(
+        _extract_function(source, name)
+        for name in (
+            "isLikelyTssReportCode",
+            "detectTssReport",
+            "tssRol32",
+            "tssRor32",
+            "tssSlotRaw",
+            "tssWriteLe32",
+            "tssFamily1Schedule",
+            "tssFamily1MarsE",
+            "tssFamily1RotWordsLeft",
+            "tssFamily1DecryptBlock",
+            "tssFamily1TailTransform",
+            "tssFamily1Decrypt",
+            "tssCrc32",
+            "parseTssEncryptedEnvelope",
+            "decryptTssEncryptedEnvelope",
+            "decryptDisplayableTssEnvelope",
+        )
+    )
+    envelope = bytes.fromhex(
+        "000000010055010a0037000000000000000000000108196d32fd0039"
+        "f16c4aff1395d71ca64685e9c13a7a5d57b00452007523b70bc3e703"
+        "55668025e56f3997e8f7742eb6177251c8d8c870dfb667c26fc75ac64c"
+    )
+    expected_plain = bytes.fromhex(
+        "000000010039010a005b0000000b0000000000000001000000126d7270"
+        "63735f695f765f746c2e6461746100eb092f9b00001bba0000064501"
+    )
+    program = f"""
+function readBe16(bytes, offset) {{
+  if (!Array.isArray(bytes) || offset < 0 || offset + 1 >= bytes.length) return NaN;
+  return ((Number(bytes[offset]) << 8) | Number(bytes[offset + 1])) >>> 0;
+}}
+function readBe32(bytes, offset) {{
+  if (!Array.isArray(bytes) || offset < 0 || offset + 3 >= bytes.length) return NaN;
+  return (((Number(bytes[offset]) * 0x1000000) + (Number(bytes[offset + 1]) << 16) +
+    (Number(bytes[offset + 2]) << 8) + Number(bytes[offset + 3])) >>> 0);
+}}
+function readLe32(bytes, offset) {{
+  if (!Array.isArray(bytes) || offset < 0 || offset + 3 >= bytes.length) return NaN;
+  return ((Number(bytes[offset])) | (Number(bytes[offset + 1]) << 8) |
+    (Number(bytes[offset + 2]) << 16) | (Number(bytes[offset + 3]) << 24)) >>> 0;
+}}
+function formatHexValue(value, width) {{ return '0x' + (Number(value) >>> 0).toString(16).padStart(Number(width || 0), '0'); }}
+{crypto_constants}
+function tssFamily0Decrypt() {{ throw new Error('unexpected family0'); }}
+function tssFamily2Decrypt() {{ throw new Error('unexpected family2'); }}
+{functions}
+const envelope = {json.dumps(list(envelope))};
+const expectedPlain = {json.dumps(list(expected_plain))};
+const parsed = parseTssEncryptedEnvelope(envelope);
+if (!parsed || !parsed.valid || parsed.family !== 1 || parsed.slot !== 8 || parsed.familyName !== 'family1_mars') throw new Error('live family1 envelope was not parsed');
+const decrypted = decryptDisplayableTssEnvelope(envelope);
+if (!decrypted || !decrypted.supported || !decrypted.crcMatch) throw new Error('live family1 CRC did not verify');
+if (decrypted.actualCrc !== 0x196d32fd) throw new Error('live family1 CRC mismatch');
+if (!decrypted.innerRoot || decrypted.innerRoot.value !== 0x010a005b || decrypted.innerRoot.offset !== 6) throw new Error('live inner report was not detected');
+if (JSON.stringify(decrypted.plain) !== JSON.stringify(expectedPlain)) throw new Error('live family1 plaintext mismatch');
+if (!String.fromCharCode(...decrypted.plain).includes('mrpcs_i_v_tl.data')) throw new Error('MRPCS reference was not decrypted');
+const badCrc = envelope.slice();
+badCrc[22] ^= 1;
+if (decryptDisplayableTssEnvelope(badCrc) !== null) throw new Error('bad CRC family1 envelope was promoted');
+console.log(JSON.stringify({{ family: decrypted.familyName, slot: decrypted.slot, report: decrypted.innerRoot.value >>> 0, mrpcs: true }}));
+"""
+    result = _run_node_harness(tmp_path, "live-0037-family1.js", program)
+    assert result == {
+        "family": "family1_mars",
+        "slot": 8,
+        "report": 0x010A005B,
+        "mrpcs": True,
+    }
 
 
 def test_mrpcs_transfer_chunk_parses_strict_lengths_indexes_and_crc(

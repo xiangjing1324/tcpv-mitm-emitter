@@ -12,7 +12,47 @@ APP_JS = Path(__file__).resolve().parents[1] / "tcpv_mitm_emitter" / "app.js"
 
 
 class PacketVisibilityUiTests(unittest.TestCase):
-    def test_stored_packets_are_not_automatically_hidden_by_business_rules(self) -> None:
+    @classmethod
+    def setUpClass(cls) -> None:
+        source = APP_JS.read_text()
+        start = source.index("const TCPV_EXACT_FILTERED_COMMAND_BASES")
+        end = source.index("function findEventNodeById(")
+        event_filter = source[start:end]
+        cls.runtime = """
+function escapeRegexLiteral(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+}
+function readSummaryValue(summaryText, key) {
+  const raw = String(summaryText || "");
+  const safeKey = escapeRegexLiteral(key);
+  const match = raw.match(new RegExp(`(?:^|\\\\s)${safeKey}=([^\\\\s]+)`));
+  return match ? match[1] : "";
+}
+function parseFlexibleInt(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const parsed = raw.toLowerCase().startsWith("0x")
+    ? Number.parseInt(raw.slice(2), 16)
+    : Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+const state = {filters: {dir: "all", minLen: "", maxLen: "", csobOnly: false, aceMode: "all"}};
+function eventHasCsob() { return false; }
+function normalizeAceFilterMode() { return "all"; }
+function currentFlowLooksLikeGcloud65010() { return true; }
+function gcloudEventClass() { return ""; }
+""" + event_filter
+
+    @classmethod
+    def evaluate_visibility(cls, summary: str, *, direction: int = 0) -> bool:
+        script = cls.runtime + "\nconst ev = " + json.dumps({"dir": direction, "len": 87, "summary": summary}) + ";"
+        script += "\nconsole.log(JSON.stringify(eventMatchesFilters(ev)));"
+        result = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True, timeout=5,
+        )
+        return json.loads(result.stdout)
+
+    def test_only_exact_operator_business_rules_are_automatic(self) -> None:
         source = APP_JS.read_text()
         for retired_symbol in (
             "hideBusiness", "hiddenBusinessCount", "eventIsConfirmedBusinessHidden",
@@ -23,32 +63,54 @@ class PacketVisibilityUiTests(unittest.TestCase):
         event_filter = source[source.index("function eventMatchesFilters("):
                               source.index("function findEventNodeById(")]
         self.assertIn('state.filters.dir || "all"', event_filter)
-        self.assertNotIn("gcloud_observation", event_filter)
+        self.assertIn("eventIsTcpViewExactFilteredCommand", event_filter)
 
     def test_backend_business_label_does_not_hide_a_loaded_row(self) -> None:
-        source = APP_JS.read_text()
-        event_filter = source[source.index("function eventMatchesFilters("):
-                              source.index("function findEventNodeById(")]
-        runtime = """
-const state = {filters: {dir: "all", minLen: "", maxLen: "", csobOnly: false, aceMode: "all"}};
-function eventHasCsob() { return false; }
-function normalizeAceFilterMode() { return "all"; }
-function currentFlowLooksLikeGcloud65010() { return true; }
-function gcloudEventClass() { return ""; }
-""" + event_filter + """
-const ev = {dir: 0, len: 87, summary: "gcloud_observation_hidden=1 gcloud_observation_command=CSQuestGetAcceptedQuestsRes"};
-const visibleByDefault = eventMatchesFilters(ev);
-state.filters.dir = "resp";
-const hiddenByManualDirection = !eventMatchesFilters(ev);
-console.log(JSON.stringify({visibleByDefault, hiddenByManualDirection}));
-"""
-        result = subprocess.run(
-            ["node", "-e", runtime], check=True, capture_output=True, text=True, timeout=5,
+        summary = "gcloud_observation_hidden=1 gcloud_observation_command=CSQuestGetAcceptedQuestsRes"
+        self.assertTrue(self.evaluate_visibility(summary))
+
+    def test_exact_request_response_commands_and_join_notification_are_filtered(self) -> None:
+        bases = (
+            "CSDepositQueryShowRoom",
+            "CSPlayerInfoGetAppearance",
+            "CSMPGetAllStarWeapon",
+            "CSSeasonGetRecordList",
+            "CSSeasonGetRecord",
+            "CSSeasonGetMatchScoreData",
         )
-        self.assertEqual(
-            json.loads(result.stdout),
-            {"visibleByDefault": True, "hiddenByManualDirection": True},
+        prefix = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1"
+        for base in bases:
+            for suffix in ("Req", "Res", "ReqB", "ResB"):
+                with self.subTest(command=base + suffix):
+                    self.assertFalse(self.evaluate_visibility(
+                        f"{prefix} gcloud_observation_command={base}{suffix}"
+                    ))
+        self.assertFalse(self.evaluate_visibility(
+            f"{prefix} gcloud_observation_command=CSPlayerJoinMatchNtf"
+        ))
+
+    def test_near_names_and_unverified_commands_remain_visible(self) -> None:
+        verified = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1"
+        controls = (
+            f"{verified} gcloud_observation_command=CSSeasonGetInfoReq",
+            f"{verified} gcloud_observation_command=CSPlayerJoinMatchReq",
+            f"{verified} gcloud_observation_command=CSDepositQueryShowRoomNtf",
+            f"{verified} gcloud_observation_command=CSSeasonGetRecordListAck",
+            f"{verified} gcloud_observation_command=CSSeasonGetRecordListExtraReq",
+            "command=0x4013 crypto=decrypted gcloud_observation_command=CSSeasonGetRecordListReq",
+            "command=0x4012 crypto=decrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSSeasonGetRecordListReq",
+            "command=0x4013 crypto=encrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSSeasonGetRecordListReq",
         )
+        for summary in controls:
+            with self.subTest(summary=summary):
+                self.assertTrue(self.evaluate_visibility(summary))
+
+    def test_manual_direction_filter_still_applies(self) -> None:
+        summary = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSQuestGetAcceptedQuestsRes"
+        source = self.runtime + "\nstate.filters.dir = 'resp';"
+        source += "\nconsole.log(JSON.stringify(eventMatchesFilters(" + json.dumps({"dir": 0, "len": 87, "summary": summary}) + ")));"
+        result = subprocess.run(["node", "-e", source], check=True, capture_output=True, text=True, timeout=5)
+        self.assertFalse(json.loads(result.stdout))
 
 
 class FlowLifecycleUiTests(unittest.TestCase):

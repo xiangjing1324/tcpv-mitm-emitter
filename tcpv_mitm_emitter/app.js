@@ -10999,10 +10999,11 @@ function parseTssEncryptedEnvelope(record) {
   const expectedCrc = readBe32(record, 22);
   const cipherLength = readBe16(record, 26);
   const availableLength = Math.max(0, record.length - 28);
-  // The live 0009 -> 0037 rewrite is a family0 envelope.  Native 0037 records
-  // may reuse these offsets, so do not generalize the retagged shape without
-  // CRC-verified evidence for another family.
-  const validFamily = strictRetaggedEnvelope ? family === 0 : family >= 0 && family <= 2;
+  // A live 0009 -> 0037 rewrite changes only the report code; the original
+  // envelope may use any supported family.  Native 0037 records can reuse
+  // these offsets, so display still requires the strict shape below plus the
+  // CRC and trusted-inner-report gates in decryptDisplayableTssEnvelope().
+  const validFamily = family >= 0 && family <= 2;
   const validSlot = slot >= 0 && slot < TSS_CRYPTO_KEY_LABELS.length;
   const validLength = Number.isFinite(cipherLength)
     && (strictRetaggedEnvelope ? cipherLength > 0 && cipherLength === availableLength : cipherLength >= 0 && cipherLength <= availableLength);
@@ -11060,6 +11061,8 @@ function decryptDisplayableTssEnvelope(record) {
     && inner
     && Number(inner.offset) === 6
     && isLikelyTssReportCode(inner.value)
+    && readBe32(decrypted.plain, 0) === 1
+    && readBe16(decrypted.plain, 4) === decrypted.plain.length
     ? decrypted
     : null;
 }
@@ -11197,9 +11200,16 @@ function semanticAsciiView(byteValues) {
 function localChildSemanticProfile(record, reportCode) {
   const report = Number(reportCode);
   const rawLower = semanticAsciiView(record).toLowerCase();
-  if (decryptDisplayableTssEnvelope(record)) {
+  const encryptedEnvelope = decryptDisplayableTssEnvelope(record);
+  if (encryptedEnvelope) {
     if (report === 0x010a0037) {
-      return semanticProfileValue("retagged_encrypted_tss_control", "control.crypto_envelope", "TSS 0009→0037 改码加密控制封套", "confirmed", ["report_010a0037", "family0", "crc32_verified", "trusted_inner_report"]);
+      return semanticProfileValue("retagged_encrypted_tss_control", "control.crypto_envelope", "TSS 0009→0037 改码加密控制封套", "confirmed", [
+        "report_010a0037",
+        encryptedEnvelope.familyName,
+        `slot_${encryptedEnvelope.slot}`,
+        "crc32_verified",
+        "trusted_inner_report",
+      ]);
     }
     return report === 0x010a0008
       ? semanticProfileValue("nested_encrypted_tss_response", "response.crypto_envelope", "TSS 内层加密响应封套", "observed", ["report_010a0008", "family_slot_crc_cipher_len"])
@@ -18265,8 +18275,34 @@ function appendDisplayWindowNote(totalCount, visibleCount, range) {
   el.events.appendChild(note);
 }
 
+const TCPV_EXACT_FILTERED_COMMAND_BASES = new Set([
+  "CSDepositQueryShowRoom",
+  "CSPlayerInfoGetAppearance",
+  "CSMPGetAllStarWeapon",
+  "CSSeasonGetRecordList",
+  "CSSeasonGetRecord",
+  "CSSeasonGetMatchScoreData",
+]);
+const TCPV_EXACT_FILTERED_COMMAND_SUFFIXES = ["Req", "Res", "ReqB", "ResB"];
+const TCPV_EXACT_FILTERED_COMMANDS = new Set(["CSPlayerJoinMatchNtf"]);
+
+function eventIsTcpViewExactFilteredCommand(ev) {
+  const summary = String(ev && ev.summary || "");
+  if (readSummaryValue(summary, "gcloud_observation_command_names_verified") !== "1") return false;
+  if (parseFlexibleInt(readSummaryValue(summary, "command")) !== 0x4013) return false;
+  if (readSummaryValue(summary, "crypto") !== "decrypted") return false;
+  const name = readSummaryValue(summary, "gcloud_observation_command");
+  if (TCPV_EXACT_FILTERED_COMMANDS.has(name)) return true;
+  for (const suffix of TCPV_EXACT_FILTERED_COMMAND_SUFFIXES) {
+    if (!name.endsWith(suffix)) continue;
+    return TCPV_EXACT_FILTERED_COMMAND_BASES.has(name.slice(0, -suffix.length));
+  }
+  return false;
+}
+
 function eventMatchesFilters(ev) {
   if (!ev || typeof ev !== "object") return false;
+  if (eventIsTcpViewExactFilteredCommand(ev)) return false;
   const dir = state.filters.dir || "all";
   if (dir === "req" && Number(ev.dir) !== 0) return false;
   if (dir === "resp" && Number(ev.dir) !== 1) return false;
