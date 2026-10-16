@@ -15878,6 +15878,14 @@ function extractMrpcsResourceNames(byteValues) {
   return names;
 }
 
+function mrpcsNamedTssReport(byteValues, resourceNames) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (bytes.length < 10 || !Array.isArray(resourceNames) || resourceNames.length <= 0) return null;
+  if (readBe32(bytes, 0) !== 1 || readBe16(bytes, 4) !== bytes.length) return null;
+  const report = readBe32(bytes, 6);
+  return isLikelyTssReportCode(report) ? report : null;
+}
+
 function normalizeMrpcsNames(values) {
   const names = [];
   const seen = new Set();
@@ -16058,11 +16066,17 @@ function correlateMrpcsReferenceAnnotations(references, transferBuild, existingA
     if (!eventId || annotations.has(eventId)) continue;
     const beforeNames = Array.isArray(reference.beforeNames) ? reference.beforeNames.filter(Boolean) : [];
     const currentNames = Array.isArray(reference.currentNames) ? reference.currentNames.filter(Boolean) : [];
-    const wanted = new Set([...beforeNames, ...currentNames].map((value) => String(value).toLowerCase()));
-    if (wanted.size <= 0) continue;
+    const businessNames = Array.isArray(reference.businessNames) ? reference.businessNames.filter(Boolean) : [];
+    // Correlation proves what the current/sent variant requested. before_pay is
+    // lineage evidence only and must never be paired with a later 005f.
+    const wantedNames = businessNames.length > 0 ? businessNames : currentNames;
+    const wanted = new Set(wantedNames.map((value) => String(value).toLowerCase()));
+    if (wanted.size <= 0 && beforeNames.length <= 0) continue;
     const ts = Number(reference.ts);
-    let matchedTransfer = null;
-    let matchedDelta = null;
+    let nextTransfer = null;
+    let nextDelta = null;
+    let previousTransfer = null;
+    let previousDelta = null;
     for (const transfer of transfers) {
       const filename = String(transfer && transfer.filename || "");
       if (!filename || Number(transfer.dir) !== 1 || !wanted.has(filename.toLowerCase())) continue;
@@ -16074,24 +16088,36 @@ function correlateMrpcsReferenceAnnotations(references, transferBuild, existingA
       // Missing CID is not proof that two events share the same connection.
       // Keep the filename marker but leave the temporal association unproven.
       if (!referenceCid || !transferCid || referenceCid !== transferCid) continue;
-      const delta = Number(transfer.startTs) - ts;
-      if (!Number.isFinite(delta) || delta < 0 || delta > MRPCS_REFERENCE_MAX_GAP_MS) continue;
-      if (matchedDelta === null || delta < matchedDelta) {
-        matchedTransfer = transfer;
-        matchedDelta = delta;
+      const next = Number(transfer.startTs) - ts;
+      if (Number.isFinite(next) && next >= 0 && next <= MRPCS_REFERENCE_MAX_GAP_MS
+          && (nextDelta === null || next < nextDelta)) {
+        nextTransfer = transfer;
+        nextDelta = next;
+      }
+      const previous = ts - Number(transfer.endTs);
+      if (Number.isFinite(previous) && previous >= 0 && previous <= MRPCS_REFERENCE_MAX_GAP_MS
+          && (previousDelta === null || previous < previousDelta)) {
+        previousTransfer = transfer;
+        previousDelta = previous;
       }
     }
+    const matchedTransfer = nextTransfer || previousTransfer;
+    const matchedDelta = nextTransfer ? nextDelta : previousDelta;
     annotations.set(eventId, {
       type: "reference",
       filename: matchedTransfer
         ? String(matchedTransfer.filename || "")
-        : String(beforeNames[0] || currentNames[0] || ""),
+        : String(businessNames[0] || currentNames[0] || ""),
       currentNames,
       beforeNames,
+      businessNames,
       packetLength: Number(reference.packetLength),
-      smallPacket: Number(reference.packetLength) > 0 && Number(reference.packetLength) < 200,
+      businessRole: String(reference.businessRole || "reference"),
+      reportCodes: Array.isArray(reference.reportCodes) ? reference.reportCodes.slice() : [],
+      beforeReportCodes: Array.isArray(reference.beforeReportCodes) ? reference.beforeReportCodes.slice() : [],
       matched: !!matchedTransfer,
       deltaMs: matchedDelta,
+      relation: nextTransfer ? "before_transfer" : previousTransfer ? "after_transfer" : "",
       indexComplete: !!indexComplete,
     });
   }
@@ -16111,6 +16137,7 @@ function collectMrpcsLayerObservation(byteLayers, hintedNames = []) {
   };
   for (const layer of Array.isArray(byteLayers) ? byteLayers : []) addLayer(layer);
   const names = [];
+  const namedRecords = [];
   const seen = new Set();
   for (const name of Array.isArray(hintedNames) ? hintedNames : []) {
     const text = String(name || "");
@@ -16120,22 +16147,25 @@ function collectMrpcsLayerObservation(byteLayers, hintedNames = []) {
     names.push(text);
   }
   for (const layer of layers) {
-    for (const name of extractMrpcsResourceNames(layer)) {
+    const layerNames = extractMrpcsResourceNames(layer);
+    for (const name of layerNames) {
       const key = name.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
       names.push(name);
     }
+    const report = mrpcsNamedTssReport(layer, layerNames);
+    if (report !== null) namedRecords.push({ reportCode: report, names: layerNames.slice() });
   }
   for (const layer of layers) {
     const chunk = findMrpcsTransferChunk(layer);
-    if (chunk) return { names, chunk };
+    if (chunk) return { names, namedRecords, chunk };
   }
-  return { names, chunk: null };
+  return { names, namedRecords, chunk: null };
 }
 
 function collectMrpcsInfoObservation(info) {
-  if (!info || typeof info !== "object") return { names: [], chunk: null };
+  if (!info || typeof info !== "object") return { names: [], namedRecords: [], chunk: null };
   const layers = [];
   const command = gcloudSecurityCommandFromInfo(info);
   if (command && command.carrier && Array.isArray(command.carrier.payload)) {
@@ -16155,6 +16185,7 @@ function collectMrpcsEventPayloadObservation(info, base64Payload) {
   const direct = collectMrpcsLayerObservation([payloadBytes]);
   return {
     names: normalizeMrpcsNames([...(parsed.names || []), ...(direct.names || [])]),
+    namedRecords: [...(parsed.namedRecords || []), ...(direct.namedRecords || [])],
     chunk: parsed.chunk || direct.chunk,
   };
 }
@@ -16181,6 +16212,21 @@ function inspectMrpcsEvent(ev) {
     && before.names.length <= 0 && !before.chunk
     && !summaryVerifiedTransfer
   ) return null;
+  const currentNamedRecords = Array.isArray(current.namedRecords) ? current.namedRecords : [];
+  const beforeNamedRecords = Array.isArray(before.namedRecords) ? before.namedRecords : [];
+  const reportCodes = Array.from(new Set(currentNamedRecords.map((record) => Number(record.reportCode))));
+  const beforeReportCodes = Array.from(new Set(beforeNamedRecords.map((record) => Number(record.reportCode))));
+  let businessRole = "reference";
+  let businessRecord = null;
+  if (Number(ev.dir) === 0 && gcloudEventClass(ev) === "ace_antidata") {
+    businessRecord = currentNamedRecords.find((record) => Number(record.reportCode) === 0x010a005b) || null;
+    if (businessRecord) businessRole = "request_005b";
+    else {
+      businessRecord = currentNamedRecords.find((record) => Number(record.reportCode) === 0x010a0061) || null;
+      if (businessRecord) businessRole = "alias_request_0061";
+    }
+  }
+  const businessNames = normalizeMrpcsNames(businessRecord && businessRecord.names);
   return {
     eventId: getEventId(ev),
     ts: Number(ev.ts),
@@ -16188,6 +16234,10 @@ function inspectMrpcsEvent(ev) {
     cid: String(ev.cid || ""),
     dir: Number(ev.dir),
     packetLength: Number(ev.len),
+    businessRole,
+    businessNames,
+    reportCodes,
+    beforeReportCodes,
     currentNames: current.names,
     beforeNames: before.names,
     chunk: current.chunk,
@@ -16297,6 +16347,11 @@ function mrpcsAnnotationSignature(annotations) {
     item && item.fileVerified,
     item && item.matched,
     item && item.deltaMs,
+    item && item.relation,
+    item && item.businessRole,
+    Array.isArray(item && item.reportCodes) ? item.reportCodes.join(",") : "",
+    Array.isArray(item && item.beforeReportCodes) ? item.beforeReportCodes.join(",") : "",
+    Array.isArray(item && item.businessNames) ? item.businessNames.join(",") : "",
     item && item.indexComplete,
     item && item.structuredChunk,
     item && item.layout,
@@ -16590,26 +16645,46 @@ function syncMrpcsSummaryBadge(summaryNode, eventOrId) {
   } else if (annotation.type === "reference") {
     badge.classList.add("summary-mrpcs-badge-reference");
     if (!annotation.matched) badge.classList.add("summary-mrpcs-badge-unmatched");
-    badge.appendChild(document.createTextNode(`${annotation.smallPacket ? "MRPCS前置?" : "MRPCS引用"} `));
-    if (!appendMrpcsLineage(badge, annotation)) {
+    const isDirectRequest = annotation.businessRole === "request_005b";
+    const isAliasRequest = annotation.businessRole === "alias_request_0061";
+    const isRequest = isDirectRequest || isAliasRequest;
+    badge.appendChild(document.createTextNode(`${isRequest ? "MRPCS请求↑" : "MRPCS引用"} `));
+    const businessNames = normalizeMrpcsNames(annotation.businessNames);
+    const displayAnnotation = isRequest && businessNames.length > 0
+      ? { ...annotation, currentNames: businessNames, beforeNames: [] }
+      : annotation;
+    if (!appendMrpcsLineage(badge, displayAnnotation)) {
       badge.appendChild(document.createTextNode(mrpcsCompactResourceName(annotation.filename) || "文件"));
     }
+    if (isRequest) badge.appendChild(document.createTextNode(` · ${isAliasRequest ? "0061" : "005b"}`));
     const deltaMs = Number(annotation.deltaMs);
     const timing = annotation.matched && Number.isFinite(deltaMs)
-      ? ` · +${deltaMs < 1000 ? `${Math.round(deltaMs)}ms` : `${(deltaMs / 1000).toFixed(2)}s`}`
+      ? annotation.relation === "before_transfer"
+        ? ` · ${deltaMs < 1000 ? `${Math.round(deltaMs)}ms` : `${(deltaMs / 1000).toFixed(2)}s`}后下发`
+        : ` · 距上次下发${deltaMs < 1000 ? `${Math.round(deltaMs)}ms` : `${(deltaMs / 1000).toFixed(2)}s`}`
       : !annotation.indexComplete
         ? " · 索引中"
-        : " · 30s未匹配";
+        : isRequest ? " · 30s未见下发" : " · 30s无关联下发";
     badge.appendChild(document.createTextNode(timing));
     const windowNote = mrpcsObservationIndex.truncated
       ? `当前自动索引分开保留最近 ${MRPCS_TRANSFER_WINDOW} 个传输包、${MRPCS_REFERENCE_WINDOW} 个安全引用和 ${MRPCS_LOGIN_WINDOW} 个登录/资源引用，不能据此证明更早包不存在。`
       : "当前自动索引覆盖已加载候选。";
     const referenceTitle = `${badge.textContent}。`;
+    const businessNameText = businessNames.join(", ") || "该 MRPCS 文件名";
+    const roleNote = isDirectRequest
+      ? `业务角色证据：客户端出站 CSAceSendAntiDataNtf 的当前发送侧同一条完整 TSS 记录同时包含 report=0x010a005b 与 ${businessNameText}，因此标为资源请求；不再按包长猜测前置。`
+      : isAliasRequest
+        ? `业务角色证据：客户端出站 CSAceSendAntiDataNtf 的当前发送侧同一条完整 TSS 记录同时包含 report=0x010a0061 与 ${businessNameText}；0061 的 opaque A/B 身份用于绑定下一次 005f 下发，因此标为资源身份请求，不把它称为上一批反馈或 ACK。`
+      : annotation.currentNames && annotation.currentNames.length > 0
+        ? "当前发送侧直接包含 MRPCS 文件名，但没有足够结构证据把它命名为请求或反馈。"
+        : "只有修改前载荷包含 MRPCS 文件名；当前发送侧没有对应文件名证据，因此不建立请求或 005f 下发关联。";
     badge.title = referenceTitle + (annotation.matched
-      ? `当前包直接包含 MRPCS 文件名；它位于同连接同名 0x010a005f 下发之前，因此标为前置引用候选。这里只证明引用与时序，不把它冒充下行 head 包。${windowNote}`
+      ? annotation.relation === "before_transfer"
+        ? `${roleNote} 同连接同名 0x010a005f 在其后开始，显示的是实测请求/引用到下发的时间差。${windowNote}`
+        : `${roleNote} 当前包位于同连接同名 0x010a005f 下发结束之后；这只证明时序，不把它冒充反馈。${windowNote}`
       : annotation.indexComplete
-        ? `当前包直接包含 MRPCS 文件名，但在已完整索引的后续30秒内未匹配到同连接同名入站 0x010a005f 下发。${windowNote}`
-        : `当前包直接包含 MRPCS 文件名；详情索引仍在加载、重试或已截断，暂不能判断后续下发是否存在。${windowNote}`);
+        ? `${roleNote} 在已完整索引的前后30秒内未匹配到同连接同名入站 0x010a005f 下发。${windowNote}`
+        : `${roleNote} 详情索引仍在加载、重试或已截断，暂不能判断关联下发是否存在。${windowNote}`);
   } else {
     return;
   }
@@ -18279,12 +18354,22 @@ const TCPV_EXACT_FILTERED_COMMAND_BASES = new Set([
   "CSDepositQueryShowRoom",
   "CSPlayerInfoGetAppearance",
   "CSMPGetAllStarWeapon",
+  "CSQuestSubmitProp",
+  "CSQuestAccept",
   "CSSeasonGetRecordList",
   "CSSeasonGetRecord",
   "CSSeasonGetMatchScoreData",
+  "CSSeasonGetMatchDeathHurtData",
+  "CSSeasonGetMatchGainedData",
+  "CSSeasonGetMatchKillData",
+  "CSHeroChangeAccessoryReadStat",
+  "CSHeroChangeAccessoryPlayStat",
 ]);
 const TCPV_EXACT_FILTERED_COMMAND_SUFFIXES = ["Req", "Res", "ReqB", "ResB"];
-const TCPV_EXACT_FILTERED_COMMANDS = new Set(["CSPlayerJoinMatchNtf"]);
+const TCPV_EXACT_FILTERED_COMMANDS = new Set([
+  "CSPlayerJoinMatchNtf",
+  "CSAchieveUpdateSteamProgressNtf",
+]);
 
 function eventIsTcpViewExactFilteredCommand(ev) {
   const summary = String(ev && ev.summary || "");

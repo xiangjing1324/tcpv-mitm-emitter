@@ -624,7 +624,9 @@ if (liveBuilt.annotations.get('seq119').chunkCrcMatch !== false || liveBuilt.ann
 const summaryOnly = liveBuilt.annotations.get('summary-only');
 if (!summaryOnly || summaryOnly.structuredChunk || summaryOnly.filename || summaryOnly.currentNames.length || summaryOnly.beforeNames.length) throw new Error('summary-only observation inherited an unproven filename');
 const references = [
-  {{ eventId: 'reference-within', ts: base + 15000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [filename] }},
+  {{ eventId: 'reference-within', ts: base + 15000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, businessRole: 'request_005b', businessNames: [filename], reportCodes: [0x010a005b], currentNames: [filename], beforeNames: ['mrpcs_i_v_old.data'] }},
+  {{ eventId: 'reference-after', ts: base + 45000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 220, businessRole: 'request_005b', businessNames: [filename], reportCodes: [0x010a005b], currentNames: [filename], beforeNames: [] }},
+  {{ eventId: 'reference-mixed-variants', ts: base + 15000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, businessRole: 'alias_request_0061', businessNames: ['mrpcs_i_v_tl.data'], reportCodes: [0x010a0061], beforeReportCodes: [0x010a005b], currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [filename] }},
   {{ eventId: 'reference-timeout', ts: base + 5000, flowKey: 'flow-A', cid: 'cid-A', packetLength: 162, currentNames: [filename], beforeNames: [] }},
   {{ eventId: 'reference-missing-cid', ts: base + 15000, flowKey: 'flow-A', packetLength: 162, currentNames: [filename], beforeNames: [] }},
 ];
@@ -632,10 +634,15 @@ const correlated = correlateMrpcsReferenceAnnotations(references, built, built.a
 if (!(correlated instanceof Map)) throw new Error('correlation did not return a Map');
 const within = correlated.get('reference-within');
 if (!within || within.type !== 'reference' || !within.matched || within.filename !== filename) throw new Error('within-window reference was not matched');
-if (within.deltaMs !== 25000 || within.smallPacket !== true) throw new Error('within-window timing/size metadata mismatch');
-if (JSON.stringify(within.currentNames) !== JSON.stringify(['mrpcs_i_v_tl.data']) || JSON.stringify(within.beforeNames) !== JSON.stringify([filename])) throw new Error('reference name lineage was lost');
+if (within.deltaMs !== 25000 || within.relation !== 'before_transfer' || within.businessRole !== 'request_005b') throw new Error('within-window business/timing metadata mismatch');
+if (JSON.stringify(within.reportCodes) !== JSON.stringify([0x010a005b])) throw new Error('request report evidence was lost');
+if (JSON.stringify(within.currentNames) !== JSON.stringify([filename]) || JSON.stringify(within.beforeNames) !== JSON.stringify(['mrpcs_i_v_old.data']) || JSON.stringify(within.businessNames) !== JSON.stringify([filename])) throw new Error('reference name lineage was lost');
+const after = correlated.get('reference-after');
+if (!after || !after.matched || after.relation !== 'after_transfer' || after.deltaMs !== 5000) throw new Error('post-transfer request timing was not retained');
+const mixed = correlated.get('reference-mixed-variants');
+if (!mixed || mixed.matched || mixed.filename !== 'mrpcs_i_v_tl.data' || JSON.stringify(mixed.beforeReportCodes) !== JSON.stringify([0x010a005b])) throw new Error('before variant name/report was cross-paired with current request');
 const timeout = correlated.get('reference-timeout');
-if (!timeout || timeout.type !== 'reference' || timeout.matched || timeout.deltaMs !== null) throw new Error('reference older than 30 seconds was associated');
+if (!timeout || timeout.type !== 'reference' || timeout.matched || timeout.deltaMs !== null || timeout.relation !== '') throw new Error('reference older than 30 seconds was associated');
 const missingCid = correlated.get('reference-missing-cid');
 if (!missingCid || missingCid.matched || missingCid.deltaMs !== null) throw new Error('missing CID was treated as same connection');
 
@@ -701,6 +708,7 @@ def test_mrpcs_observer_reads_all_verified_carriers_without_mutating_names(
         for name in (
             "isMrpcsResourceFilename",
             "extractMrpcsResourceNames",
+            "mrpcsNamedTssReport",
             "collectMrpcsLayerObservation",
             "collectMrpcsInfoObservation",
         )
@@ -719,9 +727,15 @@ function extractPrintableRuns(bytes, minLen) {{
   return out;
 }}
 function findMrpcsTransferChunk() {{ return null; }}
+function readBe16(bytes, offset) {{ return ((Number(bytes[offset]) << 8) | Number(bytes[offset + 1])) >>> 0; }}
+function readBe32(bytes, offset) {{ return (((Number(bytes[offset]) * 0x1000000) + (Number(bytes[offset + 1]) << 16) + (Number(bytes[offset + 2]) << 8) + Number(bytes[offset + 3])) >>> 0); }}
+function isLikelyTssReportCode(value) {{ return ((Number(value) >>> 16) & 0xffff) === 0x010a; }}
 function decryptDisplayableTssEnvelope(bytes) {{
   if (bytes[0] !== 0xfe) return null;
-  return {{ supported: true, crcMatch: true, plain: Array.from(Buffer.from('mrpcs_decrypted.data', 'ascii')) }};
+  const name = Array.from(Buffer.from('mrpcs_decrypted.data', 'ascii'));
+  const plain = [0, 0, 0, 1, 0, 0, 1, 10, 0, 91, 0, 0, 0, 0, ...name];
+  plain[4] = (plain.length >>> 8) & 255; plain[5] = plain.length & 255;
+  return {{ supported: true, crcMatch: true, plain }};
 }}
 function gcloudSecurityCommandFromInfo(info) {{ return info.command || null; }}
 const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;
@@ -742,6 +756,12 @@ for (const expected of [carrierName, protoName, rawName, hintName, 'mrpcs_decryp
   if (!actual.has(expected)) throw new Error('missing observed name: ' + expected);
 }}
 if (observed.chunk !== null) throw new Error('non-transfer carrier became a transfer chunk');
+if (observed.namedRecords.length !== 1 || observed.namedRecords[0].reportCode !== 0x010a005b || JSON.stringify(observed.namedRecords[0].names) !== JSON.stringify(['mrpcs_decrypted.data'])) throw new Error('complete named 005b request record was not retained');
+const aliasName = Array.from(Buffer.from('mrpcs_i_v_tl.data', 'ascii'));
+const aliasRecord = [0, 0, 0, 1, 0, 0, 1, 10, 0, 97, 0, 0, 0, 0, ...aliasName];
+aliasRecord[4] = (aliasRecord.length >>> 8) & 255; aliasRecord[5] = aliasRecord.length & 255;
+const aliasObserved = collectMrpcsLayerObservation([aliasRecord]);
+if (aliasObserved.namedRecords.length !== 1 || aliasObserved.namedRecords[0].reportCode !== 0x010a0061 || JSON.stringify(aliasObserved.namedRecords[0].names) !== JSON.stringify(['mrpcs_i_v_tl.data'])) throw new Error('complete named 0061 alias request record was not retained');
 if (JSON.stringify(info.command.carrier.payload) !== JSON.stringify(Array.from(Buffer.from(carrierName, 'ascii')))) throw new Error('observer mutated carrier bytes');
 console.log(JSON.stringify({{ ok: true, names: observed.names.length }}));
 """
@@ -775,6 +795,40 @@ if (isMrpcsObservationCandidate({{ eventClass: 'account_login', len: 128 * 1024 
 console.log(JSON.stringify({{ ok: true }}));
 """
     result = _run_node_harness(tmp_path, "mrpcs-candidate-gate.js", program)
+    assert result == {"ok": True}
+
+
+def test_mrpcs_business_role_requires_outbound_antidata_and_named_report(
+    tmp_path: Path,
+) -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    function = _extract_function(source, "inspectMrpcsEvent")
+    program = f"""
+function isVerifiedMrpcsTransferSummary() {{ return false; }}
+function analyzeGcloudEvent(ev) {{ return {{ report: ev.report, name: ev.currentName }}; }}
+function analyzeGcloudBeforeVariant(ev) {{ return ev.beforeReport ? {{ report: ev.beforeReport, name: ev.beforeName }} : null; }}
+function collectMrpcsEventPayloadObservation(info) {{
+  return info && info.report
+    ? {{ names: [info.name], namedRecords: [{{ reportCode: info.report, names: [info.name] }}], chunk: null }}
+    : {{ names: [], namedRecords: [], chunk: null }};
+}}
+function normalizeMrpcsNames(values) {{ return Array.from(new Set((values || []).filter(Boolean))); }}
+function gcloudEventClass(ev) {{ return ev.eventClass; }}
+function getEventId(ev) {{ return ev.id; }}
+const state = {{ flowId: 'flow' }};
+{function}
+const base = {{ id: 'event', ts: 1, cid: 'cid', len: 62, dir: 0, eventClass: 'ace_antidata', summary: '', currentName: 'mrpcs_i_v_tl.data' }};
+if (inspectMrpcsEvent({{ ...base, report: 0x010a005b }}).businessRole !== 'request_005b') throw new Error('005b resource request was not classified');
+if (inspectMrpcsEvent({{ ...base, report: 0x010a0061 }}).businessRole !== 'alias_request_0061') throw new Error('0061 alias request was not classified');
+if (inspectMrpcsEvent({{ ...base, dir: 1, report: 0x010a005b }}).businessRole !== 'reference') throw new Error('inbound 005b became a client request');
+if (inspectMrpcsEvent({{ ...base, eventClass: 'ace_other', report: 0x010a005b }}).businessRole !== 'reference') throw new Error('non-AntiData 005b became a resource request');
+if (inspectMrpcsEvent({{ ...base, report: 0x010a0056 }}).businessRole !== 'reference') throw new Error('unknown named report became a resource request');
+const mixed = inspectMrpcsEvent({{ ...base, report: 0x010a0061, beforeReport: 0x010a005b, beforeName: 'mrpcs_i_v_ic.data' }});
+if (mixed.businessRole !== 'alias_request_0061' || JSON.stringify(mixed.businessNames) !== JSON.stringify(['mrpcs_i_v_tl.data'])) throw new Error('before 005b overrode the current 0061 record');
+if (JSON.stringify(mixed.reportCodes) !== JSON.stringify([0x010a0061]) || JSON.stringify(mixed.beforeReportCodes) !== JSON.stringify([0x010a005b])) throw new Error('current/before report evidence was merged');
+console.log(JSON.stringify({{ ok: true }}));
+"""
+    result = _run_node_harness(tmp_path, "mrpcs-business-role.js", program)
     assert result == {"ok": True}
 
 
@@ -918,6 +972,32 @@ badge = render({{ ...base, beforeNames: ['mrpcs_i_v_alpha.data'], currentNames: 
 if (badge.querySelector('.summary-mrpcs-lineage-before') || badge.querySelector('.summary-mrpcs-lineage-arrow') || badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'v_beta') throw new Error('before-only event was paired with file fallback as fake lineage');
 badge = render({{ ...base, beforeNames: ['mrpcs_i_v_tl.data'] }});
 if (badge.querySelector('.summary-mrpcs-lineage-before') || badge.querySelector('.summary-mrpcs-lineage-arrow') || badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'v_tl') throw new Error('identical before/current was rendered as a fake change');
+badge = render({{
+  type: 'reference', filename: 'mrpcs_i_v_tl.data', currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [],
+  businessRole: 'request_005b', businessNames: ['mrpcs_i_v_tl.data'], reportCodes: [0x010a005b], matched: true,
+  relation: 'before_transfer', deltaMs: 110, indexComplete: true,
+}});
+if (!badge.textContent.includes('MRPCS请求↑') || !badge.textContent.includes('005b') || !badge.textContent.includes('110ms后下发') || badge.textContent.includes('前置?')) throw new Error('verified 005b request still used packet-length guesswork');
+if (!badge.title.includes('report=0x010a005b') || !badge.title.includes('不再按包长猜测前置')) throw new Error('005b business evidence was not explained');
+badge = render({{
+  type: 'reference', filename: 'mrpcs_i_v_tl.data', currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [],
+  businessRole: 'request_005b', businessNames: ['mrpcs_i_v_tl.data'], reportCodes: [0x010a005b], matched: true,
+  relation: 'after_transfer', deltaMs: 4832, indexComplete: true,
+}});
+if (!badge.textContent.includes('MRPCS请求↑') || !badge.textContent.includes('距上次下发4.83s') || badge.textContent.includes('反馈')) throw new Error('post-transfer 005b request was mislabeled as a response');
+badge = render({{
+  type: 'reference', filename: 'mrpcs_i_v_tl.data', currentNames: ['mrpcs_i_v_tl.data'], beforeNames: [],
+  businessRole: 'alias_request_0061', businessNames: ['mrpcs_i_v_tl.data'], reportCodes: [0x010a0061], matched: false,
+  relation: '', deltaMs: null, indexComplete: true,
+}});
+if (!badge.textContent.includes('MRPCS请求↑') || !badge.textContent.includes('0061') || !badge.textContent.includes('30s未见下发')) throw new Error('verified 0061 alias request was not identified');
+if (!badge.title.includes('opaque A/B') || !badge.title.includes('不把它称为上一批反馈或 ACK')) throw new Error('0061 business role boundary was not explained');
+badge = render({{
+  type: 'reference', filename: 'mrpcs_current.data', currentNames: ['mrpcs_current.data'], beforeNames: ['mrpcs_before.data'],
+  businessRole: 'alias_request_0061', businessNames: ['mrpcs_current.data'], reportCodes: [0x010a0061], beforeReportCodes: [0x010a005b],
+  matched: false, relation: '', deltaMs: null, indexComplete: true,
+}});
+if (badge.textContent.includes('before') || badge.querySelector('.summary-mrpcs-lineage-before') || badge.querySelector('.summary-mrpcs-lineage-current').textContent !== 'current') throw new Error('request badge mixed before variant evidence into current role');
 badge = render({{ type: 'transfer', dir: 1, structuredChunk: false, summaryVerifiedTransfer: true, chunkIndex: 5, currentNames: [], beforeNames: [] }});
 if (!badge.textContent.includes('005f 未完整解析') || badge.textContent.includes('v_ic') || badge.querySelector('.summary-mrpcs-lineage-current') || badge.querySelector('.summary-mrpcs-lineage-before')) throw new Error('summary-only state invented file evidence');
 console.log(JSON.stringify({{ ok: true, text: badge.textContent }}));

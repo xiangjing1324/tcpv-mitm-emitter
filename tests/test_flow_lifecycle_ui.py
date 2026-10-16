@@ -74,9 +74,16 @@ function gcloudEventClass() { return ""; }
             "CSDepositQueryShowRoom",
             "CSPlayerInfoGetAppearance",
             "CSMPGetAllStarWeapon",
+            "CSQuestSubmitProp",
+            "CSQuestAccept",
             "CSSeasonGetRecordList",
             "CSSeasonGetRecord",
             "CSSeasonGetMatchScoreData",
+            "CSSeasonGetMatchDeathHurtData",
+            "CSSeasonGetMatchGainedData",
+            "CSSeasonGetMatchKillData",
+            "CSHeroChangeAccessoryReadStat",
+            "CSHeroChangeAccessoryPlayStat",
         )
         prefix = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1"
         for base in bases:
@@ -88,6 +95,9 @@ function gcloudEventClass() { return ""; }
         self.assertFalse(self.evaluate_visibility(
             f"{prefix} gcloud_observation_command=CSPlayerJoinMatchNtf"
         ))
+        self.assertFalse(self.evaluate_visibility(
+            f"{prefix} gcloud_observation_command=CSAchieveUpdateSteamProgressNtf"
+        ))
 
     def test_near_names_and_unverified_commands_remain_visible(self) -> None:
         verified = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1"
@@ -97,6 +107,13 @@ function gcloudEventClass() { return ""; }
             f"{verified} gcloud_observation_command=CSDepositQueryShowRoomNtf",
             f"{verified} gcloud_observation_command=CSSeasonGetRecordListAck",
             f"{verified} gcloud_observation_command=CSSeasonGetRecordListExtraReq",
+            f"{verified} gcloud_observation_command=CSQuestSubmitPropAck",
+            f"{verified} gcloud_observation_command=CSQuestSubmitPropExtraReq",
+            f"{verified} gcloud_observation_command=CSSeasonGetMatchKillDataNtf",
+            f"{verified} gcloud_observation_command=CSHeroChangeAccessoryReadStatAck",
+            f"{verified} gcloud_observation_command=CSAchieveUpdateSteamProgressReq",
+            f"{verified} gcloud_observation_command=CSAchieveUpdateSteamProgressNtfReq",
+            f"{verified} gcloud_observation_command=CSAchieveUpdateSteamProgressNtfB",
             "command=0x4013 crypto=decrypted gcloud_observation_command=CSSeasonGetRecordListReq",
             "command=0x4012 crypto=decrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSSeasonGetRecordListReq",
             "command=0x4013 crypto=encrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSSeasonGetRecordListReq",
