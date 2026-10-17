@@ -122,6 +122,56 @@ function gcloudEventClass() { return ""; }
             with self.subTest(summary=summary):
                 self.assertTrue(self.evaluate_visibility(summary))
 
+    def test_verified_sent_0009_to_0037_rewrite_is_filtered(self) -> None:
+        summary = " ".join((
+            "command=0x4013",
+            "crypto=decrypted",
+            "payload_modified=1",
+            "backend_rewrite_verified=1",
+            "raw_pay_is_sent_wire=1",
+            "gcloud_observation_command_names_verified=1",
+            "gcloud_observation_command=CSAceSendAntiDataNtf",
+            "gcloud_observation_ace_header_verified=1",
+            "gcloud_observation_ace_reports=0x010a0037",
+            "mutations=carrier=lz4,antidata_root_report=010a0009->010a0037,antidata_root_report_replacements=1,antidata_root_report_verified=1",
+        ))
+        self.assertFalse(self.evaluate_visibility(summary, direction=0))
+
+    def test_native_or_unverified_0037_remains_visible(self) -> None:
+        prefix = " ".join((
+            "command=0x4013",
+            "crypto=decrypted",
+            "payload_modified=1",
+            "backend_rewrite_verified=1",
+            "raw_pay_is_sent_wire=1",
+            "gcloud_observation_command_names_verified=1",
+            "gcloud_observation_command=CSAceSendAntiDataNtf",
+            "gcloud_observation_ace_header_verified=1",
+            "gcloud_observation_ace_reports=0x010a0037",
+        ))
+        controls = (
+            # Native 0037: current report is visible, but no verified 0009 -> 0037 rewrite exists.
+            f"{prefix} mutations=carrier=lz4",
+            f"{prefix} mutations=antidata_root_report=010a0009->010a0037",
+            f"{prefix} mutations=antidata_root_report_verified=1",
+            f"{prefix} mutations=antidata_root_report=010a0037->010a0037,antidata_root_report_verified=1",
+            # A producer mutation label without proof that this was the sent wire stays observable.
+            prefix.replace("raw_pay_is_sent_wire=1 ", "")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            # The rule is for outbound AntiData only.
+            prefix.replace("gcloud_observation_command=CSAceSendAntiDataNtf", "gcloud_observation_command=CSAceAntiDataTransferNtf")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("gcloud_observation_command=CSAceSendAntiDataNtf", "gcloud_observation_command=CSAceSendAntiDataNtfB")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+        )
+        for summary in controls:
+            with self.subTest(summary=summary):
+                self.assertTrue(self.evaluate_visibility(summary, direction=0))
+        self.assertTrue(self.evaluate_visibility(
+            prefix + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            direction=1,
+        ))
+
     def test_manual_direction_filter_still_applies(self) -> None:
         summary = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSQuestGetAcceptedQuestsRes"
         source = self.runtime + "\nstate.filters.dir = 'resp';"

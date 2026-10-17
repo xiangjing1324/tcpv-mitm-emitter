@@ -18385,8 +18385,28 @@ function eventIsTcpViewExactFilteredCommand(ev) {
   return false;
 }
 
+function eventIsVerifiedRetagged0037(ev) {
+  if (Number(ev && ev.dir) !== 0) return false;
+  const summary = String(ev && ev.summary || "");
+  if (parseFlexibleInt(readSummaryValue(summary, "command")) !== 0x4013) return false;
+  if (readSummaryValue(summary, "crypto") !== "decrypted") return false;
+  if (readSummaryValue(summary, "payload_modified") !== "1") return false;
+  if (readSummaryValue(summary, "backend_rewrite_verified") !== "1") return false;
+  if (readSummaryValue(summary, "raw_pay_is_sent_wire") !== "1") return false;
+  if (readSummaryValue(summary, "gcloud_observation_command_names_verified") !== "1") return false;
+  const commandName = readSummaryValue(summary, "gcloud_observation_command");
+  if (commandName !== "CSAceSendAntiDataNtf") return false;
+  if (readSummaryValue(summary, "gcloud_observation_ace_header_verified") !== "1") return false;
+  const currentReports = new Set(readSummaryValue(summary, "gcloud_observation_ace_reports").split(",").filter(Boolean));
+  if (!currentReports.has("0x010a0037")) return false;
+  const mutations = new Set(readSummaryValue(summary, "mutations").split(",").filter(Boolean));
+  return mutations.has("antidata_root_report=010a0009->010a0037")
+    && mutations.has("antidata_root_report_verified=1");
+}
+
 function eventMatchesFilters(ev) {
   if (!ev || typeof ev !== "object") return false;
+  if (eventIsVerifiedRetagged0037(ev)) return false;
   if (eventIsTcpViewExactFilteredCommand(ev)) return false;
   const dir = state.filters.dir || "all";
   if (dir === "req" && Number(ev.dir) !== 0) return false;
