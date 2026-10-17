@@ -18388,7 +18388,7 @@ function eventIsTcpViewExactFilteredCommand(ev) {
 function eventIsVerifiedRetagged0037(ev) {
   if (Number(ev && ev.dir) !== 0) return false;
   const summary = String(ev && ev.summary || "");
-  if (parseFlexibleInt(readSummaryValue(summary, "command")) !== 0x4013) return false;
+  if (readSummaryValue(summary, "command").toLowerCase() !== "0x4013") return false;
   if (readSummaryValue(summary, "crypto") !== "decrypted") return false;
   if (readSummaryValue(summary, "payload_modified") !== "1") return false;
   if (readSummaryValue(summary, "backend_rewrite_verified") !== "1") return false;
@@ -18397,7 +18397,8 @@ function eventIsVerifiedRetagged0037(ev) {
   const commandName = readSummaryValue(summary, "gcloud_observation_command");
   if (commandName !== "CSAceSendAntiDataNtf") return false;
   if (readSummaryValue(summary, "gcloud_observation_ace_header_verified") !== "1") return false;
-  const currentReports = new Set(readSummaryValue(summary, "gcloud_observation_ace_reports").split(",").filter(Boolean));
+  const currentReports = new Set(readSummaryValue(summary, "gcloud_observation_ace_reports")
+    .split(",").map((value) => value.trim().toLowerCase()).filter(Boolean));
   if (!currentReports.has("0x010a0037")) return false;
   const mutations = new Set(readSummaryValue(summary, "mutations").split(",").filter(Boolean));
   return mutations.has("antidata_root_report=010a0009->010a0037")

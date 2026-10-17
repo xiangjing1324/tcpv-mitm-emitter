@@ -155,6 +155,20 @@ function gcloudEventClass() { return ""; }
             f"{prefix} mutations=antidata_root_report=010a0009->010a0037",
             f"{prefix} mutations=antidata_root_report_verified=1",
             f"{prefix} mutations=antidata_root_report=010a0037->010a0037,antidata_root_report_verified=1",
+            prefix.replace("command=0x4013", "command=0x4013garbage")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("crypto=decrypted", "crypto=encrypted")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("payload_modified=1 ", "")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("backend_rewrite_verified=1 ", "")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("gcloud_observation_command_names_verified=1 ", "")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("gcloud_observation_ace_header_verified=1 ", "")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            prefix.replace("gcloud_observation_ace_reports=0x010a0037", "gcloud_observation_ace_reports=0x010a0009")
+            + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
             # A producer mutation label without proof that this was the sent wire stays observable.
             prefix.replace("raw_pay_is_sent_wire=1 ", "")
             + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
@@ -170,6 +184,11 @@ function gcloudEventClass() { return ""; }
         self.assertTrue(self.evaluate_visibility(
             prefix + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
             direction=1,
+        ))
+        uppercase_report = prefix.replace("gcloud_observation_ace_reports=0x010a0037", "gcloud_observation_ace_reports=0x010A0037")
+        self.assertFalse(self.evaluate_visibility(
+            uppercase_report + " mutations=antidata_root_report=010a0009->010a0037,antidata_root_report_verified=1",
+            direction=0,
         ))
 
     def test_manual_direction_filter_still_applies(self) -> None:
