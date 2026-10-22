@@ -243,12 +243,11 @@ function fixtureResult(before, after, beforeOptions = {}, afterOptions = {}) {
         script = self.runtime + "\nconst ev = " + json.dumps(event) + ";\n" + """
 const left = analyzeGcloudBeforeVariant(ev, ev.summary);
 const right = analyzeGcloudEvent(ev, ev.summary);
-console.log(JSON.stringify({complete: left.proto.sourceComplete, result: gcloudCompareRows(left.proto, right.proto)}));
+console.log(JSON.stringify({result: gcloudCompareEventRows(ev, right, ev.summary)}));
 """
         result = subprocess.run(["node"], input=script, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr[-2400:])
         observed = json.loads(result.stdout)
-        self.assertFalse(observed["complete"])
         self.assert_current_only(observed["result"])
 
     def test_field_order_and_numeric_offsets_are_not_field_identity(self) -> None:

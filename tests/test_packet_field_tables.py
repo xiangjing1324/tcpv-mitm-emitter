@@ -30,20 +30,12 @@ class PacketFieldTableTests(unittest.TestCase):
                 "packetBasicFieldRows",
                 "packetBasicCompare",
                 "packetBeforePayloadForCompare",
-                "packetChildComplete",
-                "packetChildFieldRows",
                 "packetCompareFieldRows",
             )
         ) + """
-let fixtureChildFields = [];
-function childHexStructure(child, bytes) {
-  return {fields: fixtureChildFields, annotations: new Map(), valueStart: null};
-}
-function fixtureRows(bytes, childFields = null) {
+function fixtureRows(bytes) {
   const original = JSON.stringify(bytes);
-  fixtureChildFields = childFields || [];
-  const rows = childFields === null ? packetBasicFieldRows(bytes)
-    : packetChildFieldRows({reportCode: 0x010a0056}, bytes);
+  const rows = packetBasicFieldRows(bytes);
   if (JSON.stringify(bytes) !== original) throw new Error('display adapter mutated packet bytes');
   return rows;
 }
@@ -68,8 +60,8 @@ function fixtureCompare(before, after, canCompare = true) {
         self.assertEqual(result.returncode, 0, result.stderr[-2400:])
         return json.loads(result.stdout)
 
-    def rows(self, data: bytes, fields: list | None = None) -> list:
-        return self.evaluate(f"fixtureRows({json.dumps(list(data))},{json.dumps(fields)})")
+    def rows(self, data: bytes) -> list:
+        return self.evaluate(f"fixtureRows({json.dumps(list(data))})")
 
     def compare(self, before: bytes | None, after: bytes, *, can_compare: bool = True) -> dict:
         arguments = [list(before) if before is not None else None, list(after), can_compare]
@@ -151,7 +143,7 @@ function fixtureCompare(before, after, canCompare = true) {
             self.assertTrue(any(row["key"] == "content" for row in result["rows"]))
             self.assertTrue(all(row["status"] in {"same", "changed"} for row in result["rows"]))
 
-    def test_tersafe_capture_length_gate_applies_to_both_packet_directions(self) -> None:
+    def test_ordinary_capture_length_gate_applies_to_both_packet_directions(self) -> None:
         data = base64.b64encode(b"complete bytes").decode()
         for direction in (0, 1):
             event = {"dir": direction, "before_pay": data, "pay": data, "before_len": 100, "len": 14}
@@ -161,8 +153,7 @@ function fixtureCompare(before, after, canCompare = true) {
             event["len"] = 100
             self.assertEqual(self.evaluate("packetBeforePayloadForCompare(" + json.dumps(event) + ")"), "")
         source = APP_JS.read_text()
-        self.assertIn("buildChildComparePanel(comparableBeforePay, decodedPay", source)
-        self.assertIn("const responseBeforePay = comparableBeforePay", source)
+        self.assertIn("const canCompare = Boolean(packetBeforePayloadForCompare(ev))", source)
 
     def test_candidate_text_disappearing_is_not_a_confirmed_field_deletion(self) -> None:
         result = self.compare(b"readable text", b"\x00\xfe\xff\x01")
@@ -170,40 +161,19 @@ function fixtureCompare(before, after, canCompare = true) {
         self.assertTrue(texts)
         self.assertEqual({row["status"] for row in texts}, {"unmatched"})
         self.assertEqual(self.by_key(result["rows"])["content"]["status"], "changed")
-
-    def test_child_record_declared_length_rejects_incomplete_frame(self) -> None:
-        partial = [0,0,0,1,0,24,1,10,0,17,0,0,0,0]
-        complete = [0,0,0,1,0,14,1,10,0,17,0,0,0,0]
-        self.assertFalse(self.evaluate(f"packetChildComplete({{}}, {partial})"))
-        self.assertTrue(self.evaluate(f"packetChildComplete({{}}, {complete})"))
-
-    def test_child_structured_ranges_keep_all_uncovered_binary_bytes(self) -> None:
-        data = b"\x00\x01\xfe\x80\x02\xff\x81"
-        fields = [
-            {"offset": 0, "length": 2, "note": "observed header", "kind": "report"},
-            {"offset": 4, "length": 1, "note": "observed flag", "kind": "flags"},
-        ]
-        rows = self.rows(data, fields)
-        by_key = self.by_key(rows)
-        self.assertIn("report[0]", by_key)
-        self.assertIn("flags[0]", by_key)
-        self.assertIn("opaque", by_key)
-        self.assertEqual(by_key["report[0]"]["value"].replace(" ", ""), "0001")
-        self.assertEqual(by_key["opaque"]["value"].replace(" ", "").lower(), "fe80ff81")
-        self.assertEqual(len(rows), len(by_key))
-
-    def test_child_text_is_shown_once_and_does_not_consume_unknown_tail(self) -> None:
-        data = b"\x00\x01hello world\x00\xfe\xff"
-        fields = [{"offset": 0, "length": 2, "note": "observed header", "kind": "report"}]
-        rows = self.rows(data, fields)
-        text_rows = [row for row in rows if row["key"].startswith("text[")]
-        self.assertEqual(len(text_rows), 1)
-        self.assertIn("hello world", text_rows[0]["value"])
-        self.assertEqual(self.by_key(rows)["opaque"]["value"].replace(" ", "").lower(), "00feff")
-        covered_text = [{"offset": 2, "length": 11, "note": "observed text", "kind": "tlvValue"}]
-        already_shown = self.rows(data, fields + covered_text)
-        self.assertFalse(any(row["key"].startswith("text[") for row in already_shown))
-        self.assertEqual(sum("hello world" in row["value"] for row in already_shown), 1)
+    def test_specialized_tersafe_and_ace_renderers_match_the_original_baseline(self) -> None:
+        import subprocess
+        source = APP_JS.read_text()
+        baseline = subprocess.check_output(["git", "show", "318789d:tcpv_mitm_emitter/app.js"], text=True)
+        for name in ("makeChildCard", "buildChildComparePanel", "buildGcloudAceCarrierDeepPanel", "makeGcloudAceCompareStatus", "analyzeGcloudBeforeVariant", "appendGcloudReadableStrings"):
+            self.assertEqual(_packet_function(source, name), _packet_function(baseline, name), name)
+        security = _packet_function(source, "buildGcloudSecurityPacketPanel").replace("buildGcloudSecurityPacketPanel", "buildGcloudPacketPanel", 1)
+        self.assertEqual(security, _packet_function(baseline, "buildGcloudPacketPanel"))
+        self.assertIn('if (packetUsesSpecializedView(ev, summaryText, info)) return buildGcloudSecurityPacketPanel', source)
+        self.assertIn('if (!modernView && isRequest && gcloudWireCompare)', source)
+        self.assertIn('if (modernView) body.classList.add("packet-modern")', source)
+        self.assertNotIn('function packetChildFieldRows(', source)
+        self.assertNotIn('function packetChildComplete(', source)
 
 
 if __name__ == "__main__":
