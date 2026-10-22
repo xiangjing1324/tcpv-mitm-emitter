@@ -7902,17 +7902,14 @@ function eventModificationDiffText(ev) {
   const wire = eventPayloadDiff(ev && ev.full_pay, ev && ev.raw_pay);
   const selected = plaintext || wire;
   if (!selected) return { short: "", detail: "" };
-  const stage = plaintext ? "明文" : "Wire";
-  const delta = Number(selected.lenDelta || 0);
-  const changed = Number(selected.changed || 0);
-  const offsetText = (selected.offsets || []).map((item) => (
-    `+${formatHexValue(item.offset)} ${item.before}->${item.after}`
-  )).join("，");
+  const stage = plaintext ? "明文" : "封包";
+  const beforeText = plaintext ? ev.before_pay : ev.full_pay;
+  const afterText = plaintext ? ev.pay : ev.raw_pay;
+  const beforeLength = b64ToBytes(beforeText).length;
+  const afterLength = b64ToBytes(afterText).length;
   return {
-    short: `${stage}${changed}B${delta ? `/lenΔ${delta > 0 ? "+" : ""}${delta}` : ""}`,
-    detail: `${stage} before -> after：变化 ${changed}/${Number(selected.commonLen || 0)}`
-      + (delta ? `，lenΔ=${delta > 0 ? "+" : ""}${delta}` : "")
-      + (offsetText ? `；${offsetText}` : ""),
+    short: beforeLength === afterLength ? `${stage}已变更` : `${beforeLength} → ${afterLength} B`,
+    detail: `${stage}内容已变更；修改前 ${beforeLength} 字节，修改后 ${afterLength} 字节`,
   };
 }
 
@@ -8020,13 +8017,11 @@ function syncEventModificationIndicator(wrap, summaryNode, ev, summaryText = "")
     }
   }
   badge.className = `summary-modification-badge summary-modification-${evidence.state}`;
-  badge.textContent = isModified
-    ? `已修改${evidence.diff && evidence.diff.short ? ` · ${evidence.diff.short}` : ""}`
-    : "未修改";
+  badge.textContent = isModified ? "已修改" : "未修改";
   const frame = `seq=${ev && ev.seq !== undefined ? ev.seq : "-"} m${ev && ev.msg_idx >= 0 ? ev.msg_idx : "-"}/c${ev && ev.chunk_idx >= 0 ? ev.chunk_idx : "-"}`;
   badge.title = `${isModified ? "该时间帧有真实修改证据" : "生产端明确未修改"} · ${frame}`
     + (evidence.diff && evidence.diff.detail ? ` · ${evidence.diff.detail}` : "")
-    + ` · ${evidence.reasons.join(" · ")}`;
+;
   badge.setAttribute("aria-label", badge.title);
 }
 
@@ -9343,6 +9338,482 @@ function appendGcloudSecuritySummary(panel, info) {
   if (rail.childElementCount > 0) panel.appendChild(rail);
 }
 
+// Presentation-only: align decoded fields by protobuf field path, never by
+// byte offset. No packet, rule, stored event or producer evidence is changed.
+function gcloudCompareFieldLabel(path, node, proto) {
+  const text = String(node && node.string || "");
+  const alias = gcloudProtoFieldAlias(path, node, proto);
+  const labels = {
+    call_id: "调用编号", command: "命令", module: "模块", language: "语言",
+    os_version: "系统 / 版本", device_model: "设备型号", device_vendor: "厂商",
+    network_type: "网络类型", gpu_brand: "图形设备", user_agent: "系统浏览器标识",
+    account_key: "账号标识类型", avatar_url: "头像地址", server_endpoint: "服务器地址",
+    network_address: "网络地址", ip_address: "IP 地址", bundle_id: "应用包名",
+    uuid: "设备标识", "hash?": "摘要值（含义待确认）", "id?": "标识（含义待确认）",
+    "version?": "版本（特征识别）", "account_id?": "账号编号（特征识别）",
+    "iap_inc_id?": "渠道串（特征识别）", kick_code: "下线代码", notice: "服务器提示",
+    anti_data_hex_blob: "安全上报内容", feature_hex_blob: "轻量特征内容",
+    "base64_blob?": "编码内容", url: "链接", path: "文件路径",
+  };
+  let label = labels[alias] || "";
+  // These are display hints from the captured text, not new protocol names.
+  if (!label && /^(?:OpenHarmony|HarmonyOS|Android|IOS\d)/i.test(text)) label = "系统 / 版本（特征识别）";
+  if (!label && /^(?:HUAWEI|HONOR|Apple)\|/i.test(text)) label = "厂商 / 型号（特征识别）";
+  if (!label && /^(?:HUAWEI|HONOR|Apple)$/i.test(text)) label = "厂商（特征识别）";
+  if (!label && /^(?:Mali|Maleoon|Adreno|PowerVR|Apple GPU|GenericGPU)/i.test(text)) label = "图形设备（特征识别）";
+  if (!label && /^(?:OpenGL|Metal|Vulkan)/i.test(text)) label = "图形接口（特征识别）";
+  if (!label && /^(?:qq_qq|hm_qq|hm_wx|wx_wx|wechat_wx|ios_qq|ios_wx)-/i.test(text)) label = "渠道串（特征识别）";
+  return label || (alias ? alias.replace(/_/g, " ") : `字段 ${path[path.length - 1]}`);
+}
+
+function gcloudCompareLeafRows(proto, opaquePaths = null) {
+  if (!proto || !Array.isArray(proto.nodes)) return [];
+  const rows = [];
+  const bytes = Array.isArray(proto.viewBytes) ? proto.viewBytes : [];
+  const visit = (nodes, path = [], keys = [], displayPath = []) => {
+    const counts = new Map();
+    const seen = new Map();
+    for (const node of nodes) counts.set(Number(node.field), (counts.get(Number(node.field)) || 0) + 1);
+    for (const node of nodes) {
+      const field = Number(node.field);
+      const occurrence = seen.get(field) || 0;
+      seen.set(field, occurrence + 1);
+      const nextPath = path.concat(field);
+      const nextKeys = keys.concat(`${field}[${occurrence}]`);
+      const nextDisplay = displayPath.concat(`f${field}${counts.get(field) > 1 ? `[${occurrence}]` : ""}`);
+      if (node.childOk === true && Array.isArray(node.children) && node.children.length > 0
+          && !(opaquePaths && opaquePaths.has(nextKeys.join(".")))) {
+        visit(node.children, nextPath, nextKeys, nextDisplay);
+        continue;
+      }
+      const raw = gcloudNodeValueBytes(node, bytes);
+      const type = node.childOk === false ? "bytes（内部结构未确认）" : gcloudProtoTypeText(node);
+      let value;
+      if (typeof node.string === "string" && node.string.length > 0) value = node.string;
+      else if (Number(node.wire) === 0) value = `${node.valueText ?? node.value ?? 0} (${formatHexValue(node.valueText ?? node.value ?? 0)})`;
+      else if (raw.length > 0) value = gcloudHexBytes(raw, raw.length);
+      else value = Number(node.len || 0) === 0 ? "（空值）" : gcloudNodeValueText(node);
+      rows.push({
+        key: nextKeys.join("."), path: nextPath, pathText: nextDisplay.join("."),
+        label: gcloudCompareFieldLabel(nextPath, node, proto), type, value, node,
+        // Compare actual captured value bytes, not truncated display previews.
+        fingerprint: `${Number(node.wire)}:${raw.length ? raw.join(",") : JSON.stringify([node.string, node.valueText ?? node.value, node.valueHex, node.len])}`,
+      });
+    }
+  };
+  visit(proto.nodes);
+  return rows;
+}
+
+function gcloudCompareRows(beforeProto, afterProto) {
+  let beforeRows = gcloudCompareLeafRows(beforeProto);
+  let afterRows = gcloudCompareLeafRows(afterProto);
+  // A length-delimited value is only expanded where both variants have a
+  // fully parsed child boundary. Partial guesses stay one opaque value, so
+  // changes in unparsed tails cannot disappear or become fake added fields.
+  const opaquePaths = new Set(beforeRows.concat(afterRows).map((row) => row.key));
+  beforeRows = gcloudCompareLeafRows(beforeProto, opaquePaths);
+  afterRows = gcloudCompareLeafRows(afterProto, opaquePaths);
+  const name = (proto) => String(proto && (proto.commandName || proto.commandDisplay) || "");
+  const sameCommand = name(beforeProto) && name(beforeProto) === name(afterProto);
+  const bothUagame = beforeProto && afterProto && beforeProto.uagameBody && afterProto.uagameBody
+    && !name(beforeProto) && !name(afterProto);
+  const canCompare = Boolean(beforeProto && afterProto && beforeProto.sourceComplete && afterProto.sourceComplete
+    && beforeProto.ok && afterProto.ok && (sameCommand || bothUagame));
+  const reason = canCompare ? "按字段路径对齐；重复字段按出现顺序逐项对应"
+    : !beforeProto ? "未记录修改前内容，仅展示当前字段"
+      : !beforeProto.ok || !beforeProto.sourceComplete ? "修改前数据不完整，仅展示当前字段，不判断新增或删除"
+        : !afterProto || !afterProto.ok || !afterProto.sourceComplete ? "当前数据不完整，仅展示已解析字段"
+          : "前后命令不同，不能逐字段对应；仅展示当前字段";
+  if (!canCompare) return { rows: afterRows.map((after) => ({ ...after, before: null, after, status: "current" })), hasBefore: Boolean(beforeProto), canCompare, reason };
+  const beforeMap = new Map(beforeRows.map((row) => [row.key, row]));
+  const afterMap = new Map(afterRows.map((row) => [row.key, row]));
+  // Use the received field order; inserted fields remain adjacent to their
+  // siblings rather than shifting every subsequent row after a length change.
+  const keys = beforeRows.map((row) => row.key);
+  for (let index = 0; index < afterRows.length; index += 1) {
+    const key = afterRows[index].key;
+    if (beforeMap.has(key)) continue;
+    const next = afterRows.slice(index + 1).find((row) => keys.includes(row.key));
+    keys.splice(next ? keys.indexOf(next.key) : keys.length, 0, key);
+  }
+  const rows = keys.map((key) => {
+    const before = beforeMap.get(key) || null;
+    const after = afterMap.get(key) || null;
+    const status = !before ? "added" : !after ? "removed" : before.fingerprint === after.fingerprint ? "same" : "changed";
+    // Prefer the original label when the new value has a different OS hint.
+    const display = before && !/^字段 \d+$/.test(before.label) ? before : (after || before);
+    return { key, path: display.path, label: display.label, type: display.type, before, after, status };
+  });
+  return { rows, hasBefore: true, canCompare, reason };
+}
+
+function appendGcloudCompareValue(cell, item) {
+  if (!item) {
+    cell.textContent = "—";
+    cell.classList.add("gcloud-value-empty");
+    return;
+  }
+  cell.title = String(item.pathText || "");
+  const value = String(item.value ?? "");
+  if (value.length <= 180) {
+    cell.textContent = value;
+    return;
+  }
+  const details = document.createElement("details");
+  details.className = "gcloud-long-value";
+  const summary = document.createElement("summary");
+  summary.textContent = `${value.slice(0, 100)}…`;
+  summary.title = `展开完整值（${value.length} 字符）`;
+  const full = document.createElement("div");
+  full.textContent = value;
+  details.appendChild(summary);
+  details.appendChild(full);
+  cell.appendChild(details);
+}
+
+function buildGcloudFieldCompare(ev, info, summaryText = "") {
+  if (!info || !info.proto) return null;
+  const beforeInfo = analyzeGcloudBeforeVariant(ev, summaryText);
+  const compare = gcloudCompareRows(beforeInfo && beforeInfo.proto, info.proto);
+  return buildPacketFieldTable(compare, ev);
+}
+
+function packetFieldItem(key, label, value, raw = null, type = "原值", pathText = "") {
+  return { key, label, value: String(value), type, path: [key], pathText,
+    fingerprint: Array.isArray(raw) ? raw.join(",") : `${type}:${String(value)}` };
+}
+
+function packetCompareFieldRows(beforeRows, afterRows, canCompare, reason = "") {
+  const left = Array.isArray(beforeRows) ? beforeRows : [];
+  const right = Array.isArray(afterRows) ? afterRows : [];
+  if (!canCompare) return {
+    rows: right.map((after) => ({ ...after, before: null, after, status: "current" })),
+    hasBefore: left.length > 0, canCompare: false,
+    reason: reason || "未记录完整的修改前内容，仅展示当前字段",
+  };
+  const a = new Map(left.map((item) => [item.key, item]));
+  const b = new Map(right.map((item) => [item.key, item]));
+  const keys = [...a.keys(), ...[...b.keys()].filter((key) => !a.has(key))];
+  return { rows: keys.map((key) => {
+    const before = a.get(key) || null, after = b.get(key) || null;
+    const display = before || after;
+    const inferredBoundary = /^(?:text\[|opaque$|content$)/.test(key);
+    return { key, path: display.path, label: display.label, type: display.type, before, after,
+      status: inferredBoundary && (!before || !after) ? "unmatched"
+        : !before ? "added" : !after ? "removed" : before.fingerprint === after.fingerprint ? "same" : "changed" };
+  }), hasBefore: true, canCompare: true,
+  reason: reason || "按已解析字段对应；未确认的内容保留原值，不猜测含义" };
+}
+
+function packetBasicFieldRows(byteValues, rawOnly = false) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (!bytes.length) return [];
+  const rows = [packetFieldItem("length", "记录长度", `${bytes.length} 字节`, null, "长度")];
+  const text = gcloudBytesToUtf8(bytes);
+  if (!rawOnly && /^\s*[\[{]/.test(text)) {
+    try {
+      const value = JSON.parse(text);
+      const fields = [];
+      const visit = (item, path = []) => {
+        if (fields.length > 240) throw new Error("JSON display budget");
+        if (typeof item === "number" && Number.isInteger(item) && !Number.isSafeInteger(item)) throw new Error("unsafe JSON integer");
+        const entries = item !== null && typeof item === "object" ? Object.entries(item) : [];
+        if (entries.length) {
+          for (const [key, child] of entries) visit(child, path.concat(key));
+        } else {
+          const pathText = "/" + path.map((part) => String(part).replace(/~/g, "~0").replace(/\//g, "~1")).join("/");
+          fields.push(packetFieldItem(`json:${JSON.stringify(path)}`, path[path.length - 1] || "正文",
+            typeof item === "string" ? (item || "（空字符串）") : JSON.stringify(item), null,
+            item === null ? "null" : Array.isArray(item) ? "array" : typeof item, pathText));
+        }
+      };
+      visit(value);
+      return rows.concat(fields);
+    } catch (_e) { /* Not verified JSON: preserve the complete original below. */ }
+  }
+  const runs = extractPrintableRuns(bytes, 4, 24, { fullText: true });
+  for (const [index, run] of runs.entries()) {
+    rows.push(packetFieldItem(`text[${index}]`, `可读内容 ${index + 1}`, run.text,
+      bytes.slice(Number(run.off), Number(run.off) + String(run.text || "").length), "候选文本", `文本顺序 ${index + 1}`));
+  }
+  rows.push(packetFieldItem("content", "完整内容（结构未解析）", gcloudHexBytes(bytes, bytes.length), bytes, "原始字节"));
+  return rows;
+}
+
+function packetBasicCompare(beforeBytes, afterBytes, canCompare, reason = "") {
+  let left = packetBasicFieldRows(beforeBytes), right = packetBasicFieldRows(afterBytes);
+  const hasJson = (rows) => rows.some((row) => row.key.startsWith("json:"));
+  if (canCompare && hasJson(left) !== hasJson(right)) {
+    left = packetBasicFieldRows(beforeBytes, true);
+    right = packetBasicFieldRows(afterBytes, true);
+  }
+  return packetCompareFieldRows(left, right, canCompare, reason);
+}
+
+function packetBeforePayloadForCompare(ev) {
+  const before = String(ev && ev.before_pay || "");
+  const current = String(ev && ev.pay || "");
+  if (!before || !current) return "";
+  const complete = (data, length) => !(Number(length) > 0) || b64ToBytes(data).length === Number(length);
+  return complete(before, ev.before_len) && complete(current, ev.len) ? before : "";
+}
+
+function packetChildFieldRows(child, byteValues, options = {}) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  if (!child || !bytes.length) return [];
+  const rows = [packetFieldItem("length", "记录长度", `${bytes.length} 字节`, null, "长度")];
+  const model = childHexStructure(child, bytes);
+  const covered = new Uint8Array(bytes.length);
+  const seen = new Map();
+  const labels = {
+    version: "记录版本", total: "声明总长", report: "报告编号", id: "记录标识",
+    headerId: "头部标识", flags: "标志 / 保留值", len: "总长度", innerLen: "内部长度",
+    innerType: "内部类型", selector: "选择字", innerField: "内部字段", bodyHeader: "正文计数",
+    probeEntry: "探测项", bodyWord: "正文槽位", timestamp: "时间字段",
+    cryptoFamily: "加密类型", cryptoSlot: "密钥槽位", crc: "校验值", cipherLen: "加密内容长度",
+    tlvType: "数据项类型", tlvLen: "数据项长度", tlvValue: "数据项内容",
+  };
+  for (const field of model.fields || []) {
+    if (options.opaqueBody && ["bodyHeader", "probeEntry", "bodyWord"].includes(field.kind)) continue;
+    const offset = Number(field.offset), length = Number(field.length);
+    if (!Number.isInteger(offset) || !Number.isInteger(length) || length <= 0 || offset < 0 || offset + length > bytes.length) continue;
+    const kind = String(field.kind || "field");
+    const occurrence = seen.get(kind) || 0;
+    seen.set(kind, occurrence + 1);
+    const raw = bytes.slice(offset, offset + length);
+    const candidateText = kind === "tlvValue" ? gcloudBytesToUtf8(raw) : "";
+    const value = candidateText && isGcloudVisibleString(candidateText) ? candidateText : gcloudHexBytes(raw, raw.length);
+    rows.push(packetFieldItem(`${kind}[${occurrence}]`, `${labels[kind] || "已定位字段"}${occurrence ? ` ${occurrence + 1}` : ""}`,
+      value, raw, "已定位原值", `+${formatHexValue(offset)} · ${length} 字节`));
+    covered.fill(1, offset, offset + length);
+  }
+  const runs = extractPrintableRuns(bytes, 4, 24, { fullText: true });
+  for (const [index, run] of runs.entries()) {
+    const start = Number(run.off), end = start + String(run.text || "").length;
+    // Already-rendered text fields must not be repeated as another preview.
+    if (covered.slice(start, end).every((value) => value === 1)) continue;
+    rows.push(packetFieldItem(`text[${index}]`, `可读内容 ${index + 1}`, run.text, bytes.slice(start, end), "候选文本", `文本顺序 ${index + 1}`));
+    covered.fill(1, start, end);
+  }
+  const remainder = [];
+  for (let index = 0; index < bytes.length; index += 1) if (!covered[index]) remainder.push(bytes[index]);
+  if (remainder.length) rows.push(packetFieldItem("opaque", "其余内容（结构未解析）", gcloudHexBytes(remainder, remainder.length), remainder, "原始字节"));
+  return rows;
+}
+
+function packetChildComplete(child, bytes) {
+  if (!child) return true; // A genuinely absent child may be added/removed.
+  if (child.truncated || !Array.isArray(bytes) || !bytes.length) return false;
+  if (bytes.length >= 6 && readBe32(bytes, 0) === 1) {
+    const declared = readBe16(bytes, 4);
+    if (declared > bytes.length + 4) return false;
+  }
+  return true;
+}
+
+function packetFold(title, content) {
+  const details = document.createElement("details");
+  details.className = "gcloud-technical-details";
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  details.appendChild(summary);
+  if (content) details.appendChild(content);
+  return details;
+}
+
+function buildPacketBasicPanel(ev, summaryText = "", embedded = false) {
+  const afterText = String(ev && (ev.pay || ev.full_pay) || "");
+  const beforeText = String(ev && ev.before_pay || "");
+  const afterBytes = b64ToBytes(afterText), beforeBytes = b64ToBytes(beforeText);
+  if (!afterBytes.length) return null;
+  const isComplete = (bytes, declared) => !(Number(declared) > 0) || bytes.length === Number(declared);
+  const canCompare = Boolean(ev && ev.pay) && beforeBytes.length > 0 && isComplete(beforeBytes, ev.before_len)
+    && isComplete(afterBytes, ev.pay ? ev.len : ev.full_len);
+  const panel = document.createElement("section");
+  panel.className = "gcloud-brief packet-basic-panel";
+  const title = document.createElement("strong");
+  const isJson = /^\s*[\[{]/.test(gcloudBytesToUtf8(afterBytes));
+  title.textContent = `${Number(ev && ev.dir) === 0 ? "请求" : "响应"} · ${isJson ? "结构化文本" : "报文内容"}`;
+  panel.appendChild(title);
+  const compare = packetBasicCompare(beforeBytes, afterBytes, canCompare,
+    canCompare ? "已解析内容按路径对应；候选文本按出现顺序对应，不视为已确认协议字段"
+      : beforeText ? "记录不完整，仅展示当前内容，不推测新增或删除" : "未记录修改前内容，仅展示当前内容");
+  if (embedded) return buildPacketFieldTable(compare, ev);
+  panel.appendChild(buildPacketFieldTable(compare, ev));
+  return panel;
+}
+
+function buildPacketFieldTable(compare, ev = null) {
+  if (!compare.rows.length) return null;
+  const section = document.createElement("section");
+  section.className = "gcloud-field-compare packet-field-compare";
+  const changes = compare.rows.filter((row) => !["same", "current"].includes(row.status));
+  const savedMode = ev && ev.__tcpvFieldCompareMode;
+  section.dataset.mode = ["changes", "all"].includes(savedMode) ? savedMode
+    : compare.canCompare && changes.length ? "changes" : "all";
+  const toolbar = document.createElement("div");
+  toolbar.className = "gcloud-compare-toolbar";
+  const title = document.createElement("strong");
+  title.textContent = compare.canCompare ? "字段对照" : "当前字段";
+  toolbar.appendChild(title);
+  const count = document.createElement("span");
+  count.className = "gcloud-compare-count";
+  count.textContent = compare.canCompare ? `${changes.length} 项变化 / ${compare.rows.length} 项字段` : `${compare.rows.length} 项字段`;
+  toolbar.appendChild(count);
+  if (compare.canCompare) {
+    const controls = document.createElement("div");
+    controls.className = "gcloud-compare-controls";
+    for (const [mode, text] of [["changes", `只看变化 ${changes.length}`], ["all", "全部字段"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = text;
+      button.setAttribute("aria-pressed", String(section.dataset.mode === mode));
+      button.addEventListener("click", () => {
+        section.dataset.mode = mode;
+        if (ev && typeof ev === "object") ev.__tcpvFieldCompareMode = mode;
+        for (const other of controls.querySelectorAll("button")) other.setAttribute("aria-pressed", String(other === button));
+      });
+      controls.appendChild(button);
+    }
+    toolbar.appendChild(controls);
+  }
+  section.appendChild(toolbar);
+  const note = document.createElement("div");
+  note.className = "gcloud-compare-note";
+  note.textContent = compare.reason;
+  section.appendChild(note);
+  const wrap = document.createElement("div");
+  wrap.className = "gcloud-compare-table-wrap";
+  const table = document.createElement("table");
+  table.className = `gcloud-compare-table${compare.canCompare ? "" : " gcloud-compare-current"}`;
+  table.setAttribute("aria-label", compare.canCompare ? "修改前后字段对照" : "当前报文字段");
+  const thead = document.createElement("thead");
+  const header = document.createElement("tr");
+  for (const text of compare.canCompare ? ["字段", "修改前", "修改后", "状态"] : ["字段", "当前值"]) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = text;
+    header.appendChild(th);
+  }
+  thead.appendChild(header);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const row of compare.rows) {
+    const tr = document.createElement("tr");
+    tr.className = `gcloud-compare-row gcloud-compare-${row.status}`;
+    tr.dataset.fieldPath = row.key;
+    const field = document.createElement("th");
+    field.scope = "row";
+    const label = document.createElement("span");
+    label.textContent = row.label;
+    const path = document.createElement("small");
+    const item = row.before || row.after;
+    path.textContent = `${item.pathText} · ${item.type}${row.before && row.after && row.before.type !== row.after.type ? ` → ${row.after.type}` : ""}`;
+    field.appendChild(label);
+    field.appendChild(path);
+    tr.appendChild(field);
+    if (compare.canCompare) {
+      const before = document.createElement("td");
+      before.className = "gcloud-compare-before";
+      appendGcloudCompareValue(before, row.before);
+      tr.appendChild(before);
+    }
+    const after = document.createElement("td");
+    after.className = "gcloud-compare-after";
+    appendGcloudCompareValue(after, row.after);
+    tr.appendChild(after);
+    if (compare.canCompare) {
+      const status = document.createElement("td");
+      status.className = "gcloud-compare-state";
+      status.textContent = ({ same: "相同", changed: "已修改", added: "新增", removed: "删除", unmatched: "不可对应" })[row.status];
+      tr.appendChild(status);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  section.appendChild(wrap);
+  if (compare.canCompare && changes.length === 0) {
+    const same = document.createElement("div");
+    same.className = "gcloud-compare-nochanges";
+    same.textContent = "已解析字段一致";
+    section.appendChild(same);
+  }
+  return section;
+}
+
+function installGcloudCompareStyles() {
+  if (document.getElementById("tcpv-readable-compare-style")) return;
+  const style = document.createElement("style");
+  style.id = "tcpv-readable-compare-style";
+  style.textContent = `
+    .gcloud-brief { background: var(--panel); padding: 12px; gap: 10px; min-width: 0; }
+    .gcloud-head { align-items: center; }
+    .gcloud-title { font-size: 13px; white-space: normal; overflow-wrap: anywhere; }
+    .gcloud-overview { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+    .gcloud-overview strong { font-weight: 600; color: var(--text); }
+    .gcloud-field-compare { min-width: 0; }
+    .gcloud-compare-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 0 6px; }
+    .gcloud-compare-count, .gcloud-compare-note { color: var(--muted); font-size: 11px; }
+    .gcloud-compare-controls { margin-left: auto; display: flex; gap: 4px; }
+    .gcloud-compare-controls button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 5px; cursor: pointer; }
+    .gcloud-compare-controls button[aria-pressed=true] { color: var(--accent); background: var(--preview-bg); border-color: var(--accent); }
+    .gcloud-compare-note { margin-bottom: 8px; line-height: 1.5; }
+    .gcloud-compare-table-wrap { overflow: auto; max-height: 560px; border: 1px solid var(--line); border-radius: 6px; }
+    .gcloud-compare-table { border-collapse: separate; border-spacing: 0; width: 100%; table-layout: fixed; line-height: 1.6; }
+    .gcloud-compare-table th, .gcloud-compare-table td { vertical-align: top; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; white-space: pre-wrap; }
+    .gcloud-compare-table thead th { position: sticky; top: 0; z-index: 1; background: var(--dump-head-bg); color: var(--muted); font-size: 11px; }
+    .gcloud-compare-table th:first-child { width: 22%; }
+    .gcloud-compare-table thead th:last-child { width: 72px; }
+    .gcloud-compare-table tbody th { font-weight: 600; background: var(--dump-bg); }
+    .gcloud-compare-table small { display: block; margin-top: 3px; font-size: 10px; color: var(--muted); font-weight: 400; }
+    .gcloud-compare-table tr:last-child > * { border-bottom: 0; }
+    .gcloud-compare-table td + td { border-left: 1px solid var(--line); }
+    .gcloud-compare-state { white-space: nowrap; font-size: 11px; color: var(--muted); }
+    .gcloud-compare-changed .gcloud-compare-before, .gcloud-compare-removed .gcloud-compare-before { background: color-mix(in srgb, #ef4444 7%, var(--panel)); }
+    .gcloud-compare-changed .gcloud-compare-after, .gcloud-compare-added .gcloud-compare-after { background: color-mix(in srgb, #22c55e 8%, var(--panel)); }
+    .gcloud-compare-changed .gcloud-compare-state { color: var(--modified-accent); font-weight: 700; }
+    .gcloud-compare-added .gcloud-compare-state { color: #22c55e; }
+    .gcloud-compare-removed .gcloud-compare-state { color: #f87171; }
+    .gcloud-field-compare[data-mode=changes] .gcloud-compare-same { display: none; }
+    .gcloud-value-empty { color: var(--muted); }
+    .gcloud-compare-current th:first-child { width: 28%; }
+    .gcloud-compare-current thead th:last-child { width: auto; }
+    .gcloud-long-value summary { cursor: pointer; color: var(--text); }
+    .gcloud-long-value[open] summary { color: var(--muted); margin-bottom: 6px; }
+    .gcloud-long-value > div { max-height: 240px; overflow: auto; white-space: pre-wrap; }
+    .gcloud-compare-nochanges { color: var(--muted); padding: 8px 0 0; }
+    .gcloud-readable { padding: 4px 0; }
+    .gcloud-readable-list { display: block; }
+    .gcloud-readable-string { display: grid; grid-template-columns: minmax(120px, 22%) minmax(0, 1fr); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--text); padding: 7px 10px; gap: 12px; }
+    .gcloud-readable-string small { color: var(--muted); overflow-wrap: anywhere; }
+    .gcloud-readable-string span { overflow-wrap: anywhere; }
+    .gcloud-technical-details, .gcloud-tree-details { min-width: 0; border-top: 1px solid var(--line); padding-top: 8px; }
+    .gcloud-technical-details > summary, .gcloud-tree-details > summary { color: var(--muted); cursor: pointer; font-weight: 500; }
+    .gcloud-tree-row { grid-template-columns: minmax(120px, 22%) 70px minmax(0, 1fr); }
+    .gcloud-tree-raw { display: none; }
+    .gcloud-technical-details .dump-grid { margin-top: 8px; }
+    .gcloud-technical-details .dump-grid.has-raw-compare { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .gcloud-technical-details .dump-label { font-size: 11px; }
+    .packet-child-table { padding: 10px; min-width: 0; }
+    .packet-child-table > .child-pair-title { border-bottom: 0; margin-bottom: 8px; }
+    .packet-child-table .gcloud-compare-table-wrap { max-height: 460px; }
+    .packet-child-table .child-preview-compare { margin-top: 8px; }
+    .gcloud-technical-details { margin-top: 6px; }
+    .event-readable-clean .child-compare-grid { grid-template-columns: minmax(0, 1fr); }
+    .event-readable-clean > .event-time-strip { display: none; }
+    @media (max-width: 760px) {
+      .gcloud-compare-table th, .gcloud-compare-table td { padding: 7px; }
+      .gcloud-compare-table { min-width: 580px; }
+      .gcloud-compare-current { min-width: 0; }
+      .gcloud-compare-controls { margin-left: 0; }
+      .gcloud-overview { gap: 6px 12px; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 function appendGcloudReadableStrings(panel, items) {
   const rows = Array.isArray(items) ? items : [];
   if (rows.length <= 0) return;
@@ -9350,15 +9821,19 @@ function appendGcloudReadableStrings(panel, items) {
   block.className = "gcloud-readable";
   const title = document.createElement("div");
   title.className = "gcloud-readable-title";
-  title.textContent = `明文字符串 ×${rows.length}`;
+  title.textContent = `可读内容 · ${rows.length} 项`;
   block.appendChild(title);
   const list = document.createElement("div");
   list.className = "gcloud-readable-list";
   for (const item of rows) {
     const row = document.createElement("div");
     row.className = "gcloud-readable-string";
-    row.textContent = String(item && item.text ? item.text : "");
-    if (item && item.path) row.title = String(item.path);
+    const path = document.createElement("small");
+    path.textContent = String(item && item.path || "文本");
+    const value = document.createElement("span");
+    value.textContent = String(item && item.text || "");
+    row.appendChild(path);
+    row.appendChild(value);
     list.appendChild(row);
   }
   block.appendChild(list);
@@ -9375,41 +9850,59 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
   head.className = "gcloud-head";
   const title = document.createElement("div");
   title.className = "gcloud-title";
-  title.textContent = info.title || "GCloud/TGCP";
+  title.textContent = info.proto && (info.proto.commandName || info.proto.commandDisplay)
+    ? gcloudCommandDisplay(info.proto.commandName || info.proto.commandDisplay) : (info.title || "GCloud/TGCP");
   head.appendChild(title);
-  const chips = document.createElement("div");
-  chips.className = "gcloud-chip-list";
-  const visibleChips = (Array.isArray(info.chips) ? info.chips : [])
-    .filter((text) => !/^(?:seq|ctrl|msg_id|msg_seq|call_id|basis|confidence|type|ctx|method|wire key_len)=/i.test(String(text || "")))
-    .slice(0, 5);
-  for (const text of visibleChips) {
-    const chip = document.createElement("span");
-    chip.className = `gcloud-chip${info.kind === "control" ? " gcloud-chip-control" : ""}${info.kind === "proto" ? " gcloud-chip-proto" : ""}${info.kind === "ace" || info.kind === "tss" ? " gcloud-chip-ace" : ""}${info.kind === "kick" ? " gcloud-chip-kick" : ""}`;
-    chip.textContent = text;
-    chips.appendChild(chip);
-  }
-  head.appendChild(chips);
   panel.appendChild(head);
 
   const readableStrings = gcloudReadableStringsForEvent(ev, info.proto);
-
-  const grid = document.createElement("div");
-  grid.className = "gcloud-kv-grid";
-  for (const row of gcloudProtocolDisplayRows(info, ev, summaryText, readableStrings)) {
-    appendGcloudKv(grid, row.label, row.value);
+  const overview = document.createElement("div");
+  overview.className = "gcloud-overview";
+  const length = b64ToBytes(String(ev && ev.pay || "")).length || Number(ev && ev.len || 0);
+  const beforeLength = ev && ev.before_pay ? b64ToBytes(ev.before_pay).length : null;
+  const bits = [
+    beforeLength !== null ? `记录长度 ${beforeLength} → ${length} 字节` : `记录长度 ${length} 字节`,
+    info.proto && info.proto.compression ? "已解压" : "",
+    normalizeGcloudDirection(ev, info.meta) === "outbound" ? "客户端 → 服务器"
+      : normalizeGcloudDirection(ev, info.meta) === "inbound" ? "服务器 → 客户端" : "",
+  ].filter(Boolean);
+  for (const text of bits) {
+    const part = document.createElement("span");
+    part.textContent = text;
+    overview.appendChild(part);
   }
-  if (grid.childElementCount > 0) panel.appendChild(grid);
+  if (overview.childElementCount) panel.appendChild(overview);
 
-  appendGcloudReadableStrings(panel, readableStrings);
+  const comparison = buildGcloudFieldCompare(ev, info, summaryText);
+  if (comparison && (info.kind === "ace" || info.kind === "tss")) {
+    const outer = document.createElement("details");
+    outer.className = "gcloud-technical-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "外层字段对照";
+    outer.appendChild(summary);
+    outer.appendChild(comparison);
+    panel.appendChild(outer);
+  } else if (comparison) panel.appendChild(comparison);
+  else {
+    const basic = buildPacketBasicPanel(ev, summaryText, true);
+    if (basic) panel.appendChild(basic);
+    else appendGcloudReadableStrings(panel, readableStrings);
+  }
+
+  // Non-field semantic notices (for example a server kick) remain available,
+  // without repeating device/network values already present in the table.
+  const contextualRows = (Array.isArray(info.rows) ? info.rows : []).filter((row) =>
+    ["控制关系", "服务器提示", "处罚状态", "业务语义", "解析边界"].includes(row.label));
+  appendGcloudEvidenceDetails(panel, contextualRows);
 
   const protoTree = info.proto ? buildGcloudProtoTree(info.proto, info.protoBytes || info.bytes) : null;
   if (protoTree) {
     const details = document.createElement("details");
     details.className = "gcloud-tree-details";
-    details.open = info.kind !== "ace" && info.kind !== "tss" && info.kind !== "kick";
+    details.open = false;
     const summary = document.createElement("summary");
     const count = info.proto && Array.isArray(info.proto.flat) ? info.proto.flat.length : info.nodeRows.length;
-    summary.textContent = `${info.kind === "ace" || info.kind === "tss" ? "Protobuf 外层" : "Layout / fields / value / hex"} ×${count}`;
+    summary.textContent = `原始字段结构 · ${count} 项`;
     details.appendChild(summary);
     details.appendChild(protoTree);
     panel.appendChild(details);
@@ -15125,121 +15618,39 @@ function makeChildCard(beforeChildren, afterChildren, beforeBytesAll, afterBytes
   const afterChild = afterChildren[index] || null;
   const beforeBytes = childBytesFromParsed(beforeBytesAll, beforeChild);
   const afterBytes = childBytesFromParsed(afterBytesAll, afterChild);
-  const originalOnly = Boolean(options && options.originalOnly && !beforeChild && afterChild);
-  const currentOnly = Boolean(options && options.currentOnly && !beforeChild && afterChild);
-  const comparedResult = childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes);
-  const result = originalOnly || currentOnly
-    ? {
-      label: originalOnly ? "原包观察" : "当前结构",
-      kind: "same",
-      diff: null,
-      originalOnly,
-      currentOnly,
-    }
-    : comparedResult;
-  const mappedAction = actionMap instanceof Map ? actionMap.get(index) : null;
-  let action = mappedAction || (originalOnly || currentOnly ? null : inferChildActionFromSummary(summaryKv, result, beforeChild, afterChild));
-  if (isRequestFlagPatchDiff(beforeChild, afterChild, beforeBytes, afterBytes, result, summaryKv)) {
-    action = requestFlagPatchAction(beforeChild, afterChild);
-  }
+  const currentOnly = Boolean(options.originalOnly || options.currentOnly || !beforeBytesAll.length
+    || !packetChildComplete(beforeChild, beforeBytes) || !packetChildComplete(afterChild, afterBytes));
+  const result = childResultInfo(beforeChild, afterChild, beforeBytes, afterBytes);
+  const action = actionMap instanceof Map ? actionMap.get(index) : null;
   const nodeLabel = childNodeName(afterChild || beforeChild || { index });
-  const ruleText = childRuleAnnotations(beforeChild, afterChild, action);
-  const ruleCompact = compactRuleText(ruleText);
-  const observation = childActionObservation(action, result);
-  const kind = childActionKind(action && action.action, action && action.reason) || "observe";
+  const ruleCompact = compactRuleText(childRuleAnnotations(beforeChild, afterChild, action));
   const risk = childReplacementRisk(beforeChild, afterChild, beforeBytes, afterBytes, action, result);
-  const hasExplicitAction = Boolean(action && (action.action || action.reason || action.source || action.report));
-  const sameNoAction = result.kind === "same" && !hasExplicitAction;
-
   const card = document.createElement("div");
-  card.className = `child-pair-card child-card-result-${result.kind}`;
-  if (result.kind === "same" && !(options && options.forceSideBySideSame)) {
-    card.classList.add("child-card-same-merged");
-  }
-
+  card.className = `child-pair-card packet-child-table child-card-result-${result.kind}`;
   const title = document.createElement("div");
   title.className = "child-pair-title";
-  const name = document.createElement("span");
-  name.className = "child-rail-name";
-  name.textContent = nodeLabel;
-  const label = document.createElement("span");
-  label.className = "child-rail-label";
-  label.textContent = "预览";
-  name.appendChild(label);
-  const badges = document.createElement("span");
-  badges.className = "child-title-badges";
-  const status = document.createElement("span");
-  status.className = `child-status child-status-${result.kind}`;
-  status.textContent = originalOnly ? "原包观察" : (currentOnly ? "当前结构" : (sameNoAction ? "未修改" : result.label));
-  badges.appendChild(status);
-  const semanticChild = afterChild || beforeChild;
-  if (semanticChild && semanticChild.semanticLabel) {
-    const semanticBadge = document.createElement("span");
-    const semanticTier = String(semanticChild.semanticTier || "unknown").toLowerCase();
-    semanticBadge.className = `child-semantic-tier child-semantic-tier-${semanticTier}`;
-    semanticBadge.textContent = semanticTierLabel(semanticTier);
-    semanticBadge.title = [
-      semanticChild.semanticLabel,
-      semanticChild.semanticCategory,
-      ...(Array.isArray(semanticChild.semanticEvidence) ? semanticChild.semanticEvidence : []),
-    ].filter(Boolean).join(" | ");
-    badges.appendChild(semanticBadge);
-  }
-  if (!sameNoAction) {
-    const actionBadge = document.createElement("span");
-    actionBadge.className = `child-rail-action child-decision-${kind}`;
-    actionBadge.textContent = childActionBadgeText(action, result);
-    badges.appendChild(actionBadge);
-  }
-  if (risk) {
-    const riskBadge = document.createElement("span");
-    riskBadge.className = "child-risk-badge";
-    riskBadge.textContent = "变化较大";
-    riskBadge.title = risk.text;
-    badges.appendChild(riskBadge);
-  }
+  const name = document.createElement("strong");
+  const child = afterChild || beforeChild;
+  name.textContent = `${nodeLabel}${child && child.semanticLabel ? ` · ${child.semanticLabel}` : ""}`;
   title.appendChild(name);
-  title.appendChild(badges);
-
-  if (!sameNoAction) {
-    const copy = document.createElement("div");
-    copy.className = "child-rail-copy";
-    copy.title = [childDecisionText(kind, result), risk && risk.text, ruleCompact, observation].filter(Boolean).join("；");
-    copy.textContent = risk ? `${childDecisionText(kind, result)}；${risk.text}` : childDecisionText(kind, result);
-    title.appendChild(copy);
-  }
-
-  const meta = document.createElement("div");
-  meta.className = "child-rail-meta-grid";
-  if (originalOnly || currentOnly) {
-    appendChildRailMeta(meta, childUiShortTerm("idx"), childIndexText(afterChild));
-    appendChildRailMeta(meta, childUiShortTerm("report"), childReportText(afterChild));
-    appendChildRailMeta(meta, childUiShortTerm("type"), childRichTypeText(afterChild));
-    appendChildRailMeta(meta, childUiShortTerm("ID"), childIdText(afterChild));
-    appendChildRailMeta(meta, childUiShortTerm("len"), afterChild && Number.isFinite(afterChild.len) ? String(afterChild.len) : "-");
-  } else {
-    appendChildRailMeta(meta, childUiShortTerm("idx"), pairText("", childIndexText(beforeChild), childIndexText(afterChild)).trim());
-    appendChildRailMeta(meta, childUiShortTerm("report"), pairText("", childReportText(beforeChild), childReportText(afterChild)).trim());
-    appendChildRailMeta(meta, childUiShortTerm("type"), pairText("", childRichTypeText(beforeChild), childRichTypeText(afterChild)).trim());
-    appendChildRailMeta(meta, childUiShortTerm("ID"), pairText("", childIdText(beforeChild), childIdText(afterChild)).trim());
-    appendChildRailMeta(
-      meta,
-      childUiShortTerm("len"),
-      pairText(
-        "",
-        beforeChild && Number.isFinite(beforeChild.len) ? String(beforeChild.len) : "-",
-        afterChild && Number.isFinite(afterChild.len) ? String(afterChild.len) : "-",
-      ).trim(),
-    );
-    appendChildRailMeta(meta, childUiShortTerm("diff"), childDiffText(result && result.diff));
-  }
-  if (meta.childNodes.length) title.appendChild(meta);
-
   card.appendChild(title);
-  card.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk, timestampHintMap, {
-    forceSideBySideSame: Boolean(options && options.forceSideBySideSame),
-  }));
-
+  const bodySchema = (item) => `${item && item.bodyLayout && item.bodyLayout.kind || ""}:${item && item.typedLayout && item.typedLayout.innerType || ""}`;
+  const fieldOptions = { opaqueBody: Boolean(beforeChild && afterChild && bodySchema(beforeChild) !== bodySchema(afterChild)) };
+  const compare = packetCompareFieldRows(packetChildFieldRows(beforeChild, beforeBytes, fieldOptions), packetChildFieldRows(afterChild, afterBytes, fieldOptions), !currentOnly,
+    currentOnly ? "未记录完整修改前内容，仅展示当前记录"
+      : "按已定位字段对应；可读文本仅为候选，其余字节保留完整原值");
+  const table = buildPacketFieldTable(compare, child);
+  if (table) card.appendChild(table);
+  const raw = packetFold("完整记录 / 深层解析");
+  let rendered = false;
+  raw.addEventListener("toggle", () => {
+    if (!raw.open || rendered) return;
+    rendered = true;
+    raw.appendChild(makeChildPreviewRow(beforeChild, afterChild, nodeLabel, beforeBytes, afterBytes, result, action, ruleCompact, risk, timestampHintMap, {
+      forceSideBySideSame: Boolean(options && options.forceSideBySideSame),
+    }));
+  });
+  card.appendChild(raw);
   return card;
 }
 
@@ -15433,7 +15844,7 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
     ? (hasChildRecords ? "子节点结构观察（原包）" : "叶子节点结构观察（原包）")
     : currentOnly
       ? (hasChildRecords ? "当前子节点结构（before 无可解析 child）" : "当前叶子结构（before 无可解析节点）")
-      : (hasChildRecords ? "子节点替换观察" : "叶子节点替换观察"));
+      : (hasChildRecords ? "子记录字段对照" : "记录字段对照"));
   const meta = document.createElement("small");
   const countBits = [];
   const addCount = (label, value, always = false) => {
@@ -15450,19 +15861,13 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
   addCount("保留", counts.kept);
   addCount("未动", counts.noop);
   addCount("清理", counts.clean);
-  meta.textContent = String(panelOptions && panelOptions.meta || "").trim() || (originalOnly
-    ? `当前事件没有 before_pay，按原包/当前结构展示；显示 ${visible}/${total}`
-    : currentOnly
-      ? `before_pay 存在但未解析出可对应 child；不误标新增/删除，当前结构单栏展示；显示 ${visible}/${total}`
-      : (countBits.length > 0
-        ? `${countBits.join("，")}；显示 ${visible}/${total}`
-        : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`));
+  meta.textContent = `显示 ${visible} / ${total} 条记录${originalOnly || currentOnly ? " · 当前内容" : " · 前后对照"}`;
   head.appendChild(title);
   head.appendChild(meta);
   panel.appendChild(head);
 
   const parentStrip = makeParentStructureStrip(beforeParsed.parent, afterParsed.parent, { originalOnly, currentOnly });
-  if (parentStrip) panel.appendChild(parentStrip);
+  if (parentStrip) panel.appendChild(packetFold("父容器结构", parentStrip));
 
   const grid = document.createElement("div");
   grid.className = "child-compare-grid";
@@ -15572,23 +15977,11 @@ function gcloudSummaryHasSentWireChange(summaryText) {
 
 function makeGcloudAceCompareStatus(ev, summaryText, beforePayload, payload, beforeVariant, statusOptions = {}) {
   const beforePay = String(ev && ev.before_pay ? ev.before_pay : "");
-  const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
-  const rawPay = String(ev && ev.raw_pay ? ev.raw_pay : "");
-  const summary = String(summaryText || "");
   const beforeBytes = Array.isArray(beforePayload) ? beforePayload : [];
   const afterBytes = Array.isArray(payload) ? payload : [];
   const syntheticAfter = Boolean(statusOptions && statusOptions.syntheticAfter);
   const beforeOk = beforeBytes.length > 0 && (beforeVariant || syntheticAfter);
-  const afterOk = afterBytes.length > 0;
-  const before0a92 = beforeOk ? gcloudFindByteSequence(beforeBytes, [0x01, 0x00, 0x00, 0x0a, 0x92, 0x00, 0x00]) : -1;
-  const after0a92 = afterOk ? gcloudFindByteSequence(afterBytes, [0x01, 0x00, 0x00, 0x0a, 0x92, 0x00, 0x00]) : -1;
-  const after270f = afterOk ? gcloudFindByteSequence(afterBytes, [0x01, 0x00, 0x00, 0x27, 0x0f, 0x00, 0x00]) : -1;
   const diff = beforeOk ? countChangedBytes(beforeBytes, afterBytes) : null;
-  const backendRebuilt = !syntheticAfter && gcloudSummaryHasBackendRebuild(summary);
-  const declaredModified = backendRebuilt || /payload_modified=1/i.test(summary);
-  const fullBytes = fullPay ? b64ToBytes(fullPay) : [];
-  const rawBytes = rawPay ? b64ToBytes(rawPay) : [];
-  const wireDiff = fullBytes.length > 0 && rawBytes.length > 0 ? countChangedBytes(fullBytes, rawBytes) : null;
 
   const status = document.createElement("div");
   status.className = "ace-compare-status";
@@ -15597,49 +15990,24 @@ function makeGcloudAceCompareStatus(ev, summaryText, beforePayload, payload, bef
 
   if (syntheticAfter) {
     status.classList.add("ace-compare-status-missing");
-    label.textContent = "未发送证据";
-    const markerText = before0a92 >= 0 && after270f >= 0
-      ? `marker ${gcloudAceMarkerOffsetText(before0a92)} 0a92 -> ${gcloudAceMarkerOffsetText(after270f)} 270f`
-      : "按 tersafe 结构 marker 预览替换";
-    text.textContent = `算法预览已禁用，不展示模拟 after；只有 before_pay/pay/raw_pay 后端证据齐全时才显示修改前/修改后。${markerText} 仅作为未发送参考。`;
+    label.textContent = "仅预览";
+    text.textContent = "没有实际发送记录，不作为修改结果。";
   } else if (!beforePay) {
     status.classList.add("ace-compare-status-missing");
-    label.textContent = "未发送证据";
-    text.textContent = after0a92 >= 0
-      ? `当前事件没有 before_pay/raw_pay，当前 child 仍含 0a92${gcloudAceMarkerOffsetText(after0a92)}；只显示已捕获原包，不展示前端模拟 after。真实命中后 summary 必须出现 payload_modified=1 / wire_rebuilt=1 / raw_pay=raw_after_4013。`
-      : "当前事件没有 before_pay/raw_pay，只能按当前解密结构观察；真实命中后才显示修改前/修改后双列。";
+    label.textContent = "当前内容";
+    text.textContent = "未记录修改前内容，不推测前后差异。";
   } else if (!beforeOk) {
     status.classList.add("ace-compare-status-unparsed");
-    label.textContent = "before 无法解析";
-    text.textContent = "事件带有 before_pay，但前端没能解析出同 command 的 ACE carrier；先按当前结构显示，避免误标新增/删除。";
-  } else if (diff && Number(diff.changed || 0) > 0) {
+    label.textContent = "无法对照";
+    text.textContent = "修改前载荷未解析成功，仅展示当前结构。";
+  } else if (diff && (Number(diff.changed || 0) > 0 || Number(diff.lenDelta || 0) !== 0)) {
     status.classList.add("ace-compare-status-changed");
-    label.textContent = backendRebuilt ? "后端确认 rebuild/send" : (declaredModified || after270f >= 0 ? "已形成修改对比" : "已形成差异对比");
-    const markerText = before0a92 >= 0 && after270f >= 0
-      ? `；marker ${gcloudAceMarkerOffsetText(before0a92)} 0a92 -> ${gcloudAceMarkerOffsetText(after270f)} 270f`
-      : after0a92 >= 0
-        ? `；修改后仍含 0a92${gcloudAceMarkerOffsetText(after0a92)}`
-        : "";
-    const wireText = wireDiff
-      ? `；完整4013 full_pay(raw before) -> raw_pay(raw after/sent) 变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? ` lenΔ=${wireDiff.lenDelta}` : ""}`
-      : rawPay
-        ? "；有 raw_pay 转发后完整包"
-        : backendRebuilt
-          ? "；旧事件未展开 raw_pay，需刷新/重新选中拉取完整 payload"
-          : "";
-    const proofText = /raw_pay_is_sent_wire=1|tcpview_after_source=raw_pay_sent_wire/i.test(summary)
-      ? "；证据 raw_pay_is_sent_wire=1，after 来自后端 sent wire"
-      : "";
-    const fieldText = backendRebuilt
-      ? `；before_pay=原始解密，pay=修改后解密，raw_pay=重建后转发包${proofText}`
-      : "";
-    text.textContent = `before ${beforeBytes.length}B / after ${afterBytes.length}B，变化 ${diff.changed}/${diff.commonLen}${markerText}${fieldText}${wireText}`;
+    label.textContent = "内容已变更";
+    text.textContent = `修改前 ${beforeBytes.length} 字节 · 修改后 ${afterBytes.length} 字节`;
   } else {
     status.classList.add("ace-compare-status-same");
-    label.textContent = "before/after 一致";
-    text.textContent = after0a92 >= 0
-      ? `事件带有 before_pay，但修改前后字节一致；当前仍含 0a92${gcloudAceMarkerOffsetText(after0a92)}，说明这条没有触发替换。`
-      : "事件带有 before_pay，修改前后解析一致；仍按双列展示便于确认。";
+    label.textContent = "内容相同";
+    text.textContent = "已记录的前后载荷一致。";
   }
 
   status.appendChild(label);
@@ -15691,9 +16059,12 @@ function analyzeGcloudBeforeVariant(ev, summaryText) {
   if (!beforePay) return null;
   const beforeBytes = b64ToBytes(beforePay);
   if (beforeBytes.length <= 0) return null;
+  const declaredBeforeLength = Number(ev && ev.before_len);
   const variant = {
     ...ev,
-    len: beforeBytes.length,
+    // A valid-looking prefix is still incomplete when the producer declared
+    // more bytes. Never turn a truncated before into invented added fields.
+    len: declaredBeforeLength > 0 ? declaredBeforeLength : beforeBytes.length,
     pay: beforePay,
     pfx: "",
     before_pfx: "",
@@ -16861,11 +17232,11 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
     chip.textContent = text;
     lineage.appendChild(chip);
   });
-  panel.insertBefore(lineage, panel.children[1] || null);
+  panel.insertBefore(packetFold("解析过程", lineage), panel.children[1] || null);
   const compareStatus = makeGcloudAceCompareStatus(ev, summaryText, beforePayload, displayPayload, beforeVariant, {
     syntheticAfter,
   });
-  panel.insertBefore(compareStatus, panel.children[2] || null);
+  lineage.appendChild(compareStatus);
 
   const stack = document.createElement("div");
   stack.className = "gcloud-security-deep-stack";
@@ -16914,7 +17285,7 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
     const treeWrap = document.createElement("div");
     treeWrap.className = "gcloud-ace-recursive-tree-wrap";
     renderTssRecursiveTree(decodeTree, treeWrap);
-    stack.appendChild(treeWrap);
+    stack.appendChild(packetFold("递归解码详情", treeWrap));
   }
   return stack;
 }
@@ -17633,6 +18004,7 @@ function buildEventReadableSummary(ev, summaryText) {
 }
 
 function buildEventBody(ev, hideAscii, eventId = "") {
+  installGcloudCompareStyles();
   const body = document.createElement("div");
   body.className = "body";
 
@@ -17640,7 +18012,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const isGcloudEvent = isGcloud65010Summary(summaryText, ev);
   const isWssJsonEvent = isWssJsonSummary(summaryText, ev);
-  body.appendChild(buildEventReadableSummary(ev, summaryText));
+  const readableDetails = packetFold("事件信息 / 调试", buildEventReadableSummary(ev, summaryText));
   const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
   if (gcloudPanel) {
     body.appendChild(gcloudPanel);
@@ -17658,11 +18030,14 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     isGcloudEvent && !gcloudSecurityDeepPanel
   ) ? buildGcloudStandaloneTssRecursivePanel(ev, summaryText) : null;
   if (gcloudStandaloneTssRecursivePanel) {
-    body.appendChild(gcloudStandaloneTssRecursivePanel);
+    body.appendChild(packetFold("递归解码详情", gcloudStandaloneTssRecursivePanel));
   }
   const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
-  if (wssJsonPanel) {
-    body.appendChild(wssJsonPanel);
+  if (wssJsonPanel) body.appendChild(packetFold("资源与校验详情", wssJsonPanel));
+  const hasTssStructure = !opaqueUndecrypted && Boolean(detectTssReport(b64ToBytes(String(ev && ev.pay || ""))));
+  if ((!isGcloudEvent || !gcloudPanel) && !hasTssStructure) {
+    const basicPanel = buildPacketBasicPanel(ev, summaryText);
+    if (basicPanel) body.appendChild(basicPanel);
   }
 
   const fullPay = String(ev && ev.full_pay ? ev.full_pay : "");
@@ -17693,27 +18068,6 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
 
-  if (isRequest && gcloudWireCompare) {
-    const beforeWireBytes = b64ToBytes(fullPay);
-    const afterWireBytes = b64ToBytes(rawAfterPay);
-    const wireDiff = countChangedBytes(beforeWireBytes, afterWireBytes);
-    const changedOffsets = Array.from(rawWireChangedOffsets || []).sort((a, b) => a - b);
-    const changedPreview = changedOffsets.slice(0, 8).map((offset) => {
-      const beforeByte = offset < beforeWireBytes.length ? childHexByteText(beforeWireBytes[offset]) : "--";
-      const afterByte = offset < afterWireBytes.length ? childHexByteText(afterWireBytes[offset]) : "--";
-      return `+${formatHexValue(offset)} ${beforeByte}->${afterByte}`;
-    }).join("，");
-    const proof = document.createElement("div");
-    proof.className = "ace-compare-status ace-compare-status-changed";
-    const proofLabel = document.createElement("strong");
-    proofLabel.textContent = "实际修改并发送";
-    const proofText = document.createElement("span");
-    const businessDiff = eventModificationDiffText(ev);
-    proofText.textContent = `${businessDiff.detail ? `${businessDiff.detail}；` : ""}收到 full_pay -> 实际发送 raw_pay：变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? `，lenΔ=${wireDiff.lenDelta}` : ""}${changedPreview ? `；${changedPreview}` : ""}`;
-    proof.appendChild(proofLabel);
-    proof.appendChild(proofText);
-    body.appendChild(proof);
-  }
 
 	  if (isDecodedRequest && !isGcloudEvent) {
 	    const timeStrip = buildEventTimestampStrip(summaryText, beforePay, decodedPay);
@@ -17724,7 +18078,16 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
   if (isDecodedRequest) dumpGrid.classList.add("dump-grid-decrypted");
   if (showRawCompare) dumpGrid.classList.add("has-raw-compare");
-  body.appendChild(dumpGrid);
+  {
+    body.classList.add("event-readable-clean");
+    const bytesDetails = document.createElement("details");
+    bytesDetails.className = "gcloud-technical-details";
+    const bytesSummary = document.createElement("summary");
+    bytesSummary.textContent = "原始字节 / 加密封包";
+    bytesDetails.appendChild(bytesSummary);
+    bytesDetails.appendChild(dumpGrid);
+    body.appendChild(bytesDetails);
+  }
   let semanticCompareAdded = false;
 
   const sourceShowsDecodedAsciiRows = (sourceKey) => (
@@ -18001,14 +18364,15 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     appendDumpSection("响应封包 [raw]", fullPay, ev.full_len, "dump-panel-single", "full");
   }
 
+  const comparableBeforePay = packetBeforePayloadForCompare(ev);
   if (!isGcloudEvent && isRequest && !isWssJsonEvent && (hasBeforeDump || hasDecodedDump)) {
-    const childCompare = buildChildComparePanel(beforePay, decodedPay, summaryText);
+    const childCompare = buildChildComparePanel(comparableBeforePay, decodedPay, summaryText);
     if (childCompare) {
       childCompare.classList.add("child-compare-inline");
       if (childCompare.classList.contains("child-compare-current-only")) {
         dumpGrid.classList.add("child-structure-current-only");
       }
-      dumpGrid.appendChild(childCompare);
+      body.insertBefore(childCompare, dumpGrid.parentNode);
       semanticCompareAdded = true;
     } else {
       const treeRow = buildTreeCompareRow(beforePay, decodedPay, summaryText);
@@ -18017,10 +18381,10 @@ function buildEventBody(ev, hideAscii, eventId = "") {
       }
     }
   } else if (!isGcloudEvent && !isRequest && !isWssJsonEvent && hasDecodedDump) {
-    const responseBeforePay = hasBeforeDump ? beforePay : "";
+    const responseBeforePay = comparableBeforePay;
     const childCompare = buildChildComparePanel(responseBeforePay, decodedPay, summaryText);
     if (childCompare) {
-      body.appendChild(childCompare);
+      body.insertBefore(childCompare, dumpGrid.parentNode);
       semanticCompareAdded = true;
     } else {
       const treeRow = buildTreeCompareRow(responseBeforePay, decodedPay, summaryText);
@@ -18031,19 +18395,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   }
 
   const analysisGrid = isGcloudEvent ? null : buildEventAnalysisGrid(ev);
-  if (analysisGrid && !isWssJsonEvent) {
-    if (semanticCompareAdded) {
-      const details = document.createElement("details");
-      details.className = "analysis-debug-details";
-      const summary = document.createElement("summary");
-      summary.textContent = "更多解析 / XOR / 字符串";
-      details.appendChild(summary);
-      details.appendChild(analysisGrid);
-      body.appendChild(details);
-    } else {
-      body.appendChild(analysisGrid);
-    }
-  }
+  if (analysisGrid && !isWssJsonEvent) body.appendChild(packetFold("更多解析 / 字符串", analysisGrid));
+  if (!isGcloudEvent) body.appendChild(readableDetails);
 
   return body;
 }
