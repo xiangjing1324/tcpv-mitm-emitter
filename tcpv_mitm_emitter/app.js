@@ -17308,7 +17308,8 @@ function buildGcloudAceOpaqueCarrierPanel(securityCommand, carrier, payload, ide
   return panel;
 }
 
-function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
+function buildGcloudAceCarrierDeepPanel(ev, summaryText = "", displayOptions = {}) {
+  const compact = displayOptions.compact === true;
   const info = analyzeGcloudEvent(ev, summaryText);
   const securityCommand = gcloudSecurityCommandFromInfo(info);
   if (!securityCommand || !securityCommand.carrier) return null;
@@ -17353,7 +17354,9 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
       forceCurrentOnly: !compareRoot,
       semanticTierOverride: carrier.mode === "binary_carrier" ? "observed" : "",
       title: panelTitle,
-      meta: compareRoot
+      meta: compact
+        ? (compareRoot ? `修改前 ${beforePayload.length}B · 修改后 ${displayPayload.length}B` : `${displayPayload.length}B`)
+        : compareRoot
         ? `${securityCommand.commandName} · ${carrier.mode || "carrier"} · ${syntheticAfter ? "local preview" : backendRebuilt ? "backend rebuilt" : "before"} ${beforePayload.length}B / after ${displayPayload.length}B · ${beforeReportText} -> ${formatHexValue(root.value, 8)} · ${beforePayloadChanged ? "diff" : "same"}`
         : `${securityCommand.commandName} · ${carrier.mode || "carrier"} · decoded ${displayPayload.length}B · ${reportText} · observe-only`,
       forceSideBySideSame: compareRoot,
@@ -17371,53 +17374,56 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
   if (!panel) return null;
 
   panel.classList.add("gcloud-ace-deep", "child-compare-inline");
-  const lineage = document.createElement("div");
-  lineage.className = "ace-deep-lineage";
-  const layers = [
-    "65010",
-    "0x4013 decrypted",
-    info.proto && info.proto.compression
-      ? `LZ4 解压 ${info.proto.compression.inputLength}->${info.proto.compression.outputLength}B`
-      : "protobuf",
-    gcloudAceCarrierTransformLabel(carrier),
-    root ? `TSS record ${displayPayload.length}B` : `decoded payload ${displayPayload.length}B`,
-    reportText,
-  ];
-  if (beforePayload.length > 0) {
-    layers.push(`${syntheticAfter ? "local preview " : backendRebuilt ? "backend rebuilt " : ""}before/after ${beforePayload.length}/${displayPayload.length}B`);
-  }
-  if (backendRebuilt) {
-    layers.push("raw_pay sent/rebuilt 4013");
-  }
-  if (encrypted) {
-    layers.push(`${encrypted.familyName} slot[${encrypted.slot}] decrypt`);
-    if (encrypted.supported) layers.push(encrypted.crcMatch ? "CRC32 ok" : "CRC32 failed");
-    if (encrypted.crcMatch && encrypted.innerRoot) {
-      layers.push(`inner ${formatHexValue(encrypted.innerRoot.value, 8)} ${encrypted.plain.length}B`);
+  if (!compact) {
+    const lineage = document.createElement("div");
+    lineage.className = "ace-deep-lineage";
+    const layers = [
+      "65010",
+      "0x4013 decrypted",
+      info.proto && info.proto.compression
+        ? `LZ4 解压 ${info.proto.compression.inputLength}->${info.proto.compression.outputLength}B`
+        : "protobuf",
+      gcloudAceCarrierTransformLabel(carrier),
+      root ? `TSS record ${displayPayload.length}B` : `decoded payload ${displayPayload.length}B`,
+      reportText,
+    ];
+    if (beforePayload.length > 0) {
+      layers.push(`${syntheticAfter ? "local preview " : backendRebuilt ? "backend rebuilt " : ""}before/after ${beforePayload.length}/${displayPayload.length}B`);
     }
-  }
-  layers.forEach((text, index) => {
-    if (index > 0) {
-      const arrow = document.createElement("span");
-      arrow.className = "ace-deep-arrow";
-      arrow.textContent = ">";
-      lineage.appendChild(arrow);
+    if (backendRebuilt) {
+      layers.push("raw_pay sent/rebuilt 4013");
     }
-    const chip = document.createElement("span");
-    chip.className = "ace-deep-layer";
-    chip.textContent = text;
-    lineage.appendChild(chip);
-  });
-  panel.insertBefore(lineage, panel.children[1] || null);
-  const compareStatus = makeGcloudAceCompareStatus(ev, summaryText, beforePayload, displayPayload, beforeVariant, {
-    syntheticAfter,
-  });
-  panel.insertBefore(compareStatus, panel.children[2] || null);
+    if (encrypted) {
+      layers.push(`${encrypted.familyName} slot[${encrypted.slot}] decrypt`);
+      if (encrypted.supported) layers.push(encrypted.crcMatch ? "CRC32 ok" : "CRC32 failed");
+      if (encrypted.crcMatch && encrypted.innerRoot) {
+        layers.push(`inner ${formatHexValue(encrypted.innerRoot.value, 8)} ${encrypted.plain.length}B`);
+      }
+    }
+    layers.forEach((text, index) => {
+      if (index > 0) {
+        const arrow = document.createElement("span");
+        arrow.className = "ace-deep-arrow";
+        arrow.textContent = ">";
+        lineage.appendChild(arrow);
+      }
+      const chip = document.createElement("span");
+      chip.className = "ace-deep-layer";
+      chip.textContent = text;
+      lineage.appendChild(chip);
+    });
+    panel.insertBefore(lineage, panel.children[1] || null);
+    const compareStatus = makeGcloudAceCompareStatus(ev, summaryText, beforePayload, displayPayload, beforeVariant, {
+      syntheticAfter,
+    });
+    panel.insertBefore(compareStatus, panel.children[2] || null);
+  }
 
   const stack = document.createElement("div");
   stack.className = "gcloud-security-deep-stack";
   stack.appendChild(panel);
-  if (encrypted) {
+  // Successful decoding is already visible in the nodes. Keep failures visible.
+  if (encrypted && (!compact || !encrypted.supported || !encrypted.crcMatch)) {
     const status = document.createElement("div");
     status.className = `tss-crypto-status${encrypted.crcMatch ? " tss-crypto-status-ok" : " tss-crypto-status-error"}`;
     const expected = formatHexValue(encrypted.expectedCrc, 8);
@@ -17445,7 +17451,9 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "") {
       const innerPanel = buildChildComparePanel(beforePlainBase64, plainBase64, "", {
         forceCurrentOnly: !beforePlainBase64,
         title: gcloudSecurityThirdLayerTitle(securityCommand),
-        meta: beforePlainBase64
+        meta: compact
+          ? (beforePlainBase64 ? `修改前 ${beforePlain.length}B · 修改后 ${encrypted.plain.length}B` : `${encrypted.plain.length}B`)
+          : beforePlainBase64
           ? `${securityCommand.commandName} · ${encrypted.familyName} slot[${encrypted.slot}] · CRC32 verified · before ${beforePlain.length}B / after ${encrypted.plain.length}B · ${innerReport} · ${beforePlainChanged ? "diff" : "same"}`
           : `${securityCommand.commandName} · ${encrypted.familyName} · slot[${encrypted.slot}] · CRC32 verified · ${innerReport} · ${encrypted.plain.length}B`,
         forceSideBySideSame: Boolean(beforePlainBase64),
@@ -18188,20 +18196,22 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const isGcloudEvent = isGcloud65010Summary(summaryText, ev);
   const isWssJsonEvent = isWssJsonSummary(summaryText, ev);
-  const modernView = !packetUsesSpecializedView(ev, summaryText, isGcloudEvent ? analyzeGcloudEvent(ev, summaryText) : null);
+  const gcloudInfo = isGcloudEvent ? analyzeGcloudEvent(ev, summaryText) : null;
+  const modernView = !packetUsesSpecializedView(ev, summaryText, gcloudInfo);
   if (modernView) body.classList.add("packet-modern");
-  const readableSummary = buildEventReadableSummary(ev, summaryText);
-  if (!modernView) body.appendChild(readableSummary);
-  const gcloudPanel = buildGcloudPacketPanel(ev, summaryText);
-  if (gcloudPanel) {
-    body.appendChild(gcloudPanel);
-  }
   const gcloudDeepKind = isGcloudEvent
     ? gcloudSecurityDeepPanelKind(ev, summaryText)
     : "";
+  const compactAceView = Boolean(gcloudInfo && gcloudInfo.kind === "ace" && gcloudDeepKind);
   const gcloudSecurityDeepPanel = gcloudDeepKind
-    ? buildGcloudAceCarrierDeepPanel(ev, summaryText)
+    ? buildGcloudAceCarrierDeepPanel(ev, summaryText, { compact: compactAceView })
     : null;
+  // One presentation decision owns all redundant ACE framing. If carrier
+  // decoding fails, retain the existing summary instead of making a blank view.
+  const nodeFocusedAce = compactAceView && Boolean(gcloudSecurityDeepPanel);
+  if (!modernView && !nodeFocusedAce) body.appendChild(buildEventReadableSummary(ev, summaryText));
+  const gcloudPanel = nodeFocusedAce ? null : buildGcloudPacketPanel(ev, summaryText);
+  if (gcloudPanel) body.appendChild(gcloudPanel);
   if (gcloudSecurityDeepPanel) {
     body.appendChild(gcloudSecurityDeepPanel);
   }
@@ -18246,7 +18256,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
 
-  if (!modernView && isRequest && gcloudWireCompare) {
+  if (!modernView && !nodeFocusedAce && isRequest && gcloudWireCompare) {
     const beforeWireBytes = b64ToBytes(fullPay);
     const afterWireBytes = b64ToBytes(rawAfterPay);
     const wireDiff = countChangedBytes(beforeWireBytes, afterWireBytes);
@@ -18277,7 +18287,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
   if (isDecodedRequest) dumpGrid.classList.add("dump-grid-decrypted");
   if (showRawCompare) dumpGrid.classList.add("has-raw-compare");
-  if (modernView) body.appendChild(packetFold("原始字节 / 加密封包", dumpGrid));
+  if (modernView || nodeFocusedAce) body.appendChild(packetFold("原始字节 / 加密封包", dumpGrid));
   else body.appendChild(dumpGrid);
   let semanticCompareAdded = false;
 

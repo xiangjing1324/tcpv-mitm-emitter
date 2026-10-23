@@ -330,7 +330,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
             '["ace_antidata", "ace_light", "ace_transfer"].includes(kind)',
             app_js,
         )
-        self.assertIn("? buildGcloudAceCarrierDeepPanel(ev, summaryText)", app_js)
+        self.assertIn("? buildGcloudAceCarrierDeepPanel(ev, summaryText, { compact: compactAceView })", app_js)
         self.assertIn('return "AntiData 二层/三层解析";', app_js)
         self.assertIn('return "轻量特征子节点 / ReportCode";', app_js)
         self.assertIn('return "AntiData 三层解密结果";', app_js)

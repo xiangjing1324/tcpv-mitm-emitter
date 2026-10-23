@@ -164,13 +164,15 @@ function fixtureCompare(before, after, canCompare = true) {
     def test_specialized_tersafe_and_ace_renderers_match_the_original_baseline(self) -> None:
         import subprocess
         source = APP_JS.read_text()
-        baseline = subprocess.check_output(["git", "show", "318789d:tcpv_mitm_emitter/app.js"], text=True)
-        for name in ("makeChildCard", "buildChildComparePanel", "buildGcloudAceCarrierDeepPanel", "makeGcloudAceCompareStatus", "analyzeGcloudBeforeVariant", "appendGcloudReadableStrings"):
+        baseline = subprocess.check_output(["git", "show", "238c740:tcpv_mitm_emitter/app.js"], text=True)
+        # Only the ACE outer composition changes. Shared child cards, their
+        # complete previews and recursive expansion keep their existing code.
+        for name in ("makeChildCard", "buildChildComparePanel", "makeChildPreviewRow", "makeChildPreviewBox", "renderTssRecursiveTree", "renderTssRecursiveNode", "buildGcloudStandaloneTssRecursivePanel", "makeGcloudAceCompareStatus", "analyzeGcloudBeforeVariant", "appendGcloudReadableStrings"):
             self.assertEqual(_packet_function(source, name), _packet_function(baseline, name), name)
-        security = _packet_function(source, "buildGcloudSecurityPacketPanel").replace("buildGcloudSecurityPacketPanel", "buildGcloudPacketPanel", 1)
-        self.assertEqual(security, _packet_function(baseline, "buildGcloudPacketPanel"))
+        for name in ("buildGcloudSecurityPacketPanel", "buildGcloudPacketPanel"):
+            self.assertEqual(_packet_function(source, name), _packet_function(baseline, name), name)
         self.assertIn('if (packetUsesSpecializedView(ev, summaryText, info)) return buildGcloudSecurityPacketPanel', source)
-        self.assertIn('if (!modernView && isRequest && gcloudWireCompare)', source)
+        self.assertIn('if (!modernView && !nodeFocusedAce && isRequest && gcloudWireCompare)', source)
         self.assertIn('if (modernView) body.classList.add("packet-modern")', source)
         self.assertNotIn('function packetChildFieldRows(', source)
         self.assertNotIn('function packetChildComplete(', source)
