@@ -53,7 +53,7 @@ class ChildPreviewStyleTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = APP_JS.read_text(encoding="utf-8")
         cls.baseline = subprocess.check_output(
-            ["git", "show", "1c7c79f:tcpv_mitm_emitter/app.js"], cwd=APP_JS.parent.parent, text=True
+            ["git", "show", "b6167a0:tcpv_mitm_emitter/app.js"], cwd=APP_JS.parent.parent, text=True
         )
         styles = _packet_function(cls.source, "ensureChildCommonStyles")
         program = """
@@ -78,12 +78,19 @@ console.log(JSON.stringify(installed[0].textContent));
         self.assertIsNotNone(match, f"missing {name} local-width query at {width}px")
         return _css_block(self.css, match.group(0))
 
-    def test_only_common_styles_change_and_all_byte_renderers_match_1c7c79f(self) -> None:
+    def test_unrelated_production_functions_remain_at_b6167a0(self) -> None:
         names = lambda source: set(re.findall(r"^(?:async )?function (\w+)\(", source, re.M))
-        self.assertEqual(names(self.source), names(self.baseline), "style-only work changed production function inventory")
-        for name in sorted(names(self.baseline) - {"ensureChildCommonStyles"}):
+        # This follow-up is allowed to change field labels and hierarchy only.
+        # Keep every parser, comparison authority, child/hex renderer, style
+        # owner and byte-copy path outside that exact presentation scope frozen.
+        changed = {"gcloudProtoFieldAlias", "gcloudCompareFieldLabel", "gcloudCompareLeafRows",
+                   "buildPacketFieldTable", "installGcloudCompareStyles"}
+        added = {"gcloudUnconfirmedLoginResponseField", "gcloudFieldHierarchyEntries", "gcloudFieldDisplayType"}
+        self.assertEqual(names(self.baseline) - names(self.source), set(), "production functions were removed")
+        self.assertEqual(names(self.source) - names(self.baseline), added, "unexpected new production functions")
+        for name in sorted(names(self.baseline) - changed):
             self.assertTrue(_packet_function(self.source, name) == _packet_function(self.baseline, name),
-                            f"style-only work changed production function {name}")
+                            f"field presentation work changed unrelated production function {name}")
 
     def test_preview_uses_its_card_width_without_subgrid_or_shared_tall_rows(self) -> None:
         self.assertNotIn("subgrid", self.css)

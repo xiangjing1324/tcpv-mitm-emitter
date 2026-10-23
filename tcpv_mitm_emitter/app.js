@@ -6890,11 +6890,22 @@ function gcloudStringContentAlias(text) {
   return "";
 }
 
+function gcloudUnconfirmedLoginResponseField(path, proto) {
+  if (!proto || proto.uagameBody || !Array.isArray(path) || path.length !== 2 || Number(path[0]) !== 2) return null;
+  const field = Number(path[1]);
+  if (![2, 3, 7, 16, 23].includes(field)) return null;
+  const structured = String(proto.commandName || "");
+  // A display-only name may suppress a guess, but never prove a field name.
+  const command = structured || String(proto.commandDisplay || "");
+  return /^(?:CSAccountLoginRes|CSAccountLoginResB)$/.test(command) ? field : null;
+}
+
 function gcloudProtoFieldAlias(path, node, proto) {
   const key = gcloudPathKey(path);
   // UAGame 20001 body has no DFM/Valorant CS-command header.  Preserve raw
   // f1/f2 paths until UAGame descriptors or registration tables prove names.
   if (proto && proto.uagameBody) return "";
+  if (gcloudUnconfirmedLoginResponseField(path, proto) !== null) return "";
   const generic = {
     "1": "header",
     "1.3": "call_id",
@@ -9348,9 +9359,12 @@ function appendGcloudSecuritySummary(panel, info) {
 // Presentation-only: align decoded fields by protobuf field path, never by
 // byte offset. No packet, rule, stored event or producer evidence is changed.
 function gcloudCompareFieldLabel(path, node, proto) {
+  const unconfirmed = gcloudUnconfirmedLoginResponseField(path, proto);
+  if (unconfirmed !== null) return `字段 ${unconfirmed}（含义未确认）`;
   const text = String(node && node.string || "");
   const alias = gcloudProtoFieldAlias(path, node, proto);
   const labels = {
+    header: "消息头", body: "业务正文", device_profile: "设备画像",
     call_id: "调用编号", command: "命令", module: "模块", language: "语言",
     os_version: "系统 / 版本", device_model: "设备型号", device_vendor: "厂商",
     network_type: "网络类型", gpu_brand: "图形设备", user_agent: "系统浏览器标识",
@@ -9377,7 +9391,7 @@ function gcloudCompareLeafRows(proto, opaquePaths = null) {
   if (!proto || !Array.isArray(proto.nodes)) return [];
   const rows = [];
   const bytes = Array.isArray(proto.viewBytes) ? proto.viewBytes : [];
-  const visit = (nodes, path = [], keys = [], displayPath = []) => {
+  const visit = (nodes, path = [], keys = [], displayPath = [], ancestors = []) => {
     const counts = new Map();
     const seen = new Map();
     for (const node of nodes) counts.set(Number(node.field), (counts.get(Number(node.field)) || 0) + 1);
@@ -9390,19 +9404,31 @@ function gcloudCompareLeafRows(proto, opaquePaths = null) {
       const nextDisplay = displayPath.concat(`f${field}${counts.get(field) > 1 ? `[${occurrence}]` : ""}`);
       if (node.childOk === true && Array.isArray(node.children) && node.children.length > 0
           && !(opaquePaths && opaquePaths.has(nextKeys.join(".")))) {
-        visit(node.children, nextPath, nextKeys, nextDisplay);
+        const commandField = proto.commandField;
+        const knownEnvelope = !proto.uagameBody && commandField
+          && /^CS[A-Za-z0-9_]{4,}$/.test(String(proto.commandName || ""))
+          && gcloudPathKey(commandField.path) === "1.7"
+          && String(commandField.node && commandField.node.string || "") === String(proto.commandName || "");
+        const label = nextPath.length === 1 && [1, 2].includes(field) && !knownEnvelope
+          ? `字段 ${field}` : gcloudCompareFieldLabel(nextPath, node, proto);
+        visit(node.children, nextPath, nextKeys, nextDisplay, ancestors.concat({
+          key: nextKeys.join("."), path: nextPath, pathText: nextDisplay.join("."),
+          label: counts.get(field) > 1 ? `${label} · 第 ${occurrence + 1} 项` : label,
+          depth: nextPath.length, field, occurrence,
+        }));
         continue;
       }
       const raw = gcloudNodeValueBytes(node, bytes);
       const type = node.childOk === false ? "bytes（内部结构未确认）" : gcloudProtoTypeText(node);
       let value;
       if (typeof node.string === "string" && node.string.length > 0) value = node.string;
-      else if (Number(node.wire) === 0) value = `${node.valueText ?? node.value ?? 0} (${formatHexValue(node.valueText ?? node.value ?? 0)})`;
+      else if (Number(node.wire) === 0) value = `${node.valueText ?? node.value ?? 0} (${node.valueHexText || formatHexValue(node.valueText ?? node.value ?? 0)})`;
       else if (raw.length > 0) value = gcloudHexBytes(raw, raw.length);
       else value = Number(node.len || 0) === 0 ? "（空值）" : gcloudNodeValueText(node);
       rows.push({
         key: nextKeys.join("."), path: nextPath, pathText: nextDisplay.join("."),
         label: gcloudCompareFieldLabel(nextPath, node, proto), type, value, node,
+        ancestors, valueByteLength: raw.length, occurrence, repeated: counts.get(field) > 1,
         // Compare actual captured value bytes, not truncated display previews.
         fingerprint: `${Number(node.wire)}:${raw.length ? raw.join(",") : JSON.stringify([node.string, node.valueText ?? node.value, node.valueHex, node.len])}`,
       });
@@ -9622,6 +9648,42 @@ function buildPacketBasicPanel(ev, summaryText = "", embedded = false) {
   return panel;
 }
 
+function gcloudFieldHierarchyEntries(compare) {
+  const entries = [];
+  let active = [];
+  for (const row of compare.rows) {
+    const item = row.after || row.before || {};
+    const ancestors = Array.isArray(item.ancestors) ? item.ancestors : [];
+    let common = 0;
+    while (common < active.length && common < ancestors.length && active[common].key === ancestors[common].key) common += 1;
+    active = active.slice(0, common);
+    for (const ancestor of ancestors.slice(common)) {
+      const group = { ...ancestor, count: 0, changeCount: 0, hasChanges: !compare.canCompare };
+      active.push(group);
+      entries.push({ group });
+    }
+    const changed = !["same", "current"].includes(row.status);
+    for (const group of active) {
+      group.count += 1;
+      if (changed) group.changeCount += 1;
+      group.hasChanges = group.hasChanges || changed;
+    }
+    entries.push({ row });
+  }
+  return entries;
+}
+
+function gcloudFieldDisplayType(item) {
+  const type = String(item && item.type || "");
+  const names = {
+    string: "文本", varint: "变长整数", bytes: "二进制", message: "嵌套结构",
+    fixed32: "固定 32 位", fixed64: "固定 64 位", "hex-string": "十六进制文本",
+    base64: "Base64 编码文本", fragment: "不完整字段",
+  };
+  const text = names[type] || type.replace(/^bytes(?=（)/, "二进制");
+  return Number.isFinite(item && item.valueByteLength) ? `${text} · ${item.valueByteLength} 字节` : text;
+}
+
 function buildPacketFieldTable(compare, ev = null) {
   if (!compare.rows.length) return null;
   const section = document.createElement("section");
@@ -9677,17 +9739,63 @@ function buildPacketFieldTable(compare, ev = null) {
   thead.appendChild(header);
   table.appendChild(thead);
   const tbody = document.createElement("tbody");
-  for (const row of compare.rows) {
+  const entries = gcloudFieldHierarchyEntries(compare);
+  if (compare.rows.some((row) => Array.isArray((row.after || row.before || {}).ancestors))) {
+    section.classList.add("gcloud-field-hierarchy");
+  }
+  for (const entry of entries) {
+    if (entry.group) {
+      const group = entry.group;
+      const tr = document.createElement("tr");
+      tr.className = "gcloud-field-group";
+      tr.dataset.groupKey = group.key;
+      tr.dataset.fieldPath = group.pathText;
+      tr.dataset.hasChanges = String(group.hasChanges);
+      tr.title = group.pathText;
+      const cell = document.createElement("td");
+      cell.colSpan = compare.canCompare ? 4 : 2;
+      cell.style.paddingLeft = `${12 + Math.max(0, group.depth - 1) * 14}px`;
+      const line = document.createElement("div");
+      line.className = "gcloud-field-group-line";
+      const name = document.createElement("span");
+      name.className = "gcloud-field-group-name";
+      name.textContent = group.label;
+      const count = document.createElement("span");
+      count.className = "gcloud-field-group-count";
+      count.textContent = compare.canCompare ? `${group.changeCount} 项变化 / ${group.count} 项` : `${group.count} 项`;
+      line.appendChild(name);
+      line.appendChild(count);
+      cell.appendChild(line);
+      tr.appendChild(cell);
+      tbody.appendChild(tr);
+      continue;
+    }
+    const row = entry.row;
     const tr = document.createElement("tr");
     tr.className = `gcloud-compare-row gcloud-compare-${row.status}`;
     tr.dataset.fieldPath = row.key;
     const field = document.createElement("th");
     field.scope = "row";
-    const label = document.createElement("span");
-    label.textContent = row.label;
-    const path = document.createElement("small");
     const item = row.before || row.after;
-    path.textContent = `${item.pathText} · ${item.type}${row.before && row.after && row.before.type !== row.after.type ? ` → ${row.after.type}` : ""}`;
+    const hierarchyItem = row.after || row.before;
+    const hierarchical = Array.isArray(hierarchyItem.ancestors);
+    if (hierarchical) {
+      field.className = `gcloud-field-cell${hierarchyItem.ancestors.length ? " gcloud-field-nested" : ""}`;
+      field.style.paddingLeft = `${12 + hierarchyItem.ancestors.length * 14}px`;
+      field.title = hierarchyItem.pathText;
+      field.dataset.fieldPath = hierarchyItem.pathText;
+    }
+    const label = document.createElement("span");
+    if (hierarchical) label.className = "gcloud-field-label";
+    const repeated = hierarchical && ((row.before && row.before.repeated) || (row.after && row.after.repeated));
+    label.textContent = repeated ? `${row.label} · 第 ${hierarchyItem.occurrence + 1} 项` : row.label;
+    const path = document.createElement("small");
+    const beforeType = row.before ? gcloudFieldDisplayType(row.before) : "";
+    const afterType = row.after ? gcloudFieldDisplayType(row.after) : "";
+    path.textContent = hierarchical
+      ? (beforeType && afterType && beforeType !== afterType ? `${beforeType} → ${afterType}` : afterType || beforeType)
+      : `${item.pathText} · ${item.type}${row.before && row.after && row.before.type !== row.after.type ? ` → ${row.after.type}` : ""}`;
+    if (hierarchical) path.title = hierarchyItem.pathText;
     field.appendChild(label);
     field.appendChild(path);
     tr.appendChild(field);
@@ -9755,6 +9863,21 @@ function installGcloudCompareStyles() {
     .packet-modern .gcloud-compare-added .gcloud-compare-state { color: #22c55e; }
     .packet-modern .gcloud-compare-removed .gcloud-compare-state { color: #f87171; }
     .packet-modern .gcloud-field-compare[data-mode=changes] .gcloud-compare-same { display: none; }
+    .gcloud-field-hierarchy[data-mode=changes] .gcloud-compare-same,
+    .gcloud-field-hierarchy[data-mode=changes] .gcloud-field-group[data-has-changes=false] { display: none; }
+    .gcloud-field-hierarchy .gcloud-field-group > td {
+      padding: 6px 12px;
+      background: color-mix(in srgb, var(--chip-bg) 65%, var(--panel));
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .gcloud-field-group-line { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
+    .gcloud-field-group-name { color: var(--text); font-weight: 650; }
+    .gcloud-field-group-name::before { content: ""; display: inline-block; width: 3px; height: 10px; margin-right: 8px; background: var(--muted); border-radius: 2px; opacity: .65; }
+    .gcloud-field-group-count { font-size: 10px; color: var(--muted); font-weight: 400; }
+    .gcloud-field-hierarchy .gcloud-field-cell { position: relative; }
+    .gcloud-field-hierarchy .gcloud-field-label { position: relative; display: block; }
+    .gcloud-field-hierarchy .gcloud-field-nested .gcloud-field-label::before { content: ""; position: absolute; left: -12px; top: 5px; width: 7px; height: 8px; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
     .packet-modern .gcloud-value-empty { color: var(--muted); }
     .packet-modern .gcloud-compare-current th:first-child { width: 28%; }
     .packet-modern .gcloud-compare-current thead th:last-child { width: auto; }
