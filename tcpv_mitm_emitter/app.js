@@ -1558,6 +1558,7 @@ function writePayloadCache(account, eventId, detail) {
   const rec = {
     detail: {
       pay,
+      len: Number.isFinite(Number(normalized.len)) ? Number(normalized.len) : undefined,
       full_pay: String(normalized.full_pay || ""),
       full_len: Number.isFinite(Number(normalized.full_len)) ? Number(normalized.full_len) : undefined,
       full_pfx: String(normalized.full_pfx || ""),
@@ -9893,10 +9894,11 @@ function buildGcloudSecurityPacketPanel(ev, summaryText = "") {
   return panel;
 }
 
-function buildGcloudPacketPanel(ev, summaryText = "") {
+function buildGcloudPacketPanel(ev, summaryText = "", displayOptions = {}) {
   const info = analyzeGcloudEvent(ev, summaryText);
   if (!info) return null;
-  if (packetUsesSpecializedView(ev, summaryText, info)) return buildGcloudSecurityPacketPanel(ev, summaryText);
+  const compact = displayOptions.compact === true;
+  if (!compact && packetUsesSpecializedView(ev, summaryText, info)) return buildGcloudSecurityPacketPanel(ev, summaryText);
   const panel = document.createElement("section");
   panel.className = `gcloud-brief gcloud-brief-${info.kind || "raw"}`;
 
@@ -9925,7 +9927,7 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     part.textContent = text;
     overview.appendChild(part);
   }
-  if (overview.childElementCount) panel.appendChild(overview);
+  if (!compact && overview.childElementCount) panel.appendChild(overview);
 
   const comparison = buildGcloudFieldCompare(ev, info, summaryText);
   if (comparison && (info.kind === "ace" || info.kind === "tss")) {
@@ -9937,7 +9939,7 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     outer.appendChild(comparison);
     panel.appendChild(outer);
   } else if (comparison) panel.appendChild(comparison);
-  else {
+  else if (!compact) {
     const basic = buildPacketBasicPanel(ev, summaryText, true);
     if (basic) panel.appendChild(basic);
     else appendGcloudReadableStrings(panel, readableStrings);
@@ -9955,7 +9957,8 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     details.className = "gcloud-tree-details";
     details.open = false;
     const summary = document.createElement("summary");
-    const count = info.proto && Array.isArray(info.proto.flat) ? info.proto.flat.length : info.nodeRows.length;
+    const count = info.proto && Array.isArray(info.proto.flat) ? info.proto.flat.length
+      : Array.isArray(info.nodeRows) ? info.nodeRows.length : 0;
     summary.textContent = `原始字段结构 · ${count} 项`;
     details.appendChild(summary);
     details.appendChild(protoTree);
@@ -9992,6 +9995,13 @@ function buildGcloudPacketPanel(ev, summaryText = "") {
     const note = document.createElement("div");
     note.className = "gcloud-note";
     note.textContent = "9001 是 45 字节 header-only echo/保活帧；当前抓包中由客户端主动发起，服务端用相同 24 字节扩展字段回声。";
+    panel.appendChild(note);
+  }
+
+  if (compact && !comparison && !protoTree && !(Array.isArray(info.nodeRows) && info.nodeRows.length)) {
+    const note = document.createElement("div");
+    note.className = "gcloud-note";
+    note.textContent = "当前载荷没有可展示的已解析字段，可在下方展开或复制原始字节。";
     panel.appendChild(note);
   }
 
@@ -18187,6 +18197,156 @@ function buildEventReadableSummary(ev, summaryText) {
   return block;
 }
 
+// One byte source owner for GCloud: never substitute a prefix or another stage.
+function packetByteSources(ev, summaryText = "") {
+  const event = ev || {};
+  const summary = String(summaryText || event.summary || "");
+  const transport = gcloudProducerTransport(event);
+  const decrypted = !isOpaqueUndecryptedSummary(summary)
+    && (/\bcrypto=decrypted\b/i.test(summary) || transport.decrypted === true);
+  const sent = /\braw_pay_is_sent_wire=1\b|\btcpview_after_source=raw_pay_sent_wire\b/i.test(summary);
+  const definitions = [
+    ["current", "pay", "len", decrypted ? "当前解密载荷" : "当前载荷"],
+    ["before", "before_pay", "before_len", decrypted ? "修改前解密载荷" : "修改前载荷"],
+    ["wireReceived", "full_pay", "full_len", "收到的原始封包"],
+    ["wireSent", "raw_pay", "raw_len", sent ? "实际发送封包" : "转发封包（发送证据未标注）"],
+  ];
+  return definitions.filter(([, field]) => String(event[field] || "").trim()).map(([key, field, lengthField, label]) => {
+    const bytes = b64ToBytes(String(event[field]));
+    const declared = Number(event[lengthField]);
+    const expectedLength = Number.isSafeInteger(declared) && declared > 0 ? declared : null;
+    const actualLength = bytes.length;
+    const status = !actualLength ? "invalid" : expectedLength === null ? "unknown"
+      : actualLength < expectedLength ? "truncated" : actualLength > expectedLength ? "mismatch" : "complete";
+    return {
+      key, label, bytes, hex: bytes.map((byte) => byte.toString(16).padStart(2, "0")).join(" "),
+      expectedLength, actualLength, complete: status === "complete", status,
+    };
+  });
+}
+
+function copyPacketBytes(text) {
+  // HTTP viewers cannot use the secure clipboard API; keep a local fallback.
+  return Promise.resolve().then(() => {
+    if (typeof navigator === "undefined" || !navigator.clipboard || !navigator.clipboard.writeText) {
+      throw new Error("Clipboard API unavailable");
+    }
+    return navigator.clipboard.writeText(text);
+  }).catch(() => {
+    const previousFocus = document.activeElement;
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    try {
+      input.focus();
+      input.select();
+      if (!document.execCommand || !document.execCommand("copy")) throw new Error("Clipboard copy failed");
+    } finally {
+      input.remove();
+      if (previousFocus && typeof previousFocus.focus === "function") previousFocus.focus();
+    }
+  });
+}
+
+function ensurePacketBytesStyles() {
+  if (document.getElementById("packet-byte-styles")) return;
+  const style = document.createElement("style");
+  style.id = "packet-byte-styles";
+  style.textContent = `
+    .packet-byte-panel { margin:10px 0; padding:10px 12px; border:1px solid var(--line); border-radius:7px; background:var(--panel); }
+    .packet-byte-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+    .packet-byte-toolbar > strong { margin-right:4px; font-size:12px; }
+    .packet-byte-source { max-width:100%; padding:4px 7px; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:4px; }
+    .packet-byte-copy { padding:4px 9px; cursor:pointer; }
+    .packet-byte-copy:disabled { cursor:default; opacity:.6; }
+    .packet-byte-status { font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+    .packet-byte-panel[data-status="truncated"] .packet-byte-status,
+    .packet-byte-panel[data-status="mismatch"] .packet-byte-status,
+    .packet-byte-panel[data-status="invalid"] .packet-byte-status { color:#db9f52; }
+    .packet-byte-fold { margin-top:7px; font-size:12px; }
+    .packet-byte-fold > summary { cursor:pointer; color:var(--muted); }
+    .packet-byte-content { margin:8px 0 0; max-height:320px; overflow:auto; white-space:pre-wrap; word-break:break-word; line-height:1.6; user-select:text; }
+  `;
+  document.head.appendChild(style);
+}
+
+function buildGcloudBytesPanel(ev, summaryText = "") {
+  ensurePacketBytesStyles();
+  const sources = packetByteSources(ev, summaryText);
+  const panel = document.createElement("section");
+  panel.className = "packet-byte-panel";
+  const toolbar = document.createElement("div");
+  toolbar.className = "packet-byte-toolbar";
+  const title = document.createElement("strong");
+  title.textContent = "原始字节";
+  const select = document.createElement("select");
+  select.className = "packet-byte-source";
+  select.setAttribute("aria-label", "字节来源");
+  for (const source of sources) {
+    const option = document.createElement("option");
+    option.value = source.key;
+    option.textContent = source.label;
+    select.appendChild(option);
+  }
+  select.value = sources.some((source) => source.key === "current") ? "current" : sources[0] ? sources[0].key : "";
+  select.disabled = sources.length < 2;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "packet-byte-copy";
+  const status = document.createElement("span");
+  status.className = "packet-byte-status";
+  status.setAttribute("role", "status");
+  const fold = document.createElement("details");
+  fold.className = "packet-byte-fold";
+  const summary = document.createElement("summary");
+  summary.textContent = "展开十六进制";
+  const content = document.createElement("pre");
+  content.className = "packet-byte-content";
+  fold.appendChild(summary);
+  fold.appendChild(content);
+  for (const element of [title, select, copy, status]) toolbar.appendChild(element);
+  panel.appendChild(toolbar);
+  panel.appendChild(fold);
+  const selectedSource = () => sources.find((source) => source.key === select.value) || null;
+  const update = () => {
+    const source = selectedSource();
+    panel.dataset.status = source ? source.status : "empty";
+    copy.disabled = !source || source.status === "invalid";
+    copy.textContent = source && source.complete ? "复制十六进制" : "复制已保存字节";
+    content.textContent = source ? source.hex.split(" ").reduce((lines, byte, index) => {
+      if (index % 16 === 0) lines.push([]);
+      lines[lines.length - 1].push(byte);
+      return lines;
+    }, []).map((line) => line.join(" ")).join("\n") : "";
+    status.textContent = !source ? "当前事件未保存字节内容"
+      : source.status === "invalid" ? "字节编码无效，无法复制"
+      : source.complete ? `完整 · ${source.actualLength} 字节`
+      : source.expectedLength === null ? `已保存 ${source.actualLength} 字节 · 声明长度未知，无法确认完整性`
+      : `已保存 ${source.actualLength} / 声明 ${source.expectedLength} 字节 · ${source.status === "truncated" ? "记录截断" : "长度不一致"}`;
+  };
+  select.addEventListener("change", update);
+  copy.addEventListener("click", () => {
+    const source = selectedSource();
+    if (!source || source.status === "invalid") return;
+    copy.disabled = true;
+    select.disabled = true;
+    return copyPacketBytes(source.hex).then(() => {
+      update();
+      status.textContent = `已复制 ${source.actualLength} 字节${source.complete ? "" : "（仅已保存内容）"}`;
+    }, () => {
+      update();
+      status.textContent = "复制失败，请展开后手动复制";
+    }).finally(() => {
+      select.disabled = sources.length < 2;
+    });
+  });
+  update();
+  return panel;
+}
+
 function buildEventBody(ev, hideAscii, eventId = "") {
   installGcloudCompareStyles();
   const body = document.createElement("div");
@@ -18202,24 +18362,27 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const gcloudDeepKind = isGcloudEvent
     ? gcloudSecurityDeepPanelKind(ev, summaryText)
     : "";
-  const compactAceView = Boolean(gcloudInfo && gcloudInfo.kind === "ace" && gcloudDeepKind);
   const gcloudSecurityDeepPanel = gcloudDeepKind
-    ? buildGcloudAceCarrierDeepPanel(ev, summaryText, { compact: compactAceView })
+    ? buildGcloudAceCarrierDeepPanel(ev, summaryText, { compact: true })
     : null;
-  // One presentation decision owns all redundant ACE framing. If carrier
-  // decoding fails, retain the existing summary instead of making a blank view.
-  const nodeFocusedAce = compactAceView && Boolean(gcloudSecurityDeepPanel);
-  if (!modernView && !nodeFocusedAce) body.appendChild(buildEventReadableSummary(ev, summaryText));
-  const gcloudPanel = nodeFocusedAce ? null : buildGcloudPacketPanel(ev, summaryText);
+  const gcloudStandaloneTssRecursivePanel = (
+    isGcloudEvent && !gcloudSecurityDeepPanel
+  ) ? buildGcloudStandaloneTssRecursivePanel(ev, summaryText) : null;
+  // All GCloud kinds share this decision; independent TerSafe stays unchanged.
+  const readableSummary = !isGcloudEvent ? buildEventReadableSummary(ev, summaryText) : null;
+  if (!modernView && readableSummary) body.appendChild(readableSummary);
+  const gcloudPanel = isGcloudEvent && !gcloudSecurityDeepPanel && !gcloudStandaloneTssRecursivePanel
+    ? buildGcloudPacketPanel(ev, summaryText, { compact: true }) : null;
   if (gcloudPanel) body.appendChild(gcloudPanel);
   if (gcloudSecurityDeepPanel) {
     body.appendChild(gcloudSecurityDeepPanel);
   }
-  const gcloudStandaloneTssRecursivePanel = (
-    isGcloudEvent && !gcloudSecurityDeepPanel
-  ) ? buildGcloudStandaloneTssRecursivePanel(ev, summaryText) : null;
   if (gcloudStandaloneTssRecursivePanel) {
     body.appendChild(gcloudStandaloneTssRecursivePanel);
+  }
+  if (isGcloudEvent) {
+    body.appendChild(buildGcloudBytesPanel(ev, summaryText));
+    return body;
   }
   const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
   if (wssJsonPanel) body.appendChild(modernView ? packetFold("资源与校验详情", wssJsonPanel) : wssJsonPanel);
@@ -18240,9 +18403,6 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   const beforeDumpSameAsDecoded = hasBeforeDump && hasDecodedDump && beforePay === decodedPay;
   const isRequest = Number(ev && ev.dir) === 0;
   const isDecodedRequest = isRequest && isDecodedFlowEvent(ev, summaryText) && (hasFullDump || hasBeforeDump || hasDecodedDump);
-  const gcloudWireRebuilt = isGcloudEvent && gcloudSummaryHasBackendRebuild(summaryText);
-  const gcloudSentWireChanged = isGcloudEvent && gcloudSummaryHasSentWireChange(summaryText);
-  const gcloudWireCompare = gcloudSentWireChanged && hasFullDump && hasRawAfterDump && fullPay !== rawAfterPay;
   const rawWireChangedOffsets = hasFullDump && hasRawAfterDump
     ? buildChangedOffsetSet(fullPay, rawAfterPay)
     : null;
@@ -18251,32 +18411,11 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     && hasFullDump
     && hasRawAfterDump
     && fullPay !== rawAfterPay
-    && (currentFlowLooksLikePort8092(ev, summaryText) || gcloudWireRebuilt);
+    && currentFlowLooksLikePort8092(ev, summaryText);
   const decodedChangedOffsets = hasBeforeDump && hasDecodedDump
     ? buildChangedOffsetSet(beforePay, decodedPay)
     : null;
 
-  if (!modernView && !nodeFocusedAce && isRequest && gcloudWireCompare) {
-    const beforeWireBytes = b64ToBytes(fullPay);
-    const afterWireBytes = b64ToBytes(rawAfterPay);
-    const wireDiff = countChangedBytes(beforeWireBytes, afterWireBytes);
-    const changedOffsets = Array.from(rawWireChangedOffsets || []).sort((a, b) => a - b);
-    const changedPreview = changedOffsets.slice(0, 8).map((offset) => {
-      const beforeByte = offset < beforeWireBytes.length ? childHexByteText(beforeWireBytes[offset]) : "--";
-      const afterByte = offset < afterWireBytes.length ? childHexByteText(afterWireBytes[offset]) : "--";
-      return `+${formatHexValue(offset)} ${beforeByte}->${afterByte}`;
-    }).join("，");
-    const proof = document.createElement("div");
-    proof.className = "ace-compare-status ace-compare-status-changed";
-    const proofLabel = document.createElement("strong");
-    proofLabel.textContent = "实际修改并发送";
-    const proofText = document.createElement("span");
-    const businessDiff = eventModificationDiffText(ev);
-    proofText.textContent = `${businessDiff.detail ? `${businessDiff.detail}；` : ""}收到 full_pay -> 实际发送 raw_pay：变化 ${wireDiff.changed}/${wireDiff.commonLen}${wireDiff.lenDelta ? `，lenΔ=${wireDiff.lenDelta}` : ""}${changedPreview ? `；${changedPreview}` : ""}`;
-    proof.appendChild(proofLabel);
-    proof.appendChild(proofText);
-    body.appendChild(proof);
-  }
 
 	  if (isDecodedRequest && !isGcloudEvent) {
 	    const timeStrip = buildEventTimestampStrip(summaryText, beforePay, decodedPay);
@@ -18287,7 +18426,7 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   dumpGrid.className = `dump-grid ${isRequest ? "dump-grid-request" : "dump-grid-response"}`;
   if (isDecodedRequest) dumpGrid.classList.add("dump-grid-decrypted");
   if (showRawCompare) dumpGrid.classList.add("has-raw-compare");
-  if (modernView || nodeFocusedAce) body.appendChild(packetFold("原始字节 / 加密封包", dumpGrid));
+  if (modernView) body.appendChild(packetFold("原始字节 / 加密封包", dumpGrid));
   else body.appendChild(dumpGrid);
   let semanticCompareAdded = false;
 
@@ -18431,17 +18570,15 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     if (hasFullDump) {
       appendDumpSection(
         showRawCompare
-          ? (gcloudWireCompare
-            ? "收到的原始4013 [raw before/full_pay]"
-            : (opaqueUndecrypted ? "修改前原始封包 [raw before]" : "修改前加密 [raw before]"))
-          : (isGcloudEvent ? "加密 Payload [raw]" : "原始封包 [raw]"),
+          ? (opaqueUndecrypted ? "修改前原始封包 [raw before]" : "修改前加密 [raw before]")
+          : "原始封包 [raw]",
         fullPay,
         ev.full_len,
         "dump-panel-full",
         "full",
         {
           collapsed: isDecodedRequest,
-          foldNote: showRawCompare ? (gcloudWireCompare ? "收到原包" : "修改前") : "raw 参考",
+          foldNote: showRawCompare ? "修改前" : "raw 参考",
           changedOffsets: showRawCompare ? rawWireChangedOffsets : null,
         }
       );
@@ -18450,22 +18587,20 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     }
     if (showRawCompare) {
       appendDumpSection(
-        gcloudWireCompare
-          ? "修改后重建4013 [raw after/sent]"
-          : (opaqueUndecrypted ? "修改后原始封包 [raw after]" : "修改后加密 [raw after]"),
+        opaqueUndecrypted ? "修改后原始封包 [raw after]" : "修改后加密 [raw after]",
         rawAfterPay,
         ev.raw_len,
         "dump-panel-raw-after",
         "raw_after",
         {
           collapsed: true,
-          foldNote: gcloudWireCompare ? "已转发" : "8092 after",
+          foldNote: "8092 after",
           changedOffsets: rawWireChangedOffsets,
         }
       );
     }
     if (hasBeforeDump) {
-      appendDumpSection(gcloudWireRebuilt ? "修改前解密 Payload [before/received]" : (opaqueUndecrypted ? "修改前原始封包 [before/raw]" : (isGcloudEvent ? "修改前解密 Payload [before]" : "修改前解密 [before]")), beforePay, ev.before_len, "dump-panel-before", "before", {
+      appendDumpSection(opaqueUndecrypted ? "修改前原始封包 [before/raw]" : "修改前解密 [before]", beforePay, ev.before_len, "dump-panel-before", "before", {
         changedOffsets: decodedChangedOffsets,
       });
     } else if (hasDecodedDump) {
@@ -18485,12 +18620,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
           ? (beforeDumpSameAsDecoded ? "修改后原始封包 [after/raw same]" : "修改后原始封包 [after/raw]")
           : "当前原始封包 [current/raw]")
         : (hasBeforeDump
-          ? gcloudWireRebuilt
-            ? "修改后解密 Payload [after/rebuilt]"
-            : beforeDumpSameAsDecoded
-            ? (isGcloudEvent ? "修改后解密 Payload [after same]" : "修改后解密 [after same]")
-            : (isGcloudEvent ? "修改后解密 Payload [after]" : "修改后解密 [after]")
-          : (isGcloudEvent ? "解密 Payload [current]" : "当前解密 [current]"));
+          ? beforeDumpSameAsDecoded ? "修改后解密 [after same]" : "修改后解密 [after]"
+          : "当前解密 [current]");
       appendDumpSection(
         decodedTitle,
         decodedPay,
@@ -18505,56 +18636,6 @@ function buildEventBody(ev, hideAscii, eventId = "") {
         opaqueUndecrypted ? "当前事件没有 pay，无法显示修改后/当前原始封包。" : "当前事件没有 pay，无法显示修改后/当前解密内容。",
         "dump-panel-decoded"
       );
-    }
-  } else if (isGcloudEvent) {
-    if (gcloudWireCompare) {
-      appendDumpSection(
-        "修改前加密 Payload [full_pay]",
-        fullPay,
-        ev.full_len,
-        "dump-panel-full",
-        "full",
-        { collapsed: true, foldNote: "修改前 wire", changedOffsets: rawWireChangedOffsets }
-      );
-      appendDumpSection(
-        "修改后加密 Payload [raw_pay]",
-        rawAfterPay,
-        ev.raw_len,
-        "dump-panel-raw-after",
-        "raw_after",
-        { collapsed: true, foldNote: "修改后 wire", changedOffsets: rawWireChangedOffsets }
-      );
-    } else if (hasFullDump && !fullDumpSameAsDecoded) {
-      appendDumpSection(
-        "加密 Payload [raw]",
-        fullPay,
-        ev.full_len,
-        "dump-panel-full",
-        "full",
-        { collapsed: true, foldNote: "raw 参考" }
-      );
-    }
-    if (hasBeforeDump) {
-      appendDumpSection(
-        "修改前解密 Payload [before]",
-        beforePay,
-        ev.before_len,
-        "dump-panel-before",
-        "before",
-        { changedOffsets: decodedChangedOffsets }
-      );
-    }
-    if (hasDecodedDump) {
-      appendDumpSection(
-        hasBeforeDump ? "修改后解密 Payload [after]" : "解密 Payload [current]",
-        decodedPay,
-        ev.len,
-        "dump-panel-decoded",
-        "decoded",
-        { changedOffsets: decodedChangedOffsets }
-      );
-    } else if (!hasFullDump) {
-      appendEmptyDumpSection("Payload", "当前事件没有可显示的 Payload。", "dump-panel-single");
     }
   } else if (hasFullDump && !fullDumpSameAsDecoded) {
     appendDumpSection("响应原始封包 [raw]", fullPay, ev.full_len, "dump-panel-full", "full");
@@ -18621,6 +18702,8 @@ function applyEventPayloadDetail(ev, detail) {
   const pay = String(detail.pay || "");
   if (!pay) return false;
   ev.pay = pay;
+  const currentLen = Number(detail.len);
+  if (Number.isFinite(currentLen)) ev.len = currentLen;
   if (detail.full_pay !== undefined) ev.full_pay = String(detail.full_pay || "");
   const fullLen = Number(detail.full_len);
   if (Number.isFinite(fullLen)) ev.full_len = fullLen;
