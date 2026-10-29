@@ -48,6 +48,14 @@ def _producer_analysis_is_authoritative(value: Any) -> bool:
     )
 
 
+def _producer_analysis_uses_cschannel2_stages(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("analysis_authoritative") is True
+        and value.get("schema") == "tcpv.cschannel2.analysis.v1"
+    )
+
+
 class TcpvRuntime:
     """Runtime manager for TCP packet event service and async Redis writer."""
 
@@ -238,7 +246,13 @@ class TcpvRuntime:
             return
 
         payload = self._to_bytes(packet_data)
-        if not payload:
+        full_payload = self._to_bytes(full_packet_data)
+        before_payload = self._to_bytes(before_packet_data)
+        raw_payload = self._to_bytes(raw_packet_data)
+        cschannel2_stages = _producer_analysis_uses_cschannel2_stages(analysis)
+        if not payload and not (
+            cschannel2_stages and (full_payload or before_payload or raw_payload)
+        ):
             return
 
         try:
@@ -248,21 +262,18 @@ class TcpvRuntime:
         if real_packet_len <= 0:
             real_packet_len = len(payload)
 
-        full_payload = self._to_bytes(full_packet_data)
         try:
             real_full_packet_len = int(full_packet_len) if full_packet_len is not None else len(full_payload)
         except (TypeError, ValueError):
             real_full_packet_len = len(full_payload)
         if real_full_packet_len <= 0:
             real_full_packet_len = len(full_payload)
-        before_payload = self._to_bytes(before_packet_data)
         try:
             real_before_packet_len = int(before_packet_len) if before_packet_len is not None else len(before_payload)
         except (TypeError, ValueError):
             real_before_packet_len = len(before_payload)
         if real_before_packet_len <= 0:
             real_before_packet_len = len(before_payload)
-        raw_payload = self._to_bytes(raw_packet_data)
         try:
             real_raw_packet_len = int(raw_packet_len) if raw_packet_len is not None else len(raw_payload)
         except (TypeError, ValueError):

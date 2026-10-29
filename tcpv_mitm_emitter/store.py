@@ -25,6 +25,21 @@ _AUTHORITATIVE_MODIFICATION_SOURCES = frozenset(
 )
 
 
+def _is_cschannel2_stage_analysis(analysis: dict[str, Any] | None) -> bool:
+    """Return whether payload fields describe CSChannel2 decode stages.
+
+    CSChannel2 deliberately uses ``before_pay`` and ``pay`` for two different
+    decode layers (ciphertext and the CRC-verified compressed envelope).  A
+    byte difference between those fields is therefore not mutation evidence.
+    """
+
+    return (
+        isinstance(analysis, dict)
+        and analysis.get("analysis_authoritative") is True
+        and analysis.get("schema") == "tcpv.cschannel2.analysis.v1"
+    )
+
+
 def _event_modification_evidence(
     *,
     payload: bytes,
@@ -37,14 +52,25 @@ def _event_modification_evidence(
     """Return protocol-neutral, evidence-backed modification sources."""
 
     evidence: list[str] = []
+    cschannel2_stages = _is_cschannel2_stage_analysis(analysis)
     mutation = analysis.get("mutation") if isinstance(analysis, dict) else None
-    analysis_modified = isinstance(mutation, dict) and mutation.get("modified") is True
-    payload_changed = bool(before_payload and before_payload != payload)
+    analysis_modified = isinstance(mutation, dict) and (
+        mutation.get("modified") is True
+        or (cschannel2_stages and mutation.get("wire_mutated") is True)
+    )
+    payload_changed = bool(
+        not cschannel2_stages and before_payload and before_payload != payload
+    )
     summary_text = str(summary or "").casefold()
-    summary_modified = any(
+    summary_modified = not cschannel2_stages and any(
         signal.casefold() in summary_text for signal in _MODIFIED_SUMMARY_SIGNALS
     )
-    wire_changed = bool(full_payload and raw_payload and full_payload != raw_payload)
+    wire_changed = bool(
+        not cschannel2_stages
+        and full_payload
+        and raw_payload
+        and full_payload != raw_payload
+    )
 
     if analysis_modified:
         evidence.append("analysis")

@@ -1547,7 +1547,7 @@ function readPayloadCache(account, eventId) {
 function writePayloadCache(account, eventId, detail) {
   const normalized = detail && typeof detail === "object" ? detail : null;
   const pay = String(normalized && normalized.pay ? normalized.pay : "");
-  if (!pay) return;
+  if (!pay && !cschannel2AuthoritativeAnalysis(normalized)) return;
 
   const key = buildPayloadCacheKey(account, eventId);
   const old = payloadCache.get(key);
@@ -5377,6 +5377,15 @@ function gcloudAuthoritativeAnalysis(ev) {
     : null;
 }
 
+function cschannel2AuthoritativeAnalysis(ev) {
+  const analysis = ev && ev.analysis && typeof ev.analysis === "object" ? ev.analysis : null;
+  if (!analysis) return null;
+  return analysis.analysis_authoritative === true
+    && String(analysis.schema || "") === "tcpv.cschannel2.analysis.v1"
+    ? analysis
+    : null;
+}
+
 function gcloudProducerTransport(ev) {
   const analysis = gcloudAuthoritativeAnalysis(ev);
   return analysis && analysis.transport && typeof analysis.transport === "object"
@@ -7910,6 +7919,9 @@ function eventPayloadDiff(leftText, rightText) {
 }
 
 function eventModificationDiffText(ev) {
+  // CSChannel2 fields are decode stages, not before/after mutation variants.
+  // Comparing them would label ordinary decryption/decompression as a patch.
+  if (cschannel2AuthoritativeAnalysis(ev)) return { short: "", detail: "" };
   const plaintext = eventPayloadDiff(ev && ev.before_pay, ev && ev.pay);
   const wire = eventPayloadDiff(ev && ev.full_pay, ev && ev.raw_pay);
   const selected = plaintext || wire;
@@ -7930,11 +7942,37 @@ function eventModificationDiffText(ev) {
 
 function eventModificationEvidence(ev, summaryText = "") {
   const summary = String(summaryText || (ev && ev.summary) || "");
+  const cschannel2Analysis = cschannel2AuthoritativeAnalysis(ev);
   const reasons = [];
   const addReason = (reason) => {
     const text = String(reason || "").trim();
     if (text && !reasons.includes(text)) reasons.push(text);
   };
+
+  if (cschannel2Analysis) {
+    const mutation = cschannel2Analysis.mutation && typeof cschannel2Analysis.mutation === "object"
+      ? cschannel2Analysis.mutation
+      : {};
+    if (mutation.modified === true) addReason("生产端 mutation.modified=true");
+    if (mutation.wire_mutated === true) addReason("生产端 mutation.wire_mutated=true");
+    if (reasons.length > 0) {
+      return {
+        state: "modified",
+        modified: true,
+        reasons,
+        diff: { short: "", detail: "CSChannel2 展示字段是处理层级，不做跨层字节差分" },
+      };
+    }
+    if (mutation.modified === false && mutation.wire_mutated === false) {
+      return {
+        state: "unchanged",
+        modified: false,
+        reasons: ["生产端确认 mutation.modified=false 且 wire_mutated=false"],
+        diff: { short: "", detail: "" },
+      };
+    }
+    return null;
+  }
 
   const backendEvidenceLabels = {
     analysis: "生产端 mutation.modified",
@@ -7967,7 +8005,10 @@ function eventModificationEvidence(ev, summaryText = "") {
     addReason("before_pay 与当前 Payload 不同");
   }
   const authoritativeModified = reasons.length > 0;
-  if (authoritativeModified && eventPayloadDiff(ev && ev.full_pay, ev && ev.raw_pay)) {
+  if (
+    authoritativeModified
+    && eventPayloadDiff(ev && ev.full_pay, ev && ev.raw_pay)
+  ) {
     addReason("接收 Wire 与实际发送 Wire 不同");
   }
 
@@ -18430,12 +18471,422 @@ function buildGcloudBytesPanel(ev, summaryText = "") {
   return panel;
 }
 
+function cschannel2LayerSources(ev) {
+  const event = ev || {};
+  const analysis = cschannel2AuthoritativeAnalysis(event) || {};
+  const transport = analysis.transport && typeof analysis.transport === "object"
+    ? analysis.transport
+    : {};
+  const validation = analysis.validation && typeof analysis.validation === "object"
+    ? analysis.validation
+    : {};
+  const compression = analysis.compression && typeof analysis.compression === "object"
+    ? analysis.compression
+    : {};
+  const mapping = analysis.display_mapping && typeof analysis.display_mapping === "object"
+    ? analysis.display_mapping
+    : {};
+  const crcVerified = validation.crc_match === true;
+  const compressionStatus = String(compression.status || "").trim();
+  const snappyVerified = crcVerified
+    && /^(?:ok|success|decoded|decompressed|snappy_ok)$/i.test(compressionStatus);
+  const frameTypeRaw = transport.frame_type;
+  const frameType = frameTypeRaw === null || frameTypeRaw === undefined || frameTypeRaw === ""
+    ? null
+    : Number(frameTypeRaw);
+  const isHandshake = frameType === 1 || frameType === 2
+    || /handshake/i.test(String(frameTypeRaw || ""));
+  const algorithmRaw = transport.algorithm_id ?? transport.subtype_or_algorithm;
+  const algorithmId = algorithmRaw === null || algorithmRaw === undefined || algorithmRaw === ""
+    ? null
+    : Number(algorithmRaw);
+  const encryptedType7 = frameType === 7 && (algorithmId === 3 || algorithmId === 4);
+  const displayStatus = String(validation.display_status || "").trim();
+  const parseStatus = String(validation.parse_status || "").trim();
+  const rawFallback = /raw|fallback|opaque|preview|trunc|error|failed|unsupported|unavailable/i.test(
+    `${displayStatus} ${parseStatus}`
+  ) || validation.crc_match === false;
+  const wrapperStatusText = `${displayStatus} ${parseStatus}`;
+  const wrapperBlocked = /raw|fallback|opaque|preview|trunc|crc[^\s]*fail|key[^\s]*(?:fail|unresolved)|budget|observer|unavailable|parse[^\s]*error|stream[^\s]*error/i.test(wrapperStatusText)
+    || (/unsupported/i.test(wrapperStatusText) && !/snappy/i.test(wrapperStatusText));
+  const displayTruncated = validation.display_truncated === true
+    || /trunc|preview/i.test(displayStatus);
+  const mappedRole = (key) => {
+    const value = mapping[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return String(value.role || value.stage || value.label || "").trim();
+    }
+    return value === null || value === undefined ? "" : String(value).trim();
+  };
+  const fallbackRole = (key) => {
+    if (isHandshake) {
+      if (key === "raw_pay" || key === "pay") return "complete_handshake_frame";
+      if (key === "before_pay") return "handshake_payload";
+      return "unavailable";
+    }
+    if (frameType === -1) {
+      if (key === "raw_pay" || key === "before_pay") return "observed_tcp_chunk_preview";
+      if (key === "pay") return "raw_fallback";
+      return "unavailable";
+    }
+    if (frameType === 7) {
+      if (key === "raw_pay") return "complete_wire_frame";
+      if (key === "before_pay") return encryptedType7 ? "encrypted_payload" : "wire_payload";
+      if (key === "pay") {
+        return crcVerified && !wrapperBlocked
+          ? "crc_validated_decrypted_wrapper"
+          : "raw_fallback";
+      }
+      return crcVerified && !wrapperBlocked
+        ? "snappy_decompressed_plaintext"
+        : "unavailable";
+    }
+    if (key === "raw_pay") {
+      return frameType === null ? "observed_tcp_chunk_preview" : "complete_wire_frame";
+    }
+    if (key === "before_pay") return frameType === null ? "raw_fallback" : "wire_payload";
+    if (key === "pay") return "raw_fallback";
+    return "unavailable";
+  };
+  const roleInfo = (key, role, actualLength, status) => {
+    const normalized = String(role || "").trim().toLowerCase();
+    let label = "";
+    let description = "";
+    if (normalized === "complete_handshake_frame") {
+      label = "完整握手帧";
+      description = "生产端映射为完整的 416/306 握手帧";
+    } else if (normalized === "handshake_payload") {
+      label = "握手负载";
+      description = "生产端映射为握手帧 offset 6 之后的负载";
+    } else if (normalized === "complete_wire_frame") {
+      label = "完整线上帧";
+      description = "生产端映射为包含帧头的完整线上帧";
+    } else if (normalized === "encrypted_payload" || normalized === "ciphertext_payload") {
+      label = "密文负载";
+      description = "生产端映射为 type 7 加密负载";
+    } else if (normalized === "wire_payload") {
+      label = "线上负载（未解密）";
+      description = "生产端仅解析出线上负载，未确认解密";
+    } else if (normalized === "raw_fallback") {
+      label = "未解密原始回退";
+      description = "解析、密钥、CRC 或预算条件未满足时保留的原始回退内容";
+    } else if (normalized === "observed_tcp_chunk_preview") {
+      label = "TCP 分片观测预览";
+      description = "尚未形成完整帧的 TCP 分片/截断预览";
+    } else if (normalized === "unavailable") {
+      label = "不可用";
+      description = "生产端明确没有提供该处理层";
+    } else if (
+      normalized === "crc_validated_decrypted_wrapper"
+      || normalized === "crc_verified_decrypted_envelope"
+    ) {
+      if (frameType === 7 && crcVerified && !wrapperBlocked) {
+        label = "CRC 通过的解密压缩封套";
+        description = "type 7 解密且 CRC-32/IEEE 校验通过的压缩封套";
+      } else {
+        label = "pay 层（CRC/解密状态未确认）";
+        description = "display_mapping 与 validation/frame_type 未共同证明解密封套";
+      }
+    } else if (
+      normalized === "snappy_decompressed_plaintext"
+      || normalized === "snappy_plaintext"
+    ) {
+      if (
+        frameType === 7
+        && snappyVerified
+        && !rawFallback
+        && actualLength > 0
+        && status !== "invalid"
+      ) {
+        label = "Snappy 解压明文";
+        description = "CRC 通过且 compression.status 明确成功后的 Snappy 明文";
+      } else {
+        label = "full_pay 层（Snappy 解压未完成）";
+        description = "仅有映射声明，当前校验、压缩状态或保存字节不足以证明解压明文";
+      }
+    } else {
+      label = `${key} 层（producer role 未识别）`;
+      description = normalized
+        ? `未识别的 display_mapping role=${normalized}`
+        : "生产端未声明该字段的处理层角色";
+    }
+    const truncated = actualLength > 0 && (status === "truncated" || displayTruncated);
+    if (truncated) {
+      if (normalized === "complete_handshake_frame") label = "握手帧预览（已截断）";
+      else if (normalized === "complete_wire_frame") label = "线上帧预览（已截断）";
+      else if (!/截断|预览/.test(label)) label += "（保存截断）";
+      description += "；当前只保存了截断/预览字节";
+    }
+    return { label, description };
+  };
+  const definitions = [
+    ["raw_pay", "raw_len"],
+    ["before_pay", "before_len"],
+    ["pay", "len"],
+    ["full_pay", "full_len"],
+  ];
+  return definitions.map(([key, lengthField]) => {
+    const encoded = String(event[key] || "").trim();
+    const bytes = encoded ? b64ToBytes(encoded) : [];
+    const declaredValue = Number(event[lengthField]);
+    const expectedLength = Number.isSafeInteger(declaredValue) && declaredValue > 0
+      ? declaredValue
+      : null;
+    const actualLength = bytes.length;
+    const status = !encoded ? "missing"
+      : actualLength <= 0 ? "invalid"
+      : expectedLength === null ? "unknown"
+      : actualLength < expectedLength ? "truncated"
+      : actualLength > expectedLength ? "mismatch"
+      : "complete";
+    const role = mappedRole(key) || fallbackRole(key);
+    const { label, description } = roleInfo(key, role, actualLength, status);
+    return {
+      key,
+      lengthField,
+      role,
+      label,
+      description,
+      encoded,
+      bytes,
+      expectedLength,
+      actualLength,
+      status,
+      complete: status === "complete",
+    };
+  });
+}
+
+function cschannel2DisplayValue(value, fallback = "-") {
+  if (value === true) return "true";
+  if (value === false) return "false";
+  if (value === null || value === undefined || value === "") return fallback;
+  return String(value).slice(0, 240);
+}
+
+function cschannel2StatusRows(ev) {
+  const analysis = cschannel2AuthoritativeAnalysis(ev);
+  if (!analysis) return [];
+  const objectValue = (key) => (
+    analysis[key] && typeof analysis[key] === "object" && !Array.isArray(analysis[key])
+      ? analysis[key]
+      : {}
+  );
+  const transport = objectValue("transport");
+  const session = objectValue("session");
+  const validation = objectValue("validation");
+  const compression = objectValue("compression");
+  const mapping = objectValue("display_mapping");
+  const mutation = objectValue("mutation");
+  const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+  const fields = (object, specs) => specs.map(([key, label]) => (
+    has(object, key) ? `${label}=${cschannel2DisplayValue(object[key])}` : ""
+  )).filter(Boolean).join(" · ") || "-";
+  const sourceRoles = Object.fromEntries(
+    cschannel2LayerSources(ev).map((source) => [source.key, source.role])
+  );
+  const eventDirection = Number(ev && ev.dir) === 0 ? "request（请求）" : "response（响应）";
+  const producerDirection = cschannel2DisplayValue(transport.direction, "未提供");
+  const crc = has(validation, "crc_match")
+    ? `${validation.crc_match === true ? "通过" : validation.crc_match === false ? "失败" : cschannel2DisplayValue(validation.crc_match)}`
+      + ` · expected=${cschannel2DisplayValue(validation.expected_crc32_hex)}`
+      + ` · actual=${cschannel2DisplayValue(validation.actual_crc32_hex)}`
+    : "未提供";
+  return [
+    {
+      label: "Analysis（权威分析）",
+      value: `${analysis.schema} · authoritative=true · source=${cschannel2DisplayValue(analysis.analysis_source)}`,
+    },
+    { label: "方向", value: `${eventDirection} · producer=${producerDirection}` },
+    {
+      label: "Transport（帧）",
+      value: fields(transport, [
+        ["host", "host"], ["port", "port"], ["frame_type", "type"],
+        ["subtype_or_algorithm", "subtype/algorithm"], ["algorithm_id", "algorithm"],
+        ["sequence", "sequence"], ["sequence_gap", "sequence_gap"],
+        ["frame_length", "frame_len"], ["payload_length", "payload_len"],
+      ]),
+    },
+    {
+      label: "Session（会话恢复）",
+      value: fields(session, [
+        ["recovery_status", "status"], ["tested_candidates", "tested"],
+        ["match_count", "matches"], ["elapsed_ms", "elapsed_ms"],
+        ["fingerprint_sha256", "fingerprint_sha256"],
+      ]),
+    },
+    {
+      label: "Validation（校验）",
+      value: `${fields(validation, [["parse_status", "parse"], ["display_status", "display"]])} · CRC-32/IEEE=${crc}`,
+    },
+    {
+      label: "Compression（压缩）",
+      value: fields(compression, [
+        ["status", "Snappy"], ["declared_plain_length", "declared_plain_len"],
+        ["compressed_length", "compressed_len"], ["decoded_length", "decoded_len"],
+      ]),
+    },
+    {
+      label: "Mutation（改写）",
+      value: fields(mutation, [["modified", "modified"], ["wire_mutated", "wire_mutated"]]),
+    },
+    {
+      label: "Display mapping（字段映射）",
+      value: [
+        `raw_pay=${cschannel2DisplayValue(mapping.raw_pay, sourceRoles.raw_pay)}`,
+        `before_pay=${cschannel2DisplayValue(mapping.before_pay, sourceRoles.before_pay)}`,
+        `pay=${cschannel2DisplayValue(mapping.pay, sourceRoles.pay)}`,
+        `full_pay=${cschannel2DisplayValue(mapping.full_pay, sourceRoles.full_pay)}`,
+      ].join(" · "),
+    },
+  ];
+}
+
+function ensureCschannel2Styles() {
+  if (document.getElementById("cschannel2-view-styles")) return;
+  const style = document.createElement("style");
+  style.id = "cschannel2-view-styles";
+  style.textContent = `
+    .cschannel2-view { display:grid; gap:10px; min-width:0; }
+    .cschannel2-head { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline; }
+    .cschannel2-head strong { color:var(--text); font-size:14px; }
+    .cschannel2-head span { color:var(--muted); font-size:12px; }
+    .cschannel2-status { display:grid; grid-template-columns:minmax(148px, auto) minmax(0, 1fr); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+    .cschannel2-status-label, .cschannel2-status-value { padding:6px 9px; border-bottom:1px solid var(--line); font-size:12px; overflow-wrap:anywhere; }
+    .cschannel2-status-label { color:var(--muted); background:color-mix(in srgb, var(--panel) 86%, var(--accent) 4%); font-weight:750; }
+    .cschannel2-status-value { color:var(--text); background:var(--dump-bg); }
+    .cschannel2-summary { border:1px solid var(--line); border-radius:7px; padding:8px 10px; background:var(--dump-bg); }
+    .cschannel2-summary strong { display:block; margin-bottom:4px; font-size:12px; color:var(--muted); }
+    .cschannel2-summary pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text); font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cschannel2-layers { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; min-width:0; }
+    .cschannel2-layer { min-width:0; border:1px solid var(--line); border-radius:7px; background:var(--dump-bg); overflow:hidden; }
+    .cschannel2-layer > summary { display:flex; flex-wrap:wrap; gap:5px 8px; align-items:baseline; padding:7px 9px; cursor:pointer; background:var(--panel); }
+    .cschannel2-layer-title { color:var(--text); font-weight:800; }
+    .cschannel2-layer-field { color:var(--accent); font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cschannel2-layer-state { margin-left:auto; color:var(--muted); font-size:12px; }
+    .cschannel2-layer-description, .cschannel2-layer-empty { padding:6px 9px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .cschannel2-layer .hex-shell { margin:0 8px 8px; max-height:360px; overflow:auto; }
+    .cschannel2-layer .hex-body { margin:0; }
+    @media (max-width: 1000px) {
+      .cschannel2-status { grid-template-columns:1fr; }
+      .cschannel2-status-label { border-bottom:0; }
+      .cschannel2-layers { grid-template-columns:1fr; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function buildCschannel2View(ev, hideAscii, eventId = "") {
+  ensureCschannel2Styles();
+  const analysis = cschannel2AuthoritativeAnalysis(ev);
+  if (!analysis) return null;
+  const panel = document.createElement("section");
+  panel.className = "cschannel2-view";
+
+  const head = document.createElement("div");
+  head.className = "cschannel2-head";
+  const title = document.createElement("strong");
+  title.textContent = `CSChannel2 四层解析 · ${Number(ev && ev.dir) === 0 ? "请求" : "响应"}`;
+  const subtitle = document.createElement("span");
+  subtitle.textContent = "字段是采集/解密/校验/解压层级，不是修改前后对比";
+  head.appendChild(title);
+  head.appendChild(subtitle);
+  panel.appendChild(head);
+
+  const status = document.createElement("section");
+  status.className = "cschannel2-status";
+  for (const row of cschannel2StatusRows(ev)) {
+    const label = document.createElement("div");
+    label.className = "cschannel2-status-label";
+    label.textContent = row.label;
+    const value = document.createElement("div");
+    value.className = "cschannel2-status-value";
+    value.textContent = row.value;
+    status.appendChild(label);
+    status.appendChild(value);
+  }
+  panel.appendChild(status);
+
+  const summaryBlock = document.createElement("section");
+  summaryBlock.className = "cschannel2-summary";
+  const summaryLabel = document.createElement("strong");
+  summaryLabel.textContent = "Summary（生产端摘要）";
+  const summaryValue = document.createElement("pre");
+  summaryValue.textContent = String(ev && ev.summary ? ev.summary : "未提供");
+  summaryBlock.appendChild(summaryLabel);
+  summaryBlock.appendChild(summaryValue);
+  panel.appendChild(summaryBlock);
+
+  const layers = document.createElement("div");
+  layers.className = "cschannel2-layers";
+  cschannel2LayerSources(ev).forEach((source, index) => {
+    const layer = document.createElement("details");
+    layer.className = `cschannel2-layer cschannel2-layer-${source.key} cschannel2-layer-${source.status}`;
+    layer.dataset.source = source.key;
+    layer.dataset.status = source.status;
+    layer.open = source.key === "full_pay" && source.actualLength > 0;
+    const layerHead = document.createElement("summary");
+    const layerTitle = document.createElement("span");
+    layerTitle.className = "cschannel2-layer-title";
+    layerTitle.textContent = `${index + 1}. ${source.label}`;
+    const layerField = document.createElement("code");
+    layerField.className = "cschannel2-layer-field";
+    layerField.textContent = source.key;
+    const layerState = document.createElement("span");
+    layerState.className = "cschannel2-layer-state";
+    layerState.textContent = source.status === "missing" ? "未提供"
+      : source.status === "invalid" ? "Base64 编码无效"
+      : source.complete ? `完整 · ${source.actualLength}B`
+      : source.expectedLength === null ? `已保存 ${source.actualLength}B · 声明长度未知`
+      : `已保存 ${source.actualLength}/${source.expectedLength}B · ${source.status === "truncated" ? "截断" : "长度不一致"}`;
+    layerHead.appendChild(layerTitle);
+    layerHead.appendChild(layerField);
+    layerHead.appendChild(layerState);
+    layer.appendChild(layerHead);
+
+    const description = document.createElement("div");
+    description.className = "cschannel2-layer-description";
+    description.textContent = source.description;
+    layer.appendChild(description);
+    if (!source.encoded || source.status === "invalid") {
+      const empty = document.createElement("div");
+      empty.className = "cschannel2-layer-empty";
+      empty.textContent = source.status === "invalid"
+        ? "该层已记录但编码无效；不使用其他层字节替代。"
+        : "生产端未提供该层；不从其他字段推断或替代。";
+      layer.appendChild(empty);
+    } else {
+      const dump = formatHexDump(source.encoded, hideAscii, null, { compactAscii: source.key !== "full_pay" });
+      const hexShell = document.createElement("div");
+      hexShell.className = "hex-shell";
+      attachDumpScrollPersistence(hexShell, makeDumpScrollKey(eventId, "cschannel2", source.key));
+      const hexHead = document.createElement("div");
+      hexHead.className = "hex-head";
+      hexHead.textContent = dump.header;
+      const pre = document.createElement("pre");
+      pre.className = "hex-body";
+      pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: false, asciiRows: false });
+      hexShell.appendChild(hexHead);
+      hexShell.appendChild(pre);
+      layer.appendChild(hexShell);
+    }
+    layers.appendChild(layer);
+  });
+  panel.appendChild(layers);
+  return panel;
+}
+
 function buildEventBody(ev, hideAscii, eventId = "") {
   installGcloudCompareStyles();
   const body = document.createElement("div");
   body.className = "body";
 
   const summaryText = String(ev && ev.summary ? ev.summary : "").trim();
+  if (cschannel2AuthoritativeAnalysis(ev)) {
+    body.classList.add("packet-modern", "cschannel2-body");
+    body.appendChild(buildCschannel2View(ev, hideAscii, eventId));
+    return body;
+  }
   const opaqueUndecrypted = isOpaqueUndecryptedSummary(summaryText);
   const isGcloudEvent = isGcloud65010Summary(summaryText, ev);
   const isWssJsonEvent = isWssJsonSummary(summaryText, ev);
@@ -18783,7 +19234,7 @@ function applyEventPayloadDetail(ev, detail) {
   if (!detail || typeof detail !== "object") return false;
 
   const pay = String(detail.pay || "");
-  if (!pay) return false;
+  if (!pay && !cschannel2AuthoritativeAnalysis(detail)) return false;
   ev.pay = pay;
   const currentLen = Number(detail.len);
   if (Number.isFinite(currentLen)) ev.len = currentLen;

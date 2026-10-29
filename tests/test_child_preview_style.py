@@ -80,12 +80,21 @@ console.log(JSON.stringify(installed[0].textContent));
 
     def test_unrelated_production_functions_remain_at_b6167a0(self) -> None:
         names = lambda source: set(re.findall(r"^(?:async )?function (\w+)\(", source, re.M))
-        # This follow-up is allowed to change field labels and hierarchy only.
+        # This follow-up is allowed to change field labels/hierarchy and the
+        # exact authoritative CSChannel2 display boundary only.
         # Keep every parser, comparison authority, child/hex renderer, style
         # owner and byte-copy path outside that exact presentation scope frozen.
-        changed = {"gcloudProtoFieldAlias", "gcloudCompareFieldLabel", "gcloudCompareLeafRows",
-                   "buildPacketFieldTable", "installGcloudCompareStyles"}
-        added = {"gcloudUnconfirmedLoginResponseField", "gcloudFieldHierarchyEntries", "gcloudFieldDisplayType"}
+        changed = {
+            "gcloudProtoFieldAlias", "gcloudCompareFieldLabel", "gcloudCompareLeafRows",
+            "buildPacketFieldTable", "installGcloudCompareStyles", "buildEventBody",
+            "eventModificationDiffText", "eventModificationEvidence", "writePayloadCache",
+            "applyEventPayloadDetail",
+        }
+        added = {
+            "gcloudUnconfirmedLoginResponseField", "gcloudFieldHierarchyEntries", "gcloudFieldDisplayType",
+            "cschannel2AuthoritativeAnalysis", "cschannel2LayerSources", "cschannel2DisplayValue",
+            "cschannel2StatusRows", "ensureCschannel2Styles", "buildCschannel2View",
+        }
         self.assertEqual(names(self.baseline) - names(self.source), set(), "production functions were removed")
         self.assertEqual(names(self.source) - names(self.baseline), added, "unexpected new production functions")
         for name in sorted(names(self.baseline) - changed):
