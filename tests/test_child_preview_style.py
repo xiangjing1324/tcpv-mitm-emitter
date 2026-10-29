@@ -93,7 +93,10 @@ console.log(JSON.stringify(installed[0].textContent));
         added = {
             "gcloudUnconfirmedLoginResponseField", "gcloudFieldHierarchyEntries", "gcloudFieldDisplayType",
             "cschannel2AuthoritativeAnalysis", "cschannel2LayerSources", "cschannel2DisplayValue",
-            "cschannel2StatusRows", "ensureCschannel2Styles", "buildCschannel2View",
+            "parseCschannel2ApplicationItem", "parseCschannel2PlaintextNodes",
+            "cschannel2TrustedPlaintext", "cschannel2ComparableNode", "buildCschannel2NodePanel",
+            "buildCschannel2DeferredNodePanel", "buildCschannel2EvidenceLayer",
+            "ensureCschannel2Styles", "buildCschannel2View",
         }
         self.assertEqual(names(self.baseline) - names(self.source), set(), "production functions were removed")
         self.assertEqual(names(self.source) - names(self.baseline), added, "unexpected new production functions")

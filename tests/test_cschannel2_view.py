@@ -16,6 +16,58 @@ from tcpv_mitm_emitter.semantic import analysis_from_event, analysis_needs_upgra
 from tcpv_mitm_emitter.store import TcpvEventStore
 
 
+def _tss_record(report: int, payload: bytes = b"") -> bytes:
+    record = bytearray(b"\x00\x00\x00\x01\x00\x00")
+    record.extend(int(report).to_bytes(4, "big"))
+    record.extend(payload)
+    record[4:6] = len(record).to_bytes(2, "big")
+    return bytes(record)
+
+
+def _typed_leaf_record() -> bytes:
+    record = bytearray(_tss_record(0x0102000A, b"\x00" * 42))
+    record[20:22] = (32).to_bytes(2, "big")
+    record[22:24] = (0x8029).to_bytes(2, "big")
+    record[24:28] = (0x20100002).to_bytes(4, "big")
+    record[28:32] = (0x34560001).to_bytes(4, "big")
+    record[32:36] = (0x000001CB).to_bytes(4, "big")
+    return bytes(record)
+
+
+def _c2_item(
+    body: bytes,
+    *,
+    identity: bytes = b"",
+    business_type: int = 1001,
+    business_subtype: int = 0,
+) -> bytes:
+    if len(identity) > 255:
+        raise ValueError("identity is too long")
+    return b"".join(
+        (
+            b"\x03\x04",
+            bytes((len(identity),)),
+            identity,
+            int(business_type).to_bytes(2, "big"),
+            int(business_subtype).to_bytes(2, "big"),
+            b"\x00" * 12,
+            len(body).to_bytes(4, "big"),
+            body,
+        )
+    )
+
+
+def _c2_type4(*bodies: bytes) -> bytes:
+    if len(bodies) > 255:
+        raise ValueError("too many nodes")
+    encoded = bytearray((4, len(bodies)))
+    for body in bodies:
+        item = _c2_item(body)
+        encoded.extend(len(item).to_bytes(2, "big"))
+        encoded.extend(item)
+    return bytes(encoded)
+
+
 def _analysis(*, modified: bool = False, wire_mutated: bool = False) -> dict:
     return {
         "schema": "tcpv.cschannel2.analysis.v1",
@@ -213,6 +265,7 @@ class Cschannel2BrowserViewTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         cls.runtime = (
             ace_view.AceNodeFocusedViewTests.runtime
+            + "\nconst ANALYSIS_XOR_SCAN_MAX_BYTES = 768;\n"
             + "\nconst payloadCache = new Map(); let payloadCacheBytes = 0;"
             + "\nconst PAYLOAD_CACHE_MAX_ENTRIES = 24; const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;\n"
             + "\n".join(
@@ -355,7 +408,7 @@ console.log(JSON.stringify({truncated: 3, previewLength: preview.length, observe
         )
         self.assertEqual(result, {"truncated": 3, "previewLength": 4, "observer": True})
 
-    def test_request_and_response_show_status_summary_and_only_the_new_view(self) -> None:
+    def test_request_and_response_use_compact_view_and_collapsed_four_layer_evidence(self) -> None:
         result = self.run_js(
             r"""
 const analysis = """ + json.dumps(_analysis()) + r""";
@@ -367,13 +420,18 @@ for (const dir of [0, 1]) {
   const body = buildEventBody(ev, false, 'fixture-event');
   assert(nodes(body, 'cschannel2-view').length === 1, 'dedicated view missing');
   assert(nodes(body, 'cschannel2-layer').length === 4, 'four layers not rendered');
-  for (const cls of ['dump-grid', 'child-pair-card', 'fixture-gcloud-panel', 'fixture-readable-summary']) {
+  assert(nodes(body, 'cschannel2-evidence').length === 1 && !nodes(body, 'cschannel2-evidence')[0].open, 'evidence must default collapsed');
+  assert(nodes(body, 'cschannel2-layer').every(layer => !layer.open), 'individual evidence layers must default collapsed');
+  for (const cls of ['dump-grid', 'child-pair-card', 'fixture-gcloud-panel', 'fixture-readable-summary', 'cschannel2-status']) {
     assert(nodes(body, cls).length === 0, 'legacy view leaked: ' + cls);
   }
   const bodyText = text(body);
   for (const expected of ['完整线上帧','密文负载','CRC 通过的解密压缩封套','Snappy 解压明文',
-      'ready','sequence_gap=0','11223344','transport=cschannel2 parse=ok crc=match']) {
+      '密钥就绪','CRC ✓','Snappy ✓','加密 / 校验 / 解压证据','transport=cschannel2 parse=ok crc=match']) {
     assert(bodyText.includes(expected), 'status/summary missing: ' + expected);
+  }
+  for (const hidden of ['Analysis（权威分析）','Display mapping（字段映射）','tested=76864','expected=11223344']) {
+    assert(!bodyText.includes(hidden), 'low-value diagnostics leaked into compact view: ' + hidden);
   }
   assert(bodyText.includes(dir === 0 ? '请求' : '响应'), 'direction label missing');
 }
@@ -381,6 +439,235 @@ console.log(JSON.stringify({directions: 2, layers: 4}));
 """
         )
         self.assertEqual(result, {"directions": 2, "layers": 4})
+
+    def test_type4_parser_uses_be32_body_length_and_exact_node_boundaries(self) -> None:
+        first = _typed_leaf_record()
+        second = _tss_record(0x01122389, b"second-node")
+        type4 = _c2_type4(first, second)
+        identity_item = _c2_item(first, identity=b"identity-20-bytes!!!!"[:20])
+        result = self.run_js(
+            r"""
+const type4 = """ + json.dumps(list(type4)) + r""";
+const parsed = parseCschannel2PlaintextNodes(type4);
+assert(parsed.ok && parsed.exactConsumption && parsed.carrierType === 4, 'type4 carrier rejected');
+assert(parsed.declaredCount === 2 && parsed.nodes.length === 2, 'type4 node count changed');
+assert(parsed.nodes.every(node => node.complete && node.analyzerEligible), 'eligible records not verified');
+assert(parsed.nodes[0].bodyLength === """ + str(len(first)) + r""" && parsed.nodes[1].bodyLength === """ + str(len(second)) + r""", 'canonical BE32 body length ignored');
+assert(parsed.nodes[0].itemOffset === 4 && parsed.nodes[1].itemOffset === 4 + parsed.nodes[0].itemLength + 2, 'item offsets crossed length prefixes');
+const identityItem = """ + json.dumps(list(identity_item)) + r""";
+const direct = parseCschannel2PlaintextNodes(identityItem);
+assert(direct.ok && direct.nodes.length === 1, 'type3 direct item rejected');
+assert(direct.nodes[0].identityLength === 20 && direct.nodes[0].headerLength === 43, 'identity-dependent header was hard-coded to 23');
+assert(direct.nodes[0].bodyOffset === 43 && direct.nodes[0].bodyLength === """ + str(len(first)) + r""", 'dynamic body boundary wrong');
+console.log(JSON.stringify({nodes: parsed.nodes.length, identityHeader: direct.nodes[0].headerLength}));
+"""
+        )
+        self.assertEqual(result, {"nodes": 2, "identityHeader": 43})
+
+    def test_verified_type4_nodes_reuse_legacy_preview_highlight_and_full_hex(self) -> None:
+        first = _typed_leaf_record()
+        second = _tss_record(0x01122389, b"printable-node")
+        plaintext = _c2_type4(first, second)
+        analysis = _analysis()
+        analysis["compression"].update(
+            declared_plain_length=len(plaintext), decoded_length=len(plaintext)
+        )
+        result = self.run_js(
+            r"""
+const analysis = """ + json.dumps(analysis) + r""";
+const plain = """ + json.dumps(list(plaintext)) + r""";
+const ev = {dir:0, analysis, summary:'transport=cschannel2',
+  raw_pay:gcloudBytesBase64([7,3,4]), raw_len:3,
+  before_pay:gcloudBytesBase64([9,8]), before_len:2,
+  pay:gcloudBytesBase64([5,2,0]), len:3,
+  full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+const body = buildEventBody(ev, false, 'type4-fixture');
+assert(nodes(body, 'cschannel2-node-panel').length === 2, 'carrier nodes not rendered one by one');
+assert(nodes(body, 'child-pair-card').length === 2, 'legacy cards not reused for roots');
+assert(nodes(body, 'child-preview-row-single').length === 2, 'current-only preview is not single-column');
+assert(nodes(body, 'child-hex-table').length === 2, 'complete legacy hex table missing');
+assert(nodes(body, 'child-hex-row-report').length >= 2, 'report highlight rows missing');
+assert(nodes(body, 'child-hex-byte-cell').length === """ + str(len(first) + len(second)) + r""", 'complete record bytes were not rendered');
+assert(!nodes(body, 'child-preview-before').length && !nodes(body, 'child-preview-after').length, 'crypto stages became before/after mutation');
+const bodyText = text(body);
+for (const expected of ['业务节点 2','node[0] 预览','node[1] 预览','0x0102000a','0x01122389','当前结构']) {
+  assert(bodyText.includes(expected), 'legacy node preview detail missing: ' + expected);
+}
+assert(!bodyText.includes('修改前') && !bodyText.includes('修改后'), 'read-only stages mislabeled as mutation');
+console.log(JSON.stringify({panels:nodes(body,'cschannel2-node-panel').length, cards:nodes(body,'child-pair-card').length}));
+"""
+        )
+        self.assertEqual(result, {"panels": 2, "cards": 2})
+
+    def test_encrypted_record_reuses_legacy_child_cards_after_verified_inner_crc(self) -> None:
+        outer = _tss_record(0x010A0008, b"encrypted-envelope-fixture")
+        plaintext = _c2_type4(outer)
+        analysis = _analysis()
+        analysis["compression"].update(
+            declared_plain_length=len(plaintext), decoded_length=len(plaintext)
+        )
+        result = self.run_js(
+            r"""
+const analysis = """ + json.dumps(analysis) + r""";
+const outer = """ + json.dumps(list(outer)) + r""";
+const inner = container([
+  record(0x010a0057, 'first-inner-child'),
+  record(0x010a005f, 'second-inner-child'),
+]);
+encryptedFixtures.set(gcloudBytesBase64(outer), {
+  supported:true, crcMatch:true, family:2, familyName:'family2_rc6', slot:8,
+  expectedCrc:1, actualCrc:1, cipherLength:16, plain:inner,
+  innerRoot:{value:0x010a001b, offset:6},
+});
+const plain = """ + json.dumps(list(plaintext)) + r""";
+const ev = {dir:0, analysis, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+  before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+  full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+const body = buildEventBody(ev, false, 'inner-fixture');
+assert(nodes(body, 'cschannel2-node-panel').length === 1, 'outer node panel missing');
+assert(nodes(body, 'cschannel2-inner-panel').length === 1, 'verified decrypted child panel missing');
+assert(nodes(body, 'child-pair-card').length === 3, 'outer root plus every inner child must render');
+assert(nodes(body, 'child-hex-table').length === 3, 'inner child lost complete hex preview');
+const bodyText = text(body);
+for (const expected of ['node[0] 解密后 child','CRC32 通过','child[0]','child[1]','first-inner-child','second-inner-child']) {
+  assert(bodyText.includes(expected), 'inner legacy preview missing: ' + expected);
+}
+console.log(JSON.stringify({outer:1, innerCards:2, totalCards:nodes(body,'child-pair-card').length}));
+"""
+        )
+        self.assertEqual(result, {"outer": 1, "innerCards": 2, "totalCards": 3})
+
+    def test_all_type4_nodes_render_and_unsupported_records_remain_opaque(self) -> None:
+        supported = [_tss_record(0x010A0011, bytes((index,))) for index in range(10)]
+        unsupported_family = _tss_record(0x01110002, b"opaque-family")
+        unsupported_business_item = _c2_item(
+            b"not-a-tss-record", business_type=1002, business_subtype=11
+        )
+        encoded = bytearray((4, 12))
+        for body in [*supported, unsupported_family]:
+            item = _c2_item(body)
+            encoded.extend(len(item).to_bytes(2, "big"))
+            encoded.extend(item)
+        encoded.extend(len(unsupported_business_item).to_bytes(2, "big"))
+        encoded.extend(unsupported_business_item)
+        analysis = _analysis()
+        analysis["compression"].update(
+            declared_plain_length=len(encoded), decoded_length=len(encoded)
+        )
+        result = self.run_js(
+            r"""
+const analysis = """ + json.dumps(analysis) + r""";
+const plain = """ + json.dumps(list(encoded)) + r""";
+const ev = {dir:0, analysis, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+  before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+  full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+const parsed = parseCschannel2PlaintextNodes(plain);
+assert(parsed.ok && parsed.nodes.length === 12, 'outer verified item list rejected');
+assert(parsed.nodes[10].recordStatus === 'unsupported_report_family' && !parsed.nodes[10].analyzerEligible, 'unsupported family was forced through old detector');
+assert(parsed.nodes[11].recordStatus === 'unsupported_business' && !parsed.nodes[11].analyzerEligible, 'unsupported business was forced through old detector');
+const body = buildEventBody(ev, false, 'many-nodes');
+assert(nodes(body, 'cschannel2-node-panel').length === 12, 'type4 nodes were capped at legacy child limit');
+assert(nodes(body, 'child-pair-card').length === 12, 'opaque nodes did not preserve individual previews');
+assert(text(body).includes('record / opaque 2'), 'carrier title overclaimed every node as TerSafe');
+assert(nodes(body, 'child-compare-note').length === 0, 'all top-level nodes were not rendered');
+assert(nodes(body, 'cschannel2-node-panel').filter(panel => panel.dataset.recordStatus === 'unsupported_report_family').length === 1, 'unsupported family status missing');
+assert(nodes(body, 'cschannel2-node-panel').filter(panel => panel.dataset.recordStatus === 'unsupported_business').length === 1, 'unsupported business status missing');
+const unsupportedBusinessPanel = nodes(body, 'cschannel2-node-panel').find(panel => panel.dataset.recordStatus === 'unsupported_business');
+assert(unsupportedBusinessPanel && !text(unsupportedBusinessPanel).includes('0x00000000'), 'opaque business fabricated report 0');
+console.log(JSON.stringify({nodes:nodes(body,'cschannel2-node-panel').length, opaque:2}));
+"""
+        )
+        self.assertEqual(result, {"nodes": 12, "opaque": 2})
+
+    def test_oversized_node_list_keeps_every_node_but_defers_full_hex_dom(self) -> None:
+        plaintext = _c2_type4(
+            *[_tss_record(0x010A0011, bytes((index,))) for index in range(65)]
+        )
+        analysis = _analysis()
+        analysis["compression"].update(
+            declared_plain_length=len(plaintext), decoded_length=len(plaintext)
+        )
+        result = self.run_js(
+            r"""
+const analysis = """ + json.dumps(analysis) + r""";
+const plain = """ + json.dumps(list(plaintext)) + r""";
+const ev = {dir:0, analysis, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+  before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+  full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+const body = buildEventBody(ev, false, 'deferred');
+const deferred = nodes(body, 'cschannel2-node-deferred');
+assert(deferred.length === 65, 'large carrier did not preserve every node summary');
+assert(!nodes(body, 'cschannel2-node-panel').length && !nodes(body, 'child-pair-card').length, 'large carrier eagerly built full hex DOM');
+assert(text(body).includes('node[64]'), 'last node summary disappeared');
+deferred[0].open = true;
+for (const callback of deferred[0].listeners.toggle || []) callback({target:deferred[0]});
+assert(nodes(body, 'cschannel2-node-panel').length === 1 && nodes(body, 'child-pair-card').length === 1, 'expanded node did not build complete preview');
+assert(nodes(body, 'child-hex-table').length === 1, 'expanded node lost full hex table');
+console.log(JSON.stringify({summaries:deferred.length, rendered:nodes(body,'child-pair-card').length}));
+"""
+        )
+        self.assertEqual(result, {"summaries": 65, "rendered": 1})
+
+    def test_malformed_type4_and_type10_fail_closed_without_fake_nodes(self) -> None:
+        good = _c2_type4(_tss_record(0x010A0011, b"ok"))
+        malformed = bytearray(good)
+        malformed[2:4] = (len(good) + 20).to_bytes(2, "big")
+        type10 = bytes.fromhex(
+            "0a0000000b3237303333333632353600000100000000094e00000000"
+        )
+        analysis = _analysis()
+        result = self.run_js(
+            r"""
+const base = """ + json.dumps(analysis) + r""";
+for (const [name, plain] of [['malformed', """ + json.dumps(list(malformed)) + r"""], ['type10', """ + json.dumps(list(type10)) + r"""]]) {
+  const analysis = {...base, compression:{...base.compression, declared_plain_length:plain.length, decoded_length:plain.length}};
+  const ev = {dir:1, analysis, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+    before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+    full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+  const parsed = parseCschannel2PlaintextNodes(plain);
+  assert(!parsed.ok && parsed.nodes.length === 0, name + ' fabricated parsed nodes');
+  const body = buildEventBody(ev, false, name);
+  assert(!nodes(body, 'cschannel2-node-panel').length && !nodes(body, 'child-pair-card').length, name + ' fabricated semantic cards');
+  assert(nodes(body, 'cschannel2-parse-note').length === 1, name + ' fail-closed note missing');
+  assert(nodes(body, 'cschannel2-layer').length === 4, name + ' lost raw evidence');
+}
+console.log(JSON.stringify({negativeControls:2, fakeNodes:0}));
+"""
+        )
+        self.assertEqual(result, {"negativeControls": 2, "fakeNodes": 0})
+
+    def test_crc_snappy_or_full_length_failure_never_enters_node_parser(self) -> None:
+        plaintext = _c2_type4(_tss_record(0x010A0011, b"trusted-only"))
+        base = _analysis()
+        base["compression"].update(
+            declared_plain_length=len(plaintext), decoded_length=len(plaintext)
+        )
+        result = self.run_js(
+            r"""
+const base = """ + json.dumps(base) + r""";
+const plain = """ + json.dumps(list(plaintext)) + r""";
+const variants = [
+  {...base, validation:{...base.validation, crc_match:false}},
+  {...base, compression:{...base.compression, status:'failed'}},
+  {...base, validation:{...base.validation, display_status:'raw_only'}},
+  {...base, transport:{...base.transport, frame_type:1}},
+  {...base, compression:{...base.compression, decoded_length:plain.length + 1}},
+];
+for (const analysis of variants) {
+  const ev = {dir:0, analysis, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+    before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+    full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+  const body = buildEventBody(ev, false, 'gate');
+  assert(!nodes(body, 'child-pair-card').length, 'failed verification entered node parser');
+}
+const truncated = {dir:0, analysis:base, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+  before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+  full_pay:gcloudBytesBase64(plain.slice(0,-1)), full_len:plain.length};
+assert(!nodes(buildEventBody(truncated,false,'truncated'), 'child-pair-card').length, 'truncated full_pay entered node parser');
+console.log(JSON.stringify({gates:6, fakeNodes:0}));
+"""
+        )
+        self.assertEqual(result, {"gates": 6, "fakeNodes": 0})
 
     def test_crc_compression_and_mutation_statuses_do_not_overclaim(self) -> None:
         result = self.run_js(

@@ -18664,82 +18664,431 @@ function cschannel2DisplayValue(value, fallback = "-") {
   return String(value).slice(0, 240);
 }
 
-function cschannel2StatusRows(ev) {
+function parseCschannel2ApplicationItem(byteValues, index = 0, itemOffset = 0) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const base = {
+    index: Math.max(0, Number.parseInt(index, 10) || 0),
+    itemOffset: Math.max(0, Number.parseInt(itemOffset, 10) || 0),
+    itemLength: bytes.length,
+    itemBytes: bytes,
+    type: bytes.length > 0 ? Number(bytes[0]) : null,
+    subtype: bytes.length > 1 ? Number(bytes[1]) : null,
+    identityLength: bytes.length > 2 ? Number(bytes[2]) : null,
+    headerLength: null,
+    businessType: null,
+    businessSubtype: null,
+    bodyOffset: null,
+    bodyLength: null,
+    bodyBytes: [],
+    reportCode: null,
+    recordStatus: "invalid_item",
+    analyzerEligible: false,
+    complete: false,
+    reason: "",
+  };
+  if (bytes.length < 3) return { ...base, reason: "item 不足 3 字节" };
+  if (bytes[0] !== 0x03 || bytes[1] !== 0x04) {
+    return { ...base, recordStatus: "unsupported_item_type", reason: "item 不是已验证的 03/04 carrier" };
+  }
+  const identityLength = Number(bytes[2]);
+  const fixedOffset = 3 + identityLength;
+  const headerLength = fixedOffset + 20;
+  if (headerLength > bytes.length) {
+    return { ...base, headerLength, reason: "identity/header 超出 item 边界" };
+  }
+  const businessType = readBe16(bytes, fixedOffset);
+  const businessSubtype = readBe16(bytes, fixedOffset + 2);
+  const bodyLength = readBe32(bytes, fixedOffset + 16);
+  const bodyOffset = headerLength;
+  if (!Number.isFinite(bodyLength) || bodyOffset + bodyLength !== bytes.length) {
+    return {
+      ...base,
+      headerLength,
+      businessType,
+      businessSubtype,
+      bodyOffset,
+      bodyLength,
+      reason: "BE32 body_len 与 item 结尾不一致",
+    };
+  }
+  const bodyBytes = bytes.slice(bodyOffset);
+  let recordStatus = "invalid_compact_record";
+  let reportCode = null;
+  let analyzerEligible = false;
+  let reason = "body 不是完整 compact record";
+  if (businessType !== 1001 || businessSubtype !== 0) {
+    recordStatus = "unsupported_business";
+    reason = `business=${businessType}/${businessSubtype} 暂无 TerSafe 结构证据`;
+  } else if (bodyBytes.length === 0) {
+    recordStatus = "empty_body";
+    reason = "business body 为空";
+  } else if (
+    bodyBytes.length >= 10
+    && readBe32(bodyBytes, 0) === 1
+    && readBe16(bodyBytes, 4) === bodyBytes.length
+  ) {
+    reportCode = readBe32(bodyBytes, 6);
+    if (isLikelyTssReportCode(reportCode)) {
+      recordStatus = "compact_record_exact";
+      analyzerEligible = true;
+      reason = "";
+    } else {
+      recordStatus = "unsupported_report_family";
+      reason = `report ${formatHexValue(reportCode, 8)} 不在旧解析器 family 白名单`;
+    }
+  }
+  return {
+    ...base,
+    headerLength,
+    businessType,
+    businessSubtype,
+    bodyOffset,
+    bodyLength,
+    bodyBytes,
+    reportCode,
+    recordStatus,
+    analyzerEligible,
+    complete: true,
+    reason,
+  };
+}
+
+function parseCschannel2PlaintextNodes(byteValues) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  const empty = {
+    ok: false,
+    carrierType: bytes.length > 0 ? Number(bytes[0]) : null,
+    carrierKind: "unsupported",
+    declaredCount: 0,
+    nodes: [],
+    exactConsumption: false,
+    reason: "",
+  };
+  if (bytes.length === 0) return { ...empty, reason: "没有 Snappy 明文字节" };
+  if (bytes[0] === 0x03) {
+    const node = parseCschannel2ApplicationItem(bytes, 0, 0);
+    return {
+      ok: node.complete,
+      carrierType: 3,
+      carrierKind: "single-item",
+      declaredCount: 1,
+      nodes: [node],
+      exactConsumption: node.complete,
+      reason: node.complete ? "" : node.reason,
+    };
+  }
+  if (bytes[0] !== 0x04) {
+    return { ...empty, reason: `application type=${bytes[0]} 暂无 node 结构证据` };
+  }
+  if (bytes.length < 2) return { ...empty, carrierType: 4, carrierKind: "item-list", reason: "缺少 item_count" };
+  const declaredCount = Number(bytes[1]);
+  const nodes = [];
+  let offset = 2;
+  for (let index = 0; index < declaredCount; index += 1) {
+    if (offset + 2 > bytes.length) {
+      return {
+        ...empty,
+        carrierType: 4,
+        carrierKind: "item-list",
+        declaredCount,
+        reason: `node[${index}] 缺少 BE16 item_len`,
+      };
+    }
+    const itemLength = readBe16(bytes, offset);
+    const itemOffset = offset + 2;
+    if (!Number.isFinite(itemLength) || itemLength <= 0 || itemOffset + itemLength > bytes.length) {
+      return {
+        ...empty,
+        carrierType: 4,
+        carrierKind: "item-list",
+        declaredCount,
+        reason: `node[${index}] item_len 超出明文边界`,
+      };
+    }
+    nodes.push(parseCschannel2ApplicationItem(
+      bytes.slice(itemOffset, itemOffset + itemLength),
+      index,
+      itemOffset,
+    ));
+    offset = itemOffset + itemLength;
+  }
+  if (offset !== bytes.length) {
+    return {
+      ...empty,
+      carrierType: 4,
+      carrierKind: "item-list",
+      declaredCount,
+      reason: `解析 ${declaredCount} 个 node 后仍有 ${bytes.length - offset} 字节`,
+    };
+  }
+  return {
+    ok: true,
+    carrierType: 4,
+    carrierKind: "item-list",
+    declaredCount,
+    nodes,
+    exactConsumption: true,
+    reason: "",
+  };
+}
+
+function cschannel2TrustedPlaintext(ev) {
   const analysis = cschannel2AuthoritativeAnalysis(ev);
-  if (!analysis) return [];
-  const objectValue = (key) => (
-    analysis[key] && typeof analysis[key] === "object" && !Array.isArray(analysis[key])
-      ? analysis[key]
-      : {}
-  );
-  const transport = objectValue("transport");
-  const session = objectValue("session");
-  const validation = objectValue("validation");
-  const compression = objectValue("compression");
-  const mapping = objectValue("display_mapping");
-  const mutation = objectValue("mutation");
-  const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-  const fields = (object, specs) => specs.map(([key, label]) => (
-    has(object, key) ? `${label}=${cschannel2DisplayValue(object[key])}` : ""
-  )).filter(Boolean).join(" · ") || "-";
-  const sourceRoles = Object.fromEntries(
-    cschannel2LayerSources(ev).map((source) => [source.key, source.role])
-  );
-  const eventDirection = Number(ev && ev.dir) === 0 ? "request（请求）" : "response（响应）";
-  const producerDirection = cschannel2DisplayValue(transport.direction, "未提供");
-  const crc = has(validation, "crc_match")
-    ? `${validation.crc_match === true ? "通过" : validation.crc_match === false ? "失败" : cschannel2DisplayValue(validation.crc_match)}`
-      + ` · expected=${cschannel2DisplayValue(validation.expected_crc32_hex)}`
-      + ` · actual=${cschannel2DisplayValue(validation.actual_crc32_hex)}`
-    : "未提供";
-  return [
-    {
-      label: "Analysis（权威分析）",
-      value: `${analysis.schema} · authoritative=true · source=${cschannel2DisplayValue(analysis.analysis_source)}`,
-    },
-    { label: "方向", value: `${eventDirection} · producer=${producerDirection}` },
-    {
-      label: "Transport（帧）",
-      value: fields(transport, [
-        ["host", "host"], ["port", "port"], ["frame_type", "type"],
-        ["subtype_or_algorithm", "subtype/algorithm"], ["algorithm_id", "algorithm"],
-        ["sequence", "sequence"], ["sequence_gap", "sequence_gap"],
-        ["frame_length", "frame_len"], ["payload_length", "payload_len"],
-      ]),
-    },
-    {
-      label: "Session（会话恢复）",
-      value: fields(session, [
-        ["recovery_status", "status"], ["tested_candidates", "tested"],
-        ["match_count", "matches"], ["elapsed_ms", "elapsed_ms"],
-        ["fingerprint_sha256", "fingerprint_sha256"],
-      ]),
-    },
-    {
-      label: "Validation（校验）",
-      value: `${fields(validation, [["parse_status", "parse"], ["display_status", "display"]])} · CRC-32/IEEE=${crc}`,
-    },
-    {
-      label: "Compression（压缩）",
-      value: fields(compression, [
-        ["status", "Snappy"], ["declared_plain_length", "declared_plain_len"],
-        ["compressed_length", "compressed_len"], ["decoded_length", "decoded_len"],
-      ]),
-    },
-    {
-      label: "Mutation（改写）",
-      value: fields(mutation, [["modified", "modified"], ["wire_mutated", "wire_mutated"]]),
-    },
-    {
-      label: "Display mapping（字段映射）",
-      value: [
-        `raw_pay=${cschannel2DisplayValue(mapping.raw_pay, sourceRoles.raw_pay)}`,
-        `before_pay=${cschannel2DisplayValue(mapping.before_pay, sourceRoles.before_pay)}`,
-        `pay=${cschannel2DisplayValue(mapping.pay, sourceRoles.pay)}`,
-        `full_pay=${cschannel2DisplayValue(mapping.full_pay, sourceRoles.full_pay)}`,
-      ].join(" · "),
-    },
+  const sources = cschannel2LayerSources(ev);
+  const source = sources.find((item) => item.key === "full_pay") || null;
+  if (!analysis || !source) return { trusted: false, source, parsed: null, reason: "缺少权威分析或 full_pay" };
+  const transport = analysis.transport && typeof analysis.transport === "object" ? analysis.transport : {};
+  const validation = analysis.validation && typeof analysis.validation === "object" ? analysis.validation : {};
+  const compression = analysis.compression && typeof analysis.compression === "object" ? analysis.compression : {};
+  const compressionOk = /^(?:ok|success|decoded|decompressed|snappy_ok)$/i.test(String(compression.status || ""));
+  if (Number(transport.frame_type) !== 7) {
+    return { trusted: false, source, parsed: null, reason: "仅 type 7 的解压结果进入业务节点解析" };
+  }
+  if (validation.crc_match !== true) {
+    return { trusted: false, source, parsed: null, reason: "CRC 未通过，不解析业务节点" };
+  }
+  if (!compressionOk) {
+    return { trusted: false, source, parsed: null, reason: "Snappy 未明确成功，不解析业务节点" };
+  }
+  if (
+    !source.complete
+    || source.actualLength <= 0
+    || source.role !== "snappy_decompressed_plaintext"
+    || source.label !== "Snappy 解压明文"
+  ) {
+    return { trusted: false, source, parsed: null, reason: "full_pay 不完整或不是 Snappy 明文" };
+  }
+  for (const [field, label] of [
+    [compression.declared_plain_length, "declared_plain_length"],
+    [compression.decoded_length, "decoded_length"],
+  ]) {
+    const length = Number(field);
+    if (Number.isSafeInteger(length) && length > 0 && length !== source.actualLength) {
+      return { trusted: false, source, parsed: null, reason: `${label} 与 full_pay 实际长度不一致` };
+    }
+  }
+  const parsed = parseCschannel2PlaintextNodes(source.bytes);
+  return { trusted: true, source, parsed, reason: parsed.ok ? "" : parsed.reason };
+}
+
+function cschannel2ComparableNode(node, displayBytes) {
+  const bytes = Array.isArray(displayBytes) ? displayBytes : [];
+  const rawReportCode = node && node.reportCode;
+  const reportCode = rawReportCode === null || rawReportCode === undefined || rawReportCode === ""
+    ? null
+    : (Number.isFinite(Number(rawReportCode)) ? Number(rawReportCode) : null);
+  const report = reportCode === null ? null : { value: reportCode, offset: 6 };
+  const analyzerEligible = Boolean(node && node.analyzerEligible);
+  const identity = analyzerEligible && report ? tssRecordIdentity(bytes, report) : { idValue: null, idText: "" };
+  const className = analyzerEligible ? classifyRecordBytes(bytes, reportCode) : "opaque-record";
+  const comparable = {
+    index: 0,
+    nodeLabel: `node[${Number(node && node.index || 0)}]`,
+    offset: 0,
+    recordStart: 0,
+    recordEnd: bytes.length,
+    len: bytes.length,
+    lengthEndian: "",
+    reportCode,
+    reportOffset: report ? 6 : -1,
+    idValue: identity.idValue,
+    idText: identity.idText,
+    className,
+    valuePreview: analyzerEligible ? formatRecordValuePreview(bytes, reportCode) : "",
+    timestampCandidates: analyzerEligible ? extractTimestampCandidatesFromRecord(bytes) : [],
+    hexSignature: !analyzerEligible ? formatHexSignature(bytes) : (className === "binary-like-leaf" ? formatHexSignature(bytes) : ""),
+    xorCommonPreview: analyzerEligible && (className === "binary-like-leaf" || Number(reportCode) === 0x0102000a)
+      ? summarizeCommonFixedXor(bytes, reportCode)
+      : "",
+  };
+  return analyzerEligible ? attachLocalChildSemantic(comparable, bytes) : comparable;
+}
+
+function buildCschannel2NodePanel(node) {
+  const item = node && typeof node === "object" ? node : {};
+  const bodyBytes = Array.isArray(item.bodyBytes) ? item.bodyBytes : [];
+  const itemBytes = Array.isArray(item.itemBytes) ? item.itemBytes : [];
+  const displayBytes = bodyBytes.length > 0 ? bodyBytes : itemBytes;
+  const parsed = item.analyzerEligible ? parseTssChildRecords(bodyBytes) : { children: [], parent: null };
+  const parsedChildren = Array.isArray(parsed.children) ? parsed.children : [];
+  const currentChildren = parsedChildren.length > 0
+    ? parsedChildren
+    : [cschannel2ComparableNode(item, displayBytes)];
+  const panel = document.createElement("section");
+  panel.className = "child-compare child-compare-current-only cschannel2-node-panel";
+  panel.dataset.nodeIndex = String(Number(item.index || 0));
+  panel.dataset.recordStatus = String(item.recordStatus || "invalid_item");
+
+  const head = document.createElement("div");
+  head.className = "child-compare-head";
+  const title = document.createElement("span");
+  const reportText = item.reportCode !== null && item.reportCode !== undefined && item.reportCode !== ""
+    && Number.isFinite(Number(item.reportCode))
+    ? ` · ${formatHexValue(Number(item.reportCode), 8)}`
+    : "";
+  title.textContent = `node[${Number(item.index || 0)}] 预览${reportText}`;
+  const meta = document.createElement("small");
+  const metaBits = [
+    `item ${Number(item.itemLength || 0)}B`,
+    `body ${Number(item.bodyLength || 0)}B`,
+    `business ${cschannel2DisplayValue(item.businessType)}/${cschannel2DisplayValue(item.businessSubtype)}`,
   ];
+  if (parsedChildren.length > 0) metaBits.push(`child ${parsedChildren.length}`);
+  if (item.reason) metaBits.push(String(item.reason));
+  meta.textContent = metaBits.join(" · ");
+  head.appendChild(title);
+  head.appendChild(meta);
+  panel.appendChild(head);
+
+  const parentStrip = makeParentStructureStrip(null, parsed.parent, { currentOnly: true });
+  if (parentStrip) panel.appendChild(parentStrip);
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  for (let index = 0; index < currentChildren.length; index += 1) {
+    grid.appendChild(makeChildCard(
+      [],
+      currentChildren,
+      [],
+      displayBytes,
+      index,
+      new Map(),
+      {},
+      new Map(),
+      { currentOnly: true },
+    ));
+  }
+  panel.appendChild(grid);
+
+  const encrypted = item.analyzerEligible ? decryptDisplayableTssEnvelope(bodyBytes) : null;
+  if (
+    encrypted
+    && encrypted.supported
+    && encrypted.crcMatch
+    && Array.isArray(encrypted.plain)
+    && encrypted.plain.length > 0
+  ) {
+    const innerBytes = encrypted.plain;
+    const innerParsed = parseTssChildRecords(innerBytes);
+    const innerParsedChildren = Array.isArray(innerParsed.children) ? innerParsed.children : [];
+    const innerRoot = innerParsedChildren.length > 0 ? null : makeRootComparableNode(innerBytes);
+    if (innerRoot) innerRoot.nodeLabel = "child[0]";
+    const innerChildren = innerParsedChildren.length > 0
+      ? innerParsedChildren
+      : (innerRoot ? [innerRoot] : []);
+    if (innerChildren.length > 0) {
+      const innerPanel = document.createElement("section");
+      innerPanel.className = "cschannel2-inner-panel";
+      const innerHead = document.createElement("div");
+      innerHead.className = "child-compare-head";
+      const innerTitle = document.createElement("span");
+      innerTitle.textContent = "node[" + Number(item.index || 0) + "] 解密后 child";
+      const innerMeta = document.createElement("small");
+      innerMeta.textContent = String(encrypted.familyName || "TSS")
+        + " · slot[" + Number(encrypted.slot) + "] · CRC32 通过 · "
+        + innerBytes.length + "B · child " + innerChildren.length;
+      innerHead.appendChild(innerTitle);
+      innerHead.appendChild(innerMeta);
+      innerPanel.appendChild(innerHead);
+      const innerParentStrip = makeParentStructureStrip(null, innerParsed.parent, { currentOnly: true });
+      if (innerParentStrip) innerPanel.appendChild(innerParentStrip);
+      const innerGrid = document.createElement("div");
+      innerGrid.className = "child-compare-grid";
+      for (let index = 0; index < innerChildren.length; index += 1) {
+        innerGrid.appendChild(makeChildCard(
+          [],
+          innerChildren,
+          [],
+          innerBytes,
+          index,
+          new Map(),
+          {},
+          new Map(),
+          { currentOnly: true },
+        ));
+      }
+      innerPanel.appendChild(innerGrid);
+      panel.appendChild(innerPanel);
+    }
+  }
+  return panel;
+}
+
+function buildCschannel2DeferredNodePanel(node) {
+  const item = node && typeof node === "object" ? node : {};
+  const details = document.createElement("details");
+  details.className = "cschannel2-node-deferred";
+  details.dataset.nodeIndex = String(Number(item.index || 0));
+  details.dataset.recordStatus = String(item.recordStatus || "invalid_item");
+  const summary = document.createElement("summary");
+  const reportText = item.reportCode !== null && item.reportCode !== undefined && item.reportCode !== ""
+    && Number.isFinite(Number(item.reportCode))
+    ? " · " + formatHexValue(Number(item.reportCode), 8)
+    : "";
+  const reasonText = item.reason ? " · " + String(item.reason) : "";
+  summary.textContent = "node[" + Number(item.index || 0) + "]"
+    + reportText + " · item " + Number(item.itemLength || 0) + "B"
+    + reasonText + " · 展开完整 Preview";
+  details.appendChild(summary);
+  let rendered = false;
+  details.addEventListener("toggle", () => {
+    if (!details.open || rendered) return;
+    rendered = true;
+    details.appendChild(buildCschannel2NodePanel(item));
+  });
+  return details;
+}
+
+function buildCschannel2EvidenceLayer(source, hideAscii, eventId, index) {
+  const layer = document.createElement("details");
+  layer.className = `cschannel2-layer cschannel2-layer-${source.key} cschannel2-layer-${source.status}`;
+  layer.dataset.source = source.key;
+  layer.dataset.status = source.status;
+  const layerHead = document.createElement("summary");
+  const layerTitle = document.createElement("span");
+  layerTitle.className = "cschannel2-layer-title";
+  layerTitle.textContent = `${index + 1}. ${source.label}`;
+  const layerField = document.createElement("code");
+  layerField.className = "cschannel2-layer-field";
+  layerField.textContent = source.key;
+  const layerState = document.createElement("span");
+  layerState.className = "cschannel2-layer-state";
+  layerState.textContent = source.status === "missing" ? "未提供"
+    : source.status === "invalid" ? "Base64 编码无效"
+    : source.complete ? `完整 · ${source.actualLength}B`
+    : source.expectedLength === null ? `已保存 ${source.actualLength}B · 声明长度未知`
+    : `已保存 ${source.actualLength}/${source.expectedLength}B · ${source.status === "truncated" ? "截断" : "长度不一致"}`;
+  layerHead.appendChild(layerTitle);
+  layerHead.appendChild(layerField);
+  layerHead.appendChild(layerState);
+  layer.appendChild(layerHead);
+
+  const description = document.createElement("div");
+  description.className = "cschannel2-layer-description";
+  description.textContent = source.description;
+  layer.appendChild(description);
+  if (!source.encoded || source.status === "invalid") {
+    const empty = document.createElement("div");
+    empty.className = "cschannel2-layer-empty";
+    empty.textContent = source.status === "invalid"
+      ? "该层已记录但编码无效；不使用其他层字节替代。"
+      : "生产端未提供该层；不从其他字段推断或替代。";
+    layer.appendChild(empty);
+    return layer;
+  }
+  const dump = formatHexDump(source.encoded, hideAscii, null, { compactAscii: source.key !== "full_pay" });
+  const hexShell = document.createElement("div");
+  hexShell.className = "hex-shell";
+  attachDumpScrollPersistence(hexShell, makeDumpScrollKey(eventId, "cschannel2", source.key));
+  const hexHead = document.createElement("div");
+  hexHead.className = "hex-head";
+  hexHead.textContent = dump.header;
+  const pre = document.createElement("pre");
+  pre.className = "hex-body";
+  pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: false, asciiRows: false });
+  hexShell.appendChild(hexHead);
+  hexShell.appendChild(pre);
+  layer.appendChild(hexShell);
+  return layer;
 }
 
 function ensureCschannel2Styles() {
@@ -18748,17 +19097,31 @@ function ensureCschannel2Styles() {
   style.id = "cschannel2-view-styles";
   style.textContent = `
     .cschannel2-view { display:grid; gap:10px; min-width:0; }
-    .cschannel2-head { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline; }
+    .cschannel2-head { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; }
     .cschannel2-head strong { color:var(--text); font-size:14px; }
     .cschannel2-head span { color:var(--muted); font-size:12px; }
-    .cschannel2-status { display:grid; grid-template-columns:minmax(148px, auto) minmax(0, 1fr); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
-    .cschannel2-status-label, .cschannel2-status-value { padding:6px 9px; border-bottom:1px solid var(--line); font-size:12px; overflow-wrap:anywhere; }
-    .cschannel2-status-label { color:var(--muted); background:color-mix(in srgb, var(--panel) 86%, var(--accent) 4%); font-weight:750; }
-    .cschannel2-status-value { color:var(--text); background:var(--dump-bg); }
-    .cschannel2-summary { border:1px solid var(--line); border-radius:7px; padding:8px 10px; background:var(--dump-bg); }
-    .cschannel2-summary strong { display:block; margin-bottom:4px; font-size:12px; color:var(--muted); }
-    .cschannel2-summary pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text); font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cschannel2-chips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .cschannel2-chip { border:1px solid var(--line); border-radius:999px; padding:3px 8px; color:var(--muted); background:var(--dump-bg); font:750 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cschannel2-chip-ok { color:var(--hex-timestamp-color); border-color:var(--hex-timestamp-line); background:var(--hex-timestamp-bg); }
+    .cschannel2-chip-warn { color:var(--modified-accent); border-color:var(--modified-line); }
+    .cschannel2-chip-bad { color:var(--resp); border-color:color-mix(in srgb, var(--resp) 45%, var(--line)); }
+    .cschannel2-node-list { display:grid; gap:10px; min-width:0; }
+    .cschannel2-node-list-head { display:flex; gap:8px; align-items:baseline; color:var(--text); font-weight:850; }
+    .cschannel2-node-list-head small { color:var(--muted); font-weight:500; }
+    .cschannel2-node-panel { margin:0; }
+    .cschannel2-node-deferred { border:1px solid var(--line); border-radius:7px; overflow:hidden; background:var(--dump-bg); }
+    .cschannel2-node-deferred > summary { padding:8px 10px; cursor:pointer; color:var(--text); background:var(--panel); font-weight:750; }
+    .cschannel2-node-deferred > .cschannel2-node-panel { border:0; border-top:1px solid var(--line); border-radius:0; }
+    .cschannel2-inner-panel { display:grid; gap:8px; margin:9px; padding-top:9px; border-top:1px solid var(--line); min-width:0; }
+    .cschannel2-parse-note { border:1px solid var(--modified-line); border-radius:7px; padding:8px 10px; color:var(--muted); background:var(--modified-bg); font-size:12px; }
+    .cschannel2-evidence { border:1px solid var(--line); border-radius:7px; overflow:hidden; background:var(--dump-bg); }
+    .cschannel2-evidence > summary { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; padding:8px 10px; cursor:pointer; color:var(--muted); font-size:12px; font-weight:800; background:var(--panel); }
+    .cschannel2-evidence > summary small { margin-left:auto; color:var(--muted); font-weight:500; }
+    .cschannel2-summary { margin:8px; border:1px solid var(--line); border-radius:6px; padding:7px 9px; background:var(--panel); }
+    .cschannel2-summary strong { display:block; margin-bottom:3px; font-size:11px; color:var(--muted); }
+    .cschannel2-summary pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .cschannel2-layers { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; min-width:0; }
+    .cschannel2-evidence .cschannel2-layers { padding:0 8px 8px; }
     .cschannel2-layer { min-width:0; border:1px solid var(--line); border-radius:7px; background:var(--dump-bg); overflow:hidden; }
     .cschannel2-layer > summary { display:flex; flex-wrap:wrap; gap:5px 8px; align-items:baseline; padding:7px 9px; cursor:pointer; background:var(--panel); }
     .cschannel2-layer-title { color:var(--text); font-weight:800; }
@@ -18768,8 +19131,6 @@ function ensureCschannel2Styles() {
     .cschannel2-layer .hex-shell { margin:0 8px 8px; max-height:360px; overflow:auto; }
     .cschannel2-layer .hex-body { margin:0; }
     @media (max-width: 1000px) {
-      .cschannel2-status { grid-template-columns:1fr; }
-      .cschannel2-status-label { border-bottom:0; }
       .cschannel2-layers { grid-template-columns:1fr; }
     }
   `;
@@ -18786,93 +19147,99 @@ function buildCschannel2View(ev, hideAscii, eventId = "") {
   const head = document.createElement("div");
   head.className = "cschannel2-head";
   const title = document.createElement("strong");
-  title.textContent = `CSChannel2 四层解析 · ${Number(ev && ev.dir) === 0 ? "请求" : "响应"}`;
+  title.textContent = `CSChannel2 · ${Number(ev && ev.dir) === 0 ? "请求" : "响应"}`;
   const subtitle = document.createElement("span");
-  subtitle.textContent = "字段是采集/解密/校验/解压层级，不是修改前后对比";
+  subtitle.textContent = "当前解压明文 · 只读结构预览";
   head.appendChild(title);
   head.appendChild(subtitle);
   panel.appendChild(head);
 
-  const status = document.createElement("section");
-  status.className = "cschannel2-status";
-  for (const row of cschannel2StatusRows(ev)) {
-    const label = document.createElement("div");
-    label.className = "cschannel2-status-label";
-    label.textContent = row.label;
-    const value = document.createElement("div");
-    value.className = "cschannel2-status-value";
-    value.textContent = row.value;
-    status.appendChild(label);
-    status.appendChild(value);
+  const trusted = cschannel2TrustedPlaintext(ev);
+  const transport = analysis.transport && typeof analysis.transport === "object" ? analysis.transport : {};
+  const session = analysis.session && typeof analysis.session === "object" ? analysis.session : {};
+  const validation = analysis.validation && typeof analysis.validation === "object" ? analysis.validation : {};
+  const compression = analysis.compression && typeof analysis.compression === "object" ? analysis.compression : {};
+  const parsed = trusted.parsed;
+  const chipData = [
+    [`wire type=${cschannel2DisplayValue(transport.frame_type)}`, ""],
+    [`alg=${cschannel2DisplayValue(transport.algorithm_id ?? transport.subtype_or_algorithm)}`, ""],
+    [`seq=${cschannel2DisplayValue(transport.sequence)}`, ""],
+    [session.recovery_status === "ready" ? "密钥就绪" : `密钥 ${cschannel2DisplayValue(session.recovery_status, "未知")}`, session.recovery_status === "ready" ? "ok" : "warn"],
+    [validation.crc_match === true ? "CRC ✓" : validation.crc_match === false ? "CRC ✗" : "CRC 未知", validation.crc_match === true ? "ok" : validation.crc_match === false ? "bad" : "warn"],
+    [/^(?:ok|success|decoded|decompressed|snappy_ok)$/i.test(String(compression.status || "")) ? "Snappy ✓" : `Snappy ${cschannel2DisplayValue(compression.status, "未知")}`, /^(?:ok|success|decoded|decompressed|snappy_ok)$/i.test(String(compression.status || "")) ? "ok" : "warn"],
+  ];
+  if (parsed) chipData.push([
+    `app type=${cschannel2DisplayValue(parsed.carrierType)} · node=${parsed.nodes.length}`,
+    parsed.ok ? "ok" : "warn",
+  ]);
+  if (trusted.source && trusted.source.actualLength > 0) chipData.push([`${trusted.source.actualLength}B`, ""]);
+  const chips = document.createElement("div");
+  chips.className = "cschannel2-chips";
+  for (const [text, tone] of chipData) {
+    const chip = document.createElement("span");
+    chip.className = `cschannel2-chip${tone ? ` cschannel2-chip-${tone}` : ""}`;
+    chip.textContent = text;
+    chips.appendChild(chip);
   }
-  panel.appendChild(status);
+  panel.appendChild(chips);
 
+  if (trusted.trusted && parsed && parsed.ok && parsed.nodes.length > 0) {
+    const nodesSection = document.createElement("section");
+    nodesSection.className = "cschannel2-node-list";
+    const nodesHead = document.createElement("div");
+    nodesHead.className = "cschannel2-node-list-head";
+    const nodesTitle = document.createElement("span");
+    nodesTitle.textContent = `业务节点 ${parsed.nodes.length}`;
+    const nodesMeta = document.createElement("small");
+    const opaqueCount = parsed.nodes.filter((node) => !node.analyzerEligible).length;
+    const itemBytesTotal = parsed.nodes.reduce((total, node) => total + Number(node.itemLength || 0), 0);
+    const deferNodeBodies = parsed.nodes.length > 64 || itemBytesTotal > 256 * 1024;
+    nodesMeta.textContent = parsed.carrierKind === "item-list"
+      ? `type 4 carrier → node → ${opaqueCount > 0 ? `record / opaque ${opaqueCount}` : "TerSafe record"}`
+      : (opaqueCount > 0 ? "type 3 carrier → opaque" : "type 3 carrier → TerSafe record");
+    if (deferNodeBodies) nodesMeta.textContent += " · 大帧按 node 展开完整 Preview";
+    nodesHead.appendChild(nodesTitle);
+    nodesHead.appendChild(nodesMeta);
+    nodesSection.appendChild(nodesHead);
+    for (const node of parsed.nodes) {
+      nodesSection.appendChild(
+        deferNodeBodies ? buildCschannel2DeferredNodePanel(node) : buildCschannel2NodePanel(node)
+      );
+    }
+    panel.appendChild(nodesSection);
+  } else {
+    const note = document.createElement("div");
+    note.className = "cschannel2-parse-note";
+    note.textContent = trusted.reason || "当前明文没有可验证的 node 结构；完整字节保留在下方证据层。";
+    panel.appendChild(note);
+  }
+
+  const evidence = document.createElement("details");
+  evidence.className = "cschannel2-evidence";
+  const evidenceHead = document.createElement("summary");
+  const evidenceTitle = document.createElement("span");
+  evidenceTitle.textContent = "加密 / 校验 / 解压证据";
+  const evidenceMeta = document.createElement("small");
+  evidenceMeta.textContent = "按需展开四层原始字节";
+  evidenceHead.appendChild(evidenceTitle);
+  evidenceHead.appendChild(evidenceMeta);
+  evidence.appendChild(evidenceHead);
   const summaryBlock = document.createElement("section");
   summaryBlock.className = "cschannel2-summary";
   const summaryLabel = document.createElement("strong");
-  summaryLabel.textContent = "Summary（生产端摘要）";
+  summaryLabel.textContent = "生产端摘要";
   const summaryValue = document.createElement("pre");
   summaryValue.textContent = String(ev && ev.summary ? ev.summary : "未提供");
   summaryBlock.appendChild(summaryLabel);
   summaryBlock.appendChild(summaryValue);
-  panel.appendChild(summaryBlock);
-
+  evidence.appendChild(summaryBlock);
   const layers = document.createElement("div");
   layers.className = "cschannel2-layers";
   cschannel2LayerSources(ev).forEach((source, index) => {
-    const layer = document.createElement("details");
-    layer.className = `cschannel2-layer cschannel2-layer-${source.key} cschannel2-layer-${source.status}`;
-    layer.dataset.source = source.key;
-    layer.dataset.status = source.status;
-    layer.open = source.key === "full_pay" && source.actualLength > 0;
-    const layerHead = document.createElement("summary");
-    const layerTitle = document.createElement("span");
-    layerTitle.className = "cschannel2-layer-title";
-    layerTitle.textContent = `${index + 1}. ${source.label}`;
-    const layerField = document.createElement("code");
-    layerField.className = "cschannel2-layer-field";
-    layerField.textContent = source.key;
-    const layerState = document.createElement("span");
-    layerState.className = "cschannel2-layer-state";
-    layerState.textContent = source.status === "missing" ? "未提供"
-      : source.status === "invalid" ? "Base64 编码无效"
-      : source.complete ? `完整 · ${source.actualLength}B`
-      : source.expectedLength === null ? `已保存 ${source.actualLength}B · 声明长度未知`
-      : `已保存 ${source.actualLength}/${source.expectedLength}B · ${source.status === "truncated" ? "截断" : "长度不一致"}`;
-    layerHead.appendChild(layerTitle);
-    layerHead.appendChild(layerField);
-    layerHead.appendChild(layerState);
-    layer.appendChild(layerHead);
-
-    const description = document.createElement("div");
-    description.className = "cschannel2-layer-description";
-    description.textContent = source.description;
-    layer.appendChild(description);
-    if (!source.encoded || source.status === "invalid") {
-      const empty = document.createElement("div");
-      empty.className = "cschannel2-layer-empty";
-      empty.textContent = source.status === "invalid"
-        ? "该层已记录但编码无效；不使用其他层字节替代。"
-        : "生产端未提供该层；不从其他字段推断或替代。";
-      layer.appendChild(empty);
-    } else {
-      const dump = formatHexDump(source.encoded, hideAscii, null, { compactAscii: source.key !== "full_pay" });
-      const hexShell = document.createElement("div");
-      hexShell.className = "hex-shell";
-      attachDumpScrollPersistence(hexShell, makeDumpScrollKey(eventId, "cschannel2", source.key));
-      const hexHead = document.createElement("div");
-      hexHead.className = "hex-head";
-      hexHead.textContent = dump.header;
-      const pre = document.createElement("pre");
-      pre.className = "hex-body";
-      pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: false, asciiRows: false });
-      hexShell.appendChild(hexHead);
-      hexShell.appendChild(pre);
-      layer.appendChild(hexShell);
-    }
-    layers.appendChild(layer);
+    layers.appendChild(buildCschannel2EvidenceLayer(source, hideAscii, eventId, index));
   });
-  panel.appendChild(layers);
+  evidence.appendChild(layers);
+  panel.appendChild(evidence);
   return panel;
 }
 
