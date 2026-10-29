@@ -422,6 +422,11 @@ for (const dir of [0, 1]) {
   assert(nodes(body, 'cschannel2-layer').length === 4, 'four layers not rendered');
   assert(nodes(body, 'cschannel2-evidence').length === 1 && !nodes(body, 'cschannel2-evidence')[0].open, 'evidence must default collapsed');
   assert(nodes(body, 'cschannel2-layer').every(layer => !layer.open), 'individual evidence layers must default collapsed');
+  assert(nodes(body, 'hex-shell').length === 0, 'closed evidence eagerly rendered hex DOM');
+  const fullLayer = nodes(body, 'cschannel2-layer-full_pay')[0];
+  fullLayer.open = true;
+  for (const callback of fullLayer.listeners.toggle || []) callback({target:fullLayer});
+  assert(nodes(body, 'hex-shell').length === 1, 'opened evidence did not render its hex view');
   for (const cls of ['dump-grid', 'child-pair-card', 'fixture-gcloud-panel', 'fixture-readable-summary', 'cschannel2-status']) {
     assert(nodes(body, cls).length === 0, 'legacy view leaked: ' + cls);
   }
@@ -607,6 +612,27 @@ console.log(JSON.stringify({summaries:deferred.length, rendered:nodes(body,'chil
 """
         )
         self.assertEqual(result, {"summaries": 65, "rendered": 1})
+
+    def test_single_large_record_defers_complete_preview_until_opened(self) -> None:
+        plaintext = _c2_type4(_tss_record(0x010A0011, b"x" * (33 * 1024)))
+        analysis = _analysis()
+        analysis["compression"].update(
+            declared_plain_length=len(plaintext), decoded_length=len(plaintext)
+        )
+        result = self.run_js(
+            r"""
+const analysis = """ + json.dumps(analysis) + r""";
+const plain = """ + json.dumps(list(plaintext)) + r""";
+const ev = {dir:0, analysis, summary:'', raw_pay:gcloudBytesBase64([1]), raw_len:1,
+  before_pay:gcloudBytesBase64([2]), before_len:1, pay:gcloudBytesBase64([3]), len:1,
+  full_pay:gcloudBytesBase64(plain), full_len:plain.length};
+const body = buildEventBody(ev, false, 'large-record');
+assert(nodes(body, 'cschannel2-node-deferred').length === 1, 'single large record was eagerly rendered');
+assert(!nodes(body, 'child-hex-table').length, 'single large record created full hex DOM while closed');
+console.log(JSON.stringify({deferred:1, eagerHex:0}));
+"""
+        )
+        self.assertEqual(result, {"deferred": 1, "eagerHex": 0})
 
     def test_malformed_type4_and_type10_fail_closed_without_fake_nodes(self) -> None:
         good = _c2_type4(_tss_record(0x010A0011, b"ok"))

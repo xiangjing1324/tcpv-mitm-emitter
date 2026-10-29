@@ -19062,32 +19062,37 @@ function buildCschannel2EvidenceLayer(source, hideAscii, eventId, index) {
   layerHead.appendChild(layerState);
   layer.appendChild(layerHead);
 
-  const description = document.createElement("div");
-  description.className = "cschannel2-layer-description";
-  description.textContent = source.description;
-  layer.appendChild(description);
-  if (!source.encoded || source.status === "invalid") {
-    const empty = document.createElement("div");
-    empty.className = "cschannel2-layer-empty";
-    empty.textContent = source.status === "invalid"
-      ? "该层已记录但编码无效；不使用其他层字节替代。"
-      : "生产端未提供该层；不从其他字段推断或替代。";
-    layer.appendChild(empty);
-    return layer;
-  }
-  const dump = formatHexDump(source.encoded, hideAscii, null, { compactAscii: source.key !== "full_pay" });
-  const hexShell = document.createElement("div");
-  hexShell.className = "hex-shell";
-  attachDumpScrollPersistence(hexShell, makeDumpScrollKey(eventId, "cschannel2", source.key));
-  const hexHead = document.createElement("div");
-  hexHead.className = "hex-head";
-  hexHead.textContent = dump.header;
-  const pre = document.createElement("pre");
-  pre.className = "hex-body";
-  pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: false, asciiRows: false });
-  hexShell.appendChild(hexHead);
-  hexShell.appendChild(pre);
-  layer.appendChild(hexShell);
+  let rendered = false;
+  layer.addEventListener("toggle", () => {
+    if (!layer.open || rendered) return;
+    rendered = true;
+    const description = document.createElement("div");
+    description.className = "cschannel2-layer-description";
+    description.textContent = source.description;
+    layer.appendChild(description);
+    if (!source.encoded || source.status === "invalid") {
+      const empty = document.createElement("div");
+      empty.className = "cschannel2-layer-empty";
+      empty.textContent = source.status === "invalid"
+        ? "该层已记录但编码无效；不使用其他层字节替代。"
+        : "生产端未提供该层；不从其他字段推断或替代。";
+      layer.appendChild(empty);
+      return;
+    }
+    const dump = formatHexDump(source.encoded, hideAscii, null, { compactAscii: source.key !== "full_pay" });
+    const hexShell = document.createElement("div");
+    hexShell.className = "hex-shell";
+    attachDumpScrollPersistence(hexShell, makeDumpScrollKey(eventId, "cschannel2", source.key));
+    const hexHead = document.createElement("div");
+    hexHead.className = "hex-head";
+    hexHead.textContent = dump.header;
+    const pre = document.createElement("pre");
+    pre.className = "hex-body";
+    pre.innerHTML = renderHexBodyHtml(dump, hideAscii, { blockComments: false, asciiRows: false });
+    hexShell.appendChild(hexHead);
+    hexShell.appendChild(pre);
+    layer.appendChild(hexShell);
+  });
   return layer;
 }
 
@@ -19193,7 +19198,8 @@ function buildCschannel2View(ev, hideAscii, eventId = "") {
     const nodesMeta = document.createElement("small");
     const opaqueCount = parsed.nodes.filter((node) => !node.analyzerEligible).length;
     const itemBytesTotal = parsed.nodes.reduce((total, node) => total + Number(node.itemLength || 0), 0);
-    const deferNodeBodies = parsed.nodes.length > 64 || itemBytesTotal > 256 * 1024;
+    const oversizedItem = parsed.nodes.some((node) => Number(node.itemLength || 0) > 32 * 1024);
+    const deferNodeBodies = parsed.nodes.length > 64 || itemBytesTotal > 64 * 1024 || oversizedItem;
     nodesMeta.textContent = parsed.carrierKind === "item-list"
       ? `type 4 carrier → node → ${opaqueCount > 0 ? `record / opaque ${opaqueCount}` : "TerSafe record"}`
       : (opaqueCount > 0 ? "type 3 carrier → opaque" : "type 3 carrier → TerSafe record");
