@@ -18374,7 +18374,14 @@ function buildGcloudBytesPanel(ev, summaryText = "") {
     option.textContent = source.label;
     select.appendChild(option);
   }
-  select.value = sources.some((source) => source.key === "current") ? "current" : sources[0] ? sources[0].key : "";
+  const currentSource = sources.find((source) => source.key === "current");
+  const completeWireSource = sources.find((source) => (
+    (source.key === "wireReceived" || source.key === "wireSent") && source.complete
+  ));
+  const preferredSource = currentSource && currentSource.status !== "truncated"
+    ? currentSource
+    : completeWireSource || currentSource || sources[0];
+  select.value = preferredSource ? preferredSource.key : "";
   select.disabled = sources.length < 2;
   const copy = document.createElement("button");
   copy.type = "button";

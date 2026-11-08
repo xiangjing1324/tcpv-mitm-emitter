@@ -116,6 +116,12 @@ assert(invalid && invalid.status === 'invalid' && !invalid.complete && invalid.a
 const invalidPanel = buildGcloudBytesPanel({ pay: '%%%not-base64%%%', len: 4, full_pay: gcloudBytesBase64([7,8]), full_len: 2 }, '');
 assert(one(invalidPanel, 'packet-byte-source').value === 'current' && one(invalidPanel, 'packet-byte-copy').disabled, 'invalid current silently fell back to another stage');
 assert(!one(invalidPanel, 'packet-byte-content').textContent, 'invalid current displayed another stage bytes');
+const truncatedPanel = buildGcloudBytesPanel({
+  pay: gcloudBytesBase64([1,2,3,4]), len: 9,
+  full_pay: gcloudBytesBase64([1,2,3,4,5,6,7,8,9]), full_len: 9,
+}, '');
+assert(one(truncatedPanel, 'packet-byte-source').value === 'wireReceived', 'truncated current payload did not default to the complete received frame');
+assert(plainHex(one(truncatedPanel, 'packet-byte-content').textContent) === '010203040506070809', 'complete default source displayed truncated bytes');
 const emptyPanel = buildGcloudBytesPanel({}, '');
 assert(emptyPanel && one(emptyPanel, 'packet-byte-copy').disabled, 'no-data panel allows copying fabricated bytes');
 const mixed = byteFixture(); mixed.before_len = 9; mixed.full_len = 2; delete mixed.raw_len;
