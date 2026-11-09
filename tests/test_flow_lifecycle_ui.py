@@ -98,6 +98,15 @@ function gcloudEventClass() { return ""; }
         self.assertFalse(self.evaluate_visibility(
             f"{prefix} gcloud_observation_command=CSAchieveUpdateSteamProgressNtf"
         ))
+        for command in (
+            "CSPlayerCustomDataNtf",
+            "CSWAssemblyGetAmmoLoadoutRes",
+            "CSPlayerInfoGetPakKeysRes",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(self.evaluate_visibility(
+                    f"{prefix} gcloud_observation_command={command}"
+                ))
 
     def test_near_names_and_unverified_commands_remain_visible(self) -> None:
         verified = "command=0x4013 crypto=decrypted gcloud_observation_command_names_verified=1"
@@ -114,6 +123,12 @@ function gcloudEventClass() { return ""; }
             f"{verified} gcloud_observation_command=CSAchieveUpdateSteamProgressReq",
             f"{verified} gcloud_observation_command=CSAchieveUpdateSteamProgressNtfReq",
             f"{verified} gcloud_observation_command=CSAchieveUpdateSteamProgressNtfB",
+            f"{verified} gcloud_observation_command=CSPlayerCustomDataReq",
+            f"{verified} gcloud_observation_command=CSPlayerCustomDataNtfB",
+            f"{verified} gcloud_observation_command=CSWAssemblyGetAmmoLoadoutReq",
+            f"{verified} gcloud_observation_command=CSWAssemblyGetAmmoLoadoutResB",
+            f"{verified} gcloud_observation_command=CSPlayerInfoGetPakKeysReq",
+            f"{verified} gcloud_observation_command=CSPlayerInfoGetPakKeysResB",
             "command=0x4013 crypto=decrypted gcloud_observation_command=CSSeasonGetRecordListReq",
             "command=0x4012 crypto=decrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSSeasonGetRecordListReq",
             "command=0x4013 crypto=encrypted gcloud_observation_command_names_verified=1 gcloud_observation_command=CSSeasonGetRecordListReq",

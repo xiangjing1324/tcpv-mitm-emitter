@@ -19052,6 +19052,9 @@ const TCPV_EXACT_FILTERED_COMMAND_SUFFIXES = ["Req", "Res", "ReqB", "ResB"];
 const TCPV_EXACT_FILTERED_COMMANDS = new Set([
   "CSPlayerJoinMatchNtf",
   "CSAchieveUpdateSteamProgressNtf",
+  "CSPlayerCustomDataNtf",
+  "CSWAssemblyGetAmmoLoadoutRes",
+  "CSPlayerInfoGetPakKeysRes",
 ]);
 
 function eventIsTcpViewExactFilteredCommand(ev) {
