@@ -31,7 +31,6 @@ const state = {
   hitCursor: -1,
   pendingHitScroll: false,
   filteredCount: 0,
-  display: { renderWindow: 500, olderOffset: 0 },
   dumpScrollLeft: new Map(),
   sidebarHidden: false,
   gcloud9001PairIndex: null,
@@ -136,7 +135,6 @@ const WINDOW_PREFETCH_BUDGET_AUTO = 0;
 const WINDOW_PREFETCH_BUDGET_MANUAL = 0;
 const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 0;
 const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 0;
-const DISPLAY_RENDER_WINDOW_STEP = 500;
 const DUMP_SCROLL_CACHE_MAX = 800;
 const AUTO_EXPAND_ON_COUNT = 3;
 const AUTO_EXPAND_SMART_COUNT = 2;
@@ -2279,8 +2277,6 @@ function resetEventStateForFlowChange() {
   state.hitEventIds = [];
   state.hitCursor = -1;
   state.filteredCount = 0;
-  state.display.renderWindow = DISPLAY_RENDER_WINDOW_STEP;
-  state.display.olderOffset = 0;
   clearPayloadCache();
 }
 
@@ -16918,8 +16914,8 @@ function isMrpcsObservationCandidate(ev) {
 
 function syncMrpcsVisibleObservationCandidates(visibleEvents) {
   const next = new Map();
-  // This lane follows the operator-selected render window. Payload/deep-decode
-  // work remains separately bounded by MRPCS_OBSERVATION_SCAN_CANDIDATES.
+  // This lane follows all rendered filtered events. Payload/deep-decode work
+  // remains separately bounded by MRPCS_OBSERVATION_SCAN_CANDIDATES.
   for (const ev of Array.isArray(visibleEvents) ? visibleEvents : []) {
     if (!isMrpcsObservationCandidate(ev)) continue;
     const eventId = getEventId(ev);
@@ -19037,54 +19033,6 @@ function refreshAceOverviewUi() {
   }, 80);
 }
 
-function displayRenderWindowRange(events, hitEventIds, hitCursor, requestedWindow, olderOffset = 0) {
-  const list = Array.isArray(events) ? events : [];
-  const size = Math.max(1, Math.floor(Number(requestedWindow) || DISPLAY_RENDER_WINDOW_STEP));
-  const offset = Math.max(0, Math.floor(Number(olderOffset) || 0));
-  let start = Math.max(0, list.length - size - offset);
-  const hitId = Array.isArray(hitEventIds) && hitCursor >= 0 ? hitEventIds[hitCursor] : "";
-  if (hitId) {
-    const index = list.findIndex((ev) => getEventId(ev) === hitId);
-    if (index >= 0 && (index < start || index >= start + size)) {
-      start = Math.max(0, Math.min(list.length - size, index - Math.floor(size / 2)));
-    }
-  }
-  return { start, end: Math.min(list.length, start + size), size };
-}
-
-function appendDisplayWindowNote(totalCount, visibleCount, range) {
-  if (totalCount <= visibleCount) return;
-  const note = document.createElement("div");
-  note.className = "render-window-note";
-  note.appendChild(document.createTextNode(`已加载 ${state.events.length} 包；当前显示筛选后第 ${totalCount ? range.start + 1 : 0}–${range.end} / ${totalCount} 包。搜索扫描已加载的筛选结果，命中导航自动切换有界窗口。 `));
-  if (totalCount > visibleCount) {
-    const more = document.createElement("button");
-    more.type = "button";
-    more.textContent = `查看更多（+${DISPLAY_RENDER_WINDOW_STEP}）`;
-    more.addEventListener("click", () => {
-      state.display.renderWindow += DISPLAY_RENDER_WINDOW_STEP;
-      renderEvents();
-    });
-    note.appendChild(more);
-    if (!state.search.active) {
-      for (const [label, isOlder] of [["更早一页", true], ["较新一页", false]]) {
-        const page = document.createElement("button");
-        page.type = "button";
-        page.textContent = label;
-        page.disabled = isOlder ? range.start <= 0 : range.end >= totalCount;
-        page.addEventListener("click", () => {
-          state.display.olderOffset = isOlder
-            ? Math.max(0, totalCount - range.start)
-            : Math.max(0, totalCount - range.end - range.size);
-          renderEvents();
-        });
-        note.appendChild(page);
-      }
-    }
-  }
-  el.events.appendChild(note);
-}
-
 const TCPV_EXACT_FILTERED_COMMAND_BASES = new Set([
   "CSDepositQueryShowRoom",
   "CSPlayerInfoGetAppearance",
@@ -19429,8 +19377,8 @@ function renderEvents() {
   const filteredEvents = state.events.filter((ev) => eventMatchesFilters(ev));
   const nextHitEventIds = [];
   if (state.search.active) {
-    // Search all loaded filtered events, but never build an unbounded DOM.
-    // This scans bytes only; protocol/semantic decoding stays in the detail.
+    // Search and render all loaded filtered events. Protocol/semantic decoding
+    // remains lazy in the detail view.
     for (const ev of filteredEvents) {
       const preview = getPreviewInfo(ev, needFullScan);
       const target = needFullScan ? preview.scanBytes : preview.previewBytes;
@@ -19443,8 +19391,7 @@ function renderEvents() {
   else if (state.pendingHitScroll) state.hitCursor = 0;
   else if (prevCurrentHitId && nextHitEventIds.includes(prevCurrentHitId)) state.hitCursor = nextHitEventIds.indexOf(prevCurrentHitId);
   else state.hitCursor = Math.min(Math.max(state.hitCursor, 0), nextHitEventIds.length - 1);
-  const range = displayRenderWindowRange(filteredEvents, nextHitEventIds, state.hitCursor, state.display.renderWindow, state.display.olderOffset);
-  const visibleEvents = filteredEvents.slice(range.start, range.end);
+  const visibleEvents = filteredEvents;
   const mrpcsVisibleCandidatesChanged = syncMrpcsVisibleObservationCandidates(visibleEvents);
   const hitIndexes = new Map(nextHitEventIds.map((id, index) => [id, index]));
   const autoExpandIds = collectAutoExpandIds(visibleEvents, expandMode);
@@ -19453,7 +19400,6 @@ function renderEvents() {
   if (aceOverview) {
     el.events.appendChild(aceOverview);
   }
-  appendDisplayWindowNote(filteredEvents.length, visibleEvents.length, range);
   if (visibleEvents.length === 0) {
     state.hitEventIds = [];
     state.hitCursor = -1;
