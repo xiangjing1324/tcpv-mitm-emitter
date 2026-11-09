@@ -137,7 +137,6 @@ const WINDOW_PREFETCH_BUDGET_MANUAL = 0;
 const SUMMARY_BADGE_HYDRATE_BUDGET_AUTO = 0;
 const SUMMARY_BADGE_HYDRATE_BUDGET_MANUAL = 0;
 const DISPLAY_RENDER_WINDOW_STEP = 500;
-const DISPLAY_RENDER_WINDOW_MAX = 2000;
 const DUMP_SCROLL_CACHE_MAX = 800;
 const AUTO_EXPAND_ON_COUNT = 3;
 const AUTO_EXPAND_SMART_COUNT = 2;
@@ -16919,8 +16918,8 @@ function isMrpcsObservationCandidate(ev) {
 
 function syncMrpcsVisibleObservationCandidates(visibleEvents) {
   const next = new Map();
-  // renderEvents already caps this list at DISPLAY_RENDER_WINDOW_MAX, so the
-  // visible priority lane stays bounded without widening the global scan.
+  // This lane follows the operator-selected render window. Payload/deep-decode
+  // work remains separately bounded by MRPCS_OBSERVATION_SCAN_CANDIDATES.
   for (const ev of Array.isArray(visibleEvents) ? visibleEvents : []) {
     if (!isMrpcsObservationCandidate(ev)) continue;
     const eventId = getEventId(ev);
@@ -19040,7 +19039,7 @@ function refreshAceOverviewUi() {
 
 function displayRenderWindowRange(events, hitEventIds, hitCursor, requestedWindow, olderOffset = 0) {
   const list = Array.isArray(events) ? events : [];
-  const size = Math.max(1, Math.min(DISPLAY_RENDER_WINDOW_MAX, Math.floor(Number(requestedWindow) || DISPLAY_RENDER_WINDOW_STEP)));
+  const size = Math.max(1, Math.floor(Number(requestedWindow) || DISPLAY_RENDER_WINDOW_STEP));
   const offset = Math.max(0, Math.floor(Number(olderOffset) || 0));
   let start = Math.max(0, list.length - size - offset);
   const hitId = Array.isArray(hitEventIds) && hitCursor >= 0 ? hitEventIds[hitCursor] : "";
@@ -19061,12 +19060,9 @@ function appendDisplayWindowNote(totalCount, visibleCount, range) {
   if (totalCount > visibleCount) {
     const more = document.createElement("button");
     more.type = "button";
-    more.textContent = state.display.renderWindow < DISPLAY_RENDER_WINDOW_MAX
-      ? `查看更多（+${DISPLAY_RENDER_WINDOW_STEP}）`
-      : `已达 ${DISPLAY_RENDER_WINDOW_MAX} 条窗口上限`;
-    more.disabled = state.display.renderWindow >= DISPLAY_RENDER_WINDOW_MAX;
+    more.textContent = `查看更多（+${DISPLAY_RENDER_WINDOW_STEP}）`;
     more.addEventListener("click", () => {
-      state.display.renderWindow = Math.min(DISPLAY_RENDER_WINDOW_MAX, state.display.renderWindow + DISPLAY_RENDER_WINDOW_STEP);
+      state.display.renderWindow += DISPLAY_RENDER_WINDOW_STEP;
       renderEvents();
     });
     note.appendChild(more);
