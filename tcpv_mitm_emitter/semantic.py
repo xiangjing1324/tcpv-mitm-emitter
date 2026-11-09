@@ -522,7 +522,10 @@ def analysis_from_event(event: dict[str, Any]) -> dict[str, Any]:
         )
     analysis = provided
     seen: set[bytes] = set()
-    for candidate in (payload, before, decode("full_pay"), decode("raw_pay")):
+    # Auxiliary/original representations enrich the analysis first.  Parse
+    # the post-mutation payload last so equal-quality TSS records cannot leave
+    # the old packet as the UI's authoritative "current structure".
+    for candidate in (before, decode("full_pay"), decode("raw_pay"), payload):
         if not candidate or candidate in seen:
             continue
         seen.add(candidate)

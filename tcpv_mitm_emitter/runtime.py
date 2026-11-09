@@ -699,17 +699,20 @@ class TcpvRuntime:
 
     def _append_store_event(self, store: TcpvEventStore, item: dict[str, Any]) -> None:
         direction = int(item.get("dir") or 0)
+        payload = bytes(item.get("payload") or b"")
         before_payload = bytes(item.get("before_payload") or b"")
+        full_payload = bytes(item.get("full_payload") or b"")
+        raw_payload = bytes(item.get("raw_payload") or b"")
         analysis: dict[str, Any] | None = (
             item.get("analysis") if isinstance(item.get("analysis"), dict) else None
         )
         seen: set[bytes] = set()
         candidates: list[bytes] = []
         for candidate in (
-            bytes(item.get("payload") or b""),
             before_payload,
-            bytes(item.get("full_payload") or b""),
-            bytes(item.get("raw_payload") or b""),
+            full_payload,
+            raw_payload,
+            payload,
         ):
             if not candidate or candidate in seen:
                 continue
@@ -723,7 +726,11 @@ class TcpvRuntime:
                 analysis = analyze_payload(
                     candidate,
                     direction=direction,
-                    before_payload=before_payload if candidate == bytes(item.get("payload") or b"") else b"",
+                    # The final pass is the post-mutation payload.  Keeping it
+                    # last makes analysis.packet describe the bytes actually
+                    # sent, while analysis.before retains the original bytes
+                    # for TCPView's yellow before/after highlighting.
+                    before_payload=before_payload if candidate == payload else b"",
                     provided=analysis,
                 )
                 self._semantic_parse_count += 1

@@ -1392,6 +1392,66 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(runtime.get_stats()["semantic_parse_count"], 0)
         self.assertEqual(runtime.get_stats()["semantic_skipped_payload_count"], 4)
 
+    def test_runtime_keeps_post_mutation_tss_packet_as_current_analysis(self):
+        before = bytearray(_metadata_record(0x0112232D, b"account:7957648999623805108\x00"))
+        before[10:14] = (0x0138AE).to_bytes(4, "big")
+        current = bytearray(before)
+        current[10:14] = (0x01145D).to_bytes(4, "big")
+        current[:] = bytes(current).replace(b"7957648999623805108", b"4342162767918998570")
+
+        store = TcpvEventStore(FakeRedis(), "test", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+        runtime = TcpvRuntime()
+        runtime._append_store_event(
+            store,
+            {
+                "account": "acct",
+                "cid": "client->server:443",
+                "dir": 0,
+                "payload": bytes(current),
+                "packet_len": len(current),
+                "full_payload": bytes(before),
+                "full_packet_len": len(before),
+                "before_payload": bytes(before),
+                "before_packet_len": len(before),
+                "raw_payload": bytes(current),
+                "raw_packet_len": len(current),
+                "proxy_username": "",
+                "summary": "[modified:test]",
+                "analysis": None,
+                "ts_ms": 1000,
+                "msg_idx": 1,
+                "chunk_idx": 0,
+            },
+        )
+
+        event = store.get_event("acct", "1")
+        self.assertEqual(event["analysis"]["packet"]["report_code"], "0x0112232d")
+        self.assertEqual(event["analysis"]["packet"]["leaf_id"], "0x0001145d")
+        self.assertEqual(event["analysis"]["before"]["leaf_id"], "0x000138ae")
+        self.assertIn(b"4342162767918998570", base64.b64decode(event["pay"]))
+        self.assertIn(b"7957648999623805108", base64.b64decode(event["before_pay"]))
+
+    def test_analysis_from_event_keeps_post_mutation_tss_packet_current(self):
+        before = bytearray(_metadata_record(0x0112232D, b"account:7957648999623805108\x00"))
+        before[10:14] = (0x0138AE).to_bytes(4, "big")
+        current = bytearray(before)
+        current[10:14] = (0x01145D).to_bytes(4, "big")
+        current[:] = bytes(current).replace(b"7957648999623805108", b"4342162767918998570")
+
+        analysis = analysis_from_event(
+            {
+                "dir": 0,
+                "pay": base64.b64encode(bytes(current)).decode("ascii"),
+                "before_pay": base64.b64encode(bytes(before)).decode("ascii"),
+                "full_pay": base64.b64encode(bytes(before)).decode("ascii"),
+                "raw_pay": base64.b64encode(bytes(current)).decode("ascii"),
+            }
+        )
+
+        self.assertEqual(analysis["packet"]["report_code"], "0x0112232d")
+        self.assertEqual(analysis["packet"]["leaf_id"], "0x0001145d")
+        self.assertEqual(analysis["before"]["leaf_id"], "0x000138ae")
+
     def test_authoritative_gcloud_handoff_is_not_marked_for_tss_upgrade(self):
         analysis = {
             "schema": "tcpv.gcloud.analysis.v1",
