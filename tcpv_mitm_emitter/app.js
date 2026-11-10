@@ -14224,6 +14224,22 @@ function ensureChildCommonStyles() {
       color: var(--modified-text);
       font-weight: 800;
     }
+    .child-hex-byte-cell.child-hex-byte-cell-identity,
+    .child-hex-ascii-cell.child-hex-ascii-cell-identity {
+      color: #ffb454;
+      background: color-mix(in srgb, #ffb454 16%, transparent);
+      border-radius: 3px;
+      box-shadow: 0 0 0 1px color-mix(in srgb, #ffb454 24%, transparent);
+      font-weight: 850;
+    }
+    .child-hex-byte-cell.child-hex-byte-cell-digest,
+    .child-hex-ascii-cell.child-hex-ascii-cell-digest {
+      color: #67d391;
+      background: color-mix(in srgb, #67d391 14%, transparent);
+      border-radius: 3px;
+      box-shadow: 0 0 0 1px color-mix(in srgb, #67d391 22%, transparent);
+      font-weight: 850;
+    }
     .child-hex-row-time {
       background: color-mix(in srgb, #f59e0b 10%, transparent);
       border-left: 2px solid color-mix(in srgb, #f59e0b 72%, transparent);
@@ -14269,6 +14285,14 @@ function ensureChildCommonStyles() {
     .child-hex-insight-time strong,
     .child-hex-insight-time span {
       color: color-mix(in srgb, #f59e0b 82%, var(--text));
+    }
+    .child-hex-insight-identity strong,
+    .child-hex-insight-identity span {
+      color: color-mix(in srgb, #ffb454 88%, var(--text));
+    }
+    .child-hex-insight-digest strong,
+    .child-hex-insight-digest span {
+      color: color-mix(in srgb, #67d391 86%, var(--text));
     }
     .child-hex-insight span {
       min-width: 0;
@@ -15016,6 +15040,33 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
   const rows = model.rows;
   if (!rows.length) return;
   const encryptedEnvelope = decryptDisplayableTssEnvelope(childBytes);
+  let identityDigestCandidate = null;
+  const detectedReport = detectTssReport(childBytes);
+  if (detectedReport && Number(detectedReport.value) === 0x0102000a) {
+    const layout = read0102000aLayout(childBytes, detectedReport);
+    if (layout && Number(layout.innerType) === 0x8032) {
+      const bodyStart = Number(layout.shift) + 0x24;
+      if (Number.isFinite(bodyStart) && bodyStart >= 0 && bodyStart < childBytes.length) {
+        const decodedBody = xorByteValues(childBytes.slice(bodyStart), 0xb6);
+        const decodedText = decodedBody.map((byte) => String.fromCharCode(Number(byte) & 0xff)).join("");
+        const match = decodedText.match(/([0-9]{18})[\s\S]([0-9a-f]{32})/i);
+        if (match && Number.isFinite(Number(match.index))) {
+          const identifierStart = bodyStart + Number(match.index);
+          const digestStart = identifierStart + String(match[1] || "").length + 1;
+          identityDigestCandidate = {
+            bodyStart,
+            decodedBody,
+            identifier: String(match[1] || ""),
+            identifierStart,
+            identifierEnd: identifierStart + String(match[1] || "").length,
+            digest: String(match[2] || "").toLowerCase(),
+            digestStart,
+            digestEnd: digestStart + String(match[2] || "").length,
+          };
+        }
+      }
+    }
+  }
 
 	  const wrap = document.createElement("div");
 	  wrap.className = "child-hex-table";
@@ -15045,12 +15096,28 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 	    for (let index = 0; index < byteValues.length; index += 1) {
 	      const byte = byteValues[index];
 	      const span = document.createElement("span");
-	      const decodedChar = decoded && decoded.cells[index] && String(decoded.cells[index]).trim()
+	      const absoluteOffset = Number(row.offset) + index;
+	      const isIdentity = identityDigestCandidate
+	        && absoluteOffset >= identityDigestCandidate.identifierStart
+	        && absoluteOffset < identityDigestCandidate.identifierEnd;
+	      const isDigest = identityDigestCandidate
+	        && absoluteOffset >= identityDigestCandidate.digestStart
+	        && absoluteOffset < identityDigestCandidate.digestEnd;
+	      let decodedChar = decoded && decoded.cells[index] && String(decoded.cells[index]).trim()
 	        ? String(decoded.cells[index])
 	        : "";
-	      span.className = `child-hex-byte-cell${changedIndexes[index] ? " child-hex-byte-cell-changed" : ""}${decodedChar ? " child-hex-byte-cell-string" : ""}${isTimestamp ? " child-hex-byte-cell-time" : ""}`;
+	      if (identityDigestCandidate && (isIdentity || isDigest)) {
+	        const candidateIndex = absoluteOffset - identityDigestCandidate.bodyStart;
+	        const candidateByte = Number(identityDigestCandidate.decodedBody[candidateIndex]);
+	        if (candidateByte >= 32 && candidateByte < 127) decodedChar = String.fromCharCode(candidateByte);
+	      }
+	      span.className = `child-hex-byte-cell${changedIndexes[index] ? " child-hex-byte-cell-changed" : ""}${decodedChar ? " child-hex-byte-cell-string" : ""}${isTimestamp ? " child-hex-byte-cell-time" : ""}${isIdentity ? " child-hex-byte-cell-identity" : ""}${isDigest ? " child-hex-byte-cell-digest" : ""}`;
 	      span.textContent = childHexByteText(byte);
-	      if (decodedChar) span.title = `string char "${decodedChar}"`;
+	      if (decodedChar) span.title = isIdentity
+	        ? `18位标识候选字符 "${decodedChar}"`
+	        : isDigest
+	          ? `32字符摘要候选字符 "${decodedChar}"`
+	          : `string char "${decodedChar}"`;
 	      if (isTimestamp) span.title = [span.title, row.note].filter(Boolean).join("；");
 	      bytes.appendChild(span);
 	    }
@@ -15064,19 +15131,30 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
     const ascii = document.createElement("code");
     ascii.className = "child-hex-ascii";
     for (let index = 0; index < byteValues.length; index += 1) {
-      const decodedChar = decoded && decoded.cells[index] && String(decoded.cells[index]).trim()
+      const absoluteOffset = Number(row.offset) + index;
+      const isIdentity = identityDigestCandidate
+        && absoluteOffset >= identityDigestCandidate.identifierStart
+        && absoluteOffset < identityDigestCandidate.identifierEnd;
+      const isDigest = identityDigestCandidate
+        && absoluteOffset >= identityDigestCandidate.digestStart
+        && absoluteOffset < identityDigestCandidate.digestEnd;
+      let decodedChar = decoded && decoded.cells[index] && String(decoded.cells[index]).trim()
         ? String(decoded.cells[index])
         : "";
+      if (identityDigestCandidate && (isIdentity || isDigest)) {
+        const candidateIndex = absoluteOffset - identityDigestCandidate.bodyStart;
+        const candidateByte = Number(identityDigestCandidate.decodedBody[candidateIndex]);
+        if (candidateByte >= 32 && candidateByte < 127) decodedChar = String.fromCharCode(candidateByte);
+      }
       const rawByte = Number(byteValues[index]);
-      const absoluteOffset = Number(row.offset) + index;
       const encryptedCipherByte = encryptedEnvelope
         && absoluteOffset >= 28
         && absoluteOffset < 28 + Number(encryptedEnvelope.cipherLength || 0);
       const rawChar = !encryptedCipherByte && rawByte >= 32 && rawByte < 127 ? String.fromCharCode(rawByte) : ".";
       const span = document.createElement("span");
-      span.className = `child-hex-ascii-cell${decodedChar ? " child-hex-ascii-cell-string" : ""}${changedIndexes[index] ? " child-hex-ascii-cell-changed" : ""}`;
+      span.className = `child-hex-ascii-cell${decodedChar ? " child-hex-ascii-cell-string" : ""}${changedIndexes[index] ? " child-hex-ascii-cell-changed" : ""}${isIdentity ? " child-hex-ascii-cell-identity" : ""}${isDigest ? " child-hex-ascii-cell-digest" : ""}`;
       span.textContent = decodedChar || rawChar;
-      if (decodedChar) span.title = `${decoded.note || "decoded string"} · ${hexOffsetText(Number(row.offset) + index)}`;
+      if (decodedChar) span.title = `${isIdentity ? "18位标识候选" : isDigest ? "32字符摘要候选" : (decoded.note || "decoded string")} · ${hexOffsetText(absoluteOffset)}`;
       ascii.appendChild(span);
     }
 
@@ -15115,6 +15193,18 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 	  wrap.appendChild(body);
 
   const insights = [];
+  if (identityDigestCandidate) {
+    insights.push({
+      kind: "identity",
+      label: "18位标识",
+      value: `${hexOffsetText(identityDigestCandidate.identifierStart)}-${hexOffsetText(identityDigestCandidate.identifierEnd - 1)} "${identityDigestCandidate.identifier}"`,
+    });
+    insights.push({
+      kind: "digest",
+      label: "32字符摘要",
+      value: `${hexOffsetText(identityDigestCandidate.digestStart)}-${hexOffsetText(identityDigestCandidate.digestEnd - 1)} "${identityDigestCandidate.digest}"`,
+    });
+  }
   if (model.overlay && Array.isArray(model.overlay.runs) && model.overlay.runs.length > 0) {
     for (const run of model.overlay.runs.slice(0, 8)) {
       insights.push({
