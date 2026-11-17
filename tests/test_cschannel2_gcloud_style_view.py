@@ -92,3 +92,36 @@ def test_cs2_preview_facts_report_node_index_and_exact_resource_names() -> None:
     ]
     assert negative == []
 
+
+def test_cs2_facts_live_on_the_collapsed_summary_not_inside_expanded_preview() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    summary = _packet_function(source, "buildCS2SummaryInsightStrip")
+    preview = _packet_function(source, "childPreviewRichLines")
+    compact_cache = _packet_function(source, "primeCompactEventCaches")
+
+    assert "cs2SummaryFactsFromEvent(ev)" in summary
+    assert 'factChip.textContent = csob ? `CSOB · ${fact.value}`' in summary
+    assert '"cs2-summary-resource"' in summary
+    assert "cs2WatchInnerPreview(chip, ev, summaryText)" in summary
+    assert "cs2SummaryFactsFromEvent(ev)" in compact_cache
+    assert "previewFacts" not in preview
+
+
+def test_cs2_shared_card_renders_every_verified_inner_layer() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    adapter = _packet_function(source, "cs2SharedComparablePayload")
+    child = _packet_function(source, "cs2SharedComparableChild")
+    preview_box = _packet_function(source, "makeChildPreviewBox")
+    layers = _packet_function(source, "appendChildVerifiedLayers")
+
+    assert "cs2SharedVerifiedLayers(item, source)" in adapter
+    assert "verifiedLayers: verified.layers" in adapter
+    assert "verifiedLayerStops: verified.stops" in adapter
+    assert "verifiedLayers" in child
+    assert "verifiedLayerStops" in child
+    assert "appendChildVerifiedLayers(box, child)" in preview_box
+    assert "for (const layer of ordered)" in layers
+    assert "appendChildFullHexTable(box, nestedChild, bytes" in layers
+    assert "CRC32 通过" in layers
+    assert "未展示候选明文" in layers
+

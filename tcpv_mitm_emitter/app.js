@@ -3628,6 +3628,8 @@ function primeCompactEventCaches(ev) {
   if (!ev || typeof ev !== "object") return;
   getEvent010a0011HiLabels(ev, []);
   eventHasCsob(ev);
+  const cs2Facts = cs2SummaryFactsFromEvent(ev);
+  if (cs2Facts !== null) cs2SummaryFactsCache.set(ev, cs2Facts);
 }
 
 function renderPreviewBytes(previewSpan, byteValues, highlightRanges, plainTextHint = "") {
@@ -15634,13 +15636,6 @@ function childPreviewRichLines(child, childBytes, options = {}) {
   const lines = [];
   const meta = childCompactMetaLine(child);
   if (meta) lines.push({ text: meta, className: "child-preview-line-meta" });
-  const previewFacts = Array.isArray(child.previewFacts) ? child.previewFacts : [];
-  if (previewFacts.length) {
-    lines.push({
-      text: previewFacts.map((fact) => `${String(fact.label || "")} ${String(fact.value || "")}`.trim()).join(" | "),
-      className: "child-preview-line-cs2-facts",
-    });
-  }
   const semanticRows = splitChildSemanticRows(child);
   const semanticLimit = options.merged ? 4 : 3;
   for (const [label, value] of semanticRows.primaryRows) {
@@ -15664,7 +15659,6 @@ function childPreviewSegmentKind(label, fallbackClass = "") {
   if (value === "规则") return "rule";
   if (value === "风险" || value === "注意") return "risk";
   if (["解析", "用途", "结构", "发现", "文本"].includes(value)) return "parse";
-  if (value === "csob" || value === "资源") return "parse";
   if (["body布局", "运行时钟", "探测分组", "typed值", "字段槽"].includes(value)) return "parse";
   if (value === "可打印xor") return "xor";
   if (value === "时间戳" || value === "候选时间戳") return "time";
@@ -15677,8 +15671,6 @@ function childPreviewSegmentParts(rawSegment, fallbackClass = "") {
   const raw = String(rawSegment || "").trim();
   if (!raw) return null;
   const labels = [
-    "CSOB",
-    "资源",
     "处理",
     "注意",
     "用途",
@@ -15768,6 +15760,42 @@ function appendChildPreviewLine(container, entry) {
   container.appendChild(line);
 }
 
+function appendChildVerifiedLayers(box, child) {
+  const layers = Array.isArray(child && child.verifiedLayers) ? child.verifiedLayers : [];
+  const stops = Array.isArray(child && child.verifiedLayerStops) ? child.verifiedLayerStops : [];
+  const ordered = layers.slice().sort((left, right) => (
+    Number(left.depth) - Number(right.depth) || String(left.path || "").localeCompare(String(right.path || ""))
+  ));
+  for (const layer of ordered) {
+    const bytes = Array.isArray(layer.bytes) ? layer.bytes : [];
+    if (!bytes.length) continue;
+    const heading = document.createElement("div");
+    heading.className = "child-hex-title child-verified-layer-title";
+    const proof = layer.kind === "decrypted"
+      ? `CRC32 通过${layer.crc32 ? ` ${layer.crc32}` : ""}` : "结构子记录";
+    const prefix = Number(layer.syntheticPrefixBytes) > 0 ? ` · 补头 ${Number(layer.syntheticPrefixBytes)} B` : "";
+    heading.textContent = `内层 ${Number(layer.depth)} · ${layer.path || "$"} · ${layer.reportCode || "报告待识别"} · ${proof}${prefix}`;
+    box.appendChild(heading);
+    const nestedChild = makeRootComparableNode(bytes) || {
+      index: 0, nodeLabel: `内层 ${Number(layer.depth)}`, offset: 0,
+      recordStart: 0, recordEnd: bytes.length, len: bytes.length,
+      reportCode: null, reportOffset: -1, idValue: null, idText: "",
+      className: "verified-inner-plaintext", valuePreview: "", timestampCandidates: [],
+    };
+    appendChildFullHexTable(box, nestedChild, bytes, {showInsights: true});
+  }
+  const reasons = {
+    invalid_length: "长度不符", crc_mismatch: "CRC32 不符", codec_unavailable: "暂不支持解密",
+    unverified_structure: "结构待确认", depth_limit: "达到展示深度上限", output_limit: "达到展示容量上限",
+  };
+  for (const stop of stops) {
+    const note = document.createElement("div");
+    note.className = "child-preview-empty child-verified-layer-stop";
+    note.textContent = `内层 ${Number(stop.depth)} · ${stop.path || "$"} · ${reasons[stop.reason] || stop.reason || "未验证"} · 未展示候选明文`;
+    box.appendChild(note);
+  }
+}
+
 function makeChildPreviewBox(child, label, sideClass, childBytes = [], options = {}) {
   const box = document.createElement("div");
   box.className = `child-preview-box child-preview-${sideClass}`;
@@ -15794,6 +15822,7 @@ function makeChildPreviewBox(child, label, sideClass, childBytes = [], options =
 	    showInsights: options.showInsights !== false,
 	    timestampHints: options.timestampHints || [],
 	  });
+	  appendChildVerifiedLayers(box, child);
 	  return box;
 	}
 
@@ -18834,6 +18863,7 @@ function cs2CompactReportCounts(ev, summaryText) {
 }
 
 const cs2InnerSummaryCache = new WeakMap();
+const cs2SummaryFactsCache = new WeakMap();
 const cs2InnerPreviewQueue = new Map();
 let cs2InnerPreviewObserver;
 let cs2InnerPreviewInFlight = 0;
@@ -18874,6 +18904,8 @@ function cs2DrainInnerPreviews() {
     fetchEventPayload(item.flow, eventId).then(detail => {
       if (state.flowId !== item.flow) return;
       cs2InnerSummaryCache.set(item.ev, cs2DecryptedReportCounts(detail));
+      const facts = cs2SummaryFactsFromEvent(detail);
+      if (facts !== null) cs2SummaryFactsCache.set(item.ev, facts);
       const summary = chip.closest("summary");
       if (summary?.isConnected) syncSummaryInsightStrip(summary, item.ev, item.summaryText);
     }).catch(() => {}).finally(() => {
@@ -18911,9 +18943,22 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
     innerChip.textContent = `→ ${values.slice(0, 2).join(" · ")}${values.length > 2 ? ` +${values.length - 2}` : ""}`;
     innerChip.title = `已校验内层：${values.join(" · ")}`;
     strip.appendChild(innerChip);
-  } else if (!inner && (counts.has("0x010a0008") || counts.has("0x010a0009"))) {
-    cs2WatchInnerPreview(chip, ev, summaryText);
   }
+  const directFacts = cs2SummaryFactsFromEvent(ev);
+  if (directFacts !== null) cs2SummaryFactsCache.set(ev, directFacts);
+  const factsKnown = directFacts !== null || cs2SummaryFactsCache.has(ev);
+  const facts = directFacts !== null ? directFacts : cs2SummaryFactsCache.get(ev) || [];
+  for (const fact of facts) {
+    const factChip = document.createElement("span");
+    const csob = fact.label === "CSOB";
+    factChip.className = `summary-insight-chip cs2-summary-fact ${csob ? "cs2-summary-csob" : "cs2-summary-resource"}`;
+    factChip.textContent = csob ? `CSOB · ${fact.value}` : String(fact.value || "");
+    factChip.title = csob ? `CSOB 位于 ${fact.value}` : `资源位于 ${String(fact.value || "").replace(" · ", "，")}`;
+    strip.appendChild(factChip);
+  }
+  const needsInner = !inner && (counts.has("0x010a0008") || counts.has("0x010a0009"));
+  const needsFacts = decoded && !factsKnown;
+  if (needsInner || needsFacts) cs2WatchInnerPreview(chip, ev, summaryText);
   if (decoded || rows.length) {
     const prefix = bytesFromHexPrefix(ev?.full_pfx, 2048);
     const model = String.fromCharCode(...prefix).match(/\bmodel:([A-Za-z0-9_,.-]{2,40})(?=;)/i)?.[1];
@@ -19393,24 +19438,122 @@ function cs2SharedComparableFields(item, source, bodyOffset) {
   });
 }
 
-function cs2SharedPreviewFacts(record, index) {
-  const raw = Array.isArray(record) ? record : [];
-  const text = raw
-    .map((byte) => Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : "\x00")
-    .join("");
+function cs2SharedPreviewFacts(records, index) {
+  const sources = Array.isArray(records) && Array.isArray(records[0]) ? records : [records];
   const facts = [];
   const node = `node[${Number(index)}]`;
-  if (/cs:[^;\x00]{1,240},ob:/i.test(text) && /state:[0-9a-f]{8},r:/i.test(text)) {
+  const texts = sources.map((record) => (Array.isArray(record) ? record : [])
+    .map((byte) => Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : "\x00")
+    .join(""));
+  if (texts.some((text) => /cs:[^;\x00]{1,240},ob:/i.test(text) && /state:[0-9a-f]{8},r:/i.test(text))) {
     facts.push({label:"CSOB", value:node});
   }
   const seen = new Set();
-  for (const match of text.matchAll(/\b(config[23]\.dat)\b/ig)) {
-    const name = String(match[1] || "").toLowerCase();
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    facts.push({label:"资源", value:`${name} · ${node}`});
+  for (const text of texts) {
+    for (const match of text.matchAll(/\b(config[23]\.dat)\b/ig)) {
+      const name = String(match[1] || "").toLowerCase();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      facts.push({label:"资源", value:`${name} · ${node}`});
+    }
   }
   return facts;
+}
+
+function cs2SummaryFactsFromPresentation(presentation, applicationBytes) {
+  const source = Array.isArray(applicationBytes) ? applicationBytes : [];
+  const root = presentation && presentation.root;
+  if (!source.length || !cs2ValidPlaintextPresentation(presentation, source)
+      || !["single-item", "batch-items"].includes(String(presentation.layout || ""))) return [];
+  const items = Array.isArray(root?.children)
+    ? root.children.filter((node) => /^node\[\d+\]$/.test(String(node?.name || ""))) : [];
+  const facts = [];
+  const seen = new Set();
+  for (const item of items) {
+    const match = /^node\[(\d+)\]$/.exec(String(item.name || ""));
+    if (!match) continue;
+    const index = Number(match[1]);
+    const payloadNode = cs2SharedPayloadNode(item);
+    const record = cs2NodeRange(payloadNode, source);
+    const completeNode = cs2NodeRange(item, source);
+    if (!record.length || !completeNode.length) continue;
+    const sources = [completeNode];
+    const verified = cs2SharedVerifiedLayers(item, source);
+    for (const layer of verified.layers) {
+      if (Array.isArray(layer.bytes) && layer.bytes.length) sources.push(layer.bytes);
+    }
+    if (!verified.layers.length) {
+      let current = record;
+      for (let depth = 0; depth < 6; depth++) {
+        const decrypted = decryptDisplayableTssEnvelope(current);
+        if (!decrypted?.supported || decrypted.crcMatch !== true
+            || !Array.isArray(decrypted.plain) || !decrypted.plain.length) break;
+        sources.push(decrypted.plain);
+        current = decrypted.plain;
+      }
+    }
+    for (const fact of cs2SharedPreviewFacts(sources, index)) {
+      const key = `${fact.label}\u0000${fact.value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push(fact);
+    }
+  }
+  return facts;
+}
+
+function cs2SummaryFactsFromEvent(ev) {
+  if (!ev || typeof ev !== "object" || !cs2IsModificationRow(ev, ev.summary)) return null;
+  if (isCSChannel2Event(ev)) {
+    const bytes = cs2VerifiedApplicationBytes(ev);
+    return bytes.length ? cs2SummaryFactsFromPresentation(ev.analysis.plaintext_presentation, bytes) : null;
+  }
+  const summary = String(ev.summary || "");
+  if (!/(?:^|\s)status=decoded(?=\s|$)/.test(summary)) return null;
+  const expected = Number(ev.full_len);
+  const bytes = b64ToBytes(String(ev.full_pay || ""));
+  if (!Number.isSafeInteger(expected) || expected <= 0 || bytes.length !== expected) return null;
+  const presentation = cs2PlaintextPresentationFromBytes(bytes);
+  return cs2SummaryFactsFromPresentation(presentation, bytes);
+}
+
+function cs2SharedVerifiedLayers(item, source) {
+  const children = Array.isArray(item && item.children) ? item.children : [];
+  const owner = item?.tersafe_layers?.schema === "tcpv.tersafe.layers.v1"
+    ? item : children.find((node) => node?.tersafe_layers?.schema === "tcpv.tersafe.layers.v1");
+  const report = owner && owner.tersafe_layers;
+  const layers = [];
+  const stops = [];
+  if (report?.schema === "tcpv.tersafe.layers.v1") {
+    for (const layer of Array.isArray(report.layers) ? report.layers : []) {
+      const bytes = b64ToBytes(String(layer.plaintext_b64 || ""));
+      const root = layer.root;
+      if (!root || root.coordinate_space !== "tersafe_inner_plaintext" || root.offset !== 0
+          || bytes.length !== Number(layer.length) || root.end !== bytes.length
+          || !["structural", "decrypted"].includes(String(layer.kind || ""))
+          || (layer.kind === "decrypted" && !/^0x[\da-f]{8}$/i.test(String(layer.crc32 || "")))) continue;
+      layers.push({
+        depth: Number(layer.depth), path: String(layer.path || "$"), kind: String(layer.kind),
+        reportCode: String(layer.report_code || ""), crc32: String(layer.crc32 || ""),
+        syntheticPrefixBytes: Number(layer.synthetic_prefix_bytes || 0), bytes,
+      });
+    }
+    for (const stop of Array.isArray(report.stops) ? report.stops : []) {
+      stops.push({
+        depth: Number(stop.depth), path: String(stop.path || "$"), reason: String(stop.reason || "unverified_structure"),
+      });
+    }
+    return {layers, stops};
+  }
+  const nestedOwner = item?.tersafe_inner ? item : children.find((node) => node?.tersafe_inner);
+  const nested = nestedOwner ? cs2VerifiedNestedRecord(nestedOwner, source) : null;
+  if (nested) {
+    layers.push({
+      depth: 1, path: "$", kind: "decrypted", reportCode: String(nested.nested.report_code || ""),
+      crc32: String(nested.nested.crc32 || "verified"), syntheticPrefixBytes: 0, bytes: nested.bytes,
+    });
+  }
+  return {layers, stops};
 }
 
 function cs2SharedComparableChild(rawBytes, index, recordStart, options = {}) {
@@ -19443,7 +19586,8 @@ function cs2SharedComparableChild(rawBytes, index, recordStart, options = {}) {
       ? summarizeCommonFixedXor(record, reportCode) : "",
     cs2ApplicationFields: Array.isArray(options.fields) ? options.fields : [],
     cs2SemanticOffset: semanticOffset,
-    previewFacts: cs2SharedPreviewFacts(record, index),
+    verifiedLayers: Array.isArray(options.verifiedLayers) ? options.verifiedLayers : [],
+    verifiedLayerStops: Array.isArray(options.verifiedLayerStops) ? options.verifiedLayerStops : [],
   };
   return attachLocalChildSemantic(child, record);
 }
@@ -19462,12 +19606,15 @@ function cs2SharedComparablePayload(presentation, applicationBytes) {
     const completeNode = cs2NodeRange(item, source);
     const semanticRecord = cs2NodeRange(payloadNode, source);
     if (!completeNode.length || !semanticRecord.length) continue;
+    const verified = cs2SharedVerifiedLayers(item, source);
     const start = bytes.length;
     bytes.push(...completeNode);
     children.push(cs2SharedComparableChild(completeNode, index, start, {
       semanticRecord,
       semanticOffset: Number(payloadNode.offset) - Number(item.offset),
       fields: cs2SharedComparableFields(item, source, Number(payloadNode.offset)),
+      verifiedLayers: verified.layers,
+      verifiedLayerStops: verified.stops,
     }));
   }
   return { bytes, parsed: { root: null, children } };
@@ -19670,6 +19817,9 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-summary-insights .summary-insight-chip{min-width:0;overflow:hidden;text-overflow:ellipsis}
     .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
     .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
+    .cs2-summary-insights .cs2-summary-fact{flex:0 1 auto;max-width:24ch}
+    .cs2-summary-insights .cs2-summary-csob{color:#f0c36b;border-color:#d6a85a52;background:#d6a85a16}
+    .cs2-summary-insights .cs2-summary-resource{color:#7bd99c;border-color:#67c58c52;background:#67c58c14}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
   `;
   document.head.appendChild(style);
@@ -20615,6 +20765,7 @@ function applyEventPayloadDetail(ev, detail) {
   ev.__tcpvPayloadLen = undefined;
   ev.__tcpvHiPreviewLabels = undefined;
   ev.__tcpvHasCsob = undefined;
+  cs2SummaryFactsCache.delete(ev);
   ev.__tcpvAnalysisKey = "";
   ev.__tcpvAnalysis = null;
   ev.__tcpvUagameEnvelopeCache = null;
