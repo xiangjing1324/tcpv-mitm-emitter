@@ -11272,7 +11272,7 @@ function isLikelyTssReportCode(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return false;
   const family = (num >>> 16) & 0xffff;
-  return family === 0x010a || family === 0x0102 || family === 0x0112;
+  return family === 0x010a || family === 0x0102 || family === 0x0111 || family === 0x0112;
 }
 
 function detectTssReport(byteValues) {
@@ -11800,6 +11800,7 @@ function reportName(reportCode) {
   };
   if (names[value]) return names[value];
   const family = (value >>> 16) & 0xffff;
+  if (family === 0x0111) return "legacy-metadata";
   if (family === 0x0112) return "metadata";
   if (family === 0x010a) return "container/meta";
   if (family === 0x0102) return "leaf";
@@ -11815,7 +11816,7 @@ function classifyRecordBytes(byteValues, reportCode) {
     const runs = extractPrintableRuns(byteValues, 4, 2);
     return runs.length > 0 ? "text/binary-leaf" : "binary-like-leaf";
   }
-  if (((report >>> 16) & 0xffff) === 0x0112) return "structured-metadata";
+  if ([0x0111, 0x0112].includes((report >>> 16) & 0xffff)) return "structured-metadata";
   return reportName(report);
 }
 
@@ -11965,7 +11966,7 @@ function localChildSemanticProfile(record, reportCode) {
     return semanticProfileValue("typed_leaf_binary_probe", "telemetry.binary_probe", "稳定二进制探测/遥测（字段待证）", "approximate", ["full_shape", `inner_type_${formatHexValue(layout.innerType, 4)}`]);
   }
 
-  if (((report >>> 16) & 0xffff) === 0x0112) {
+  if ([0x0111, 0x0112].includes((report >>> 16) & 0xffff)) {
     const hasCsob = ["cs:", ",ob:", "state:", ",r:", ",p:"].every((token) => rawLower.includes(token));
     const hasCsobCandidate = ["cs:", "state:", ",r:", ",p:"].every((token) => rawLower.includes(token));
     const hasDevice = /model:|ver:/.test(rawLower);
@@ -14732,6 +14733,67 @@ function collectChildTimestampItems(childBytes, valueStart, timestampHints = [])
   return out.sort((a, b) => Number(a.start) - Number(b.start));
 }
 
+function tssStructuredMetadataInsights(byteValues, reportCode) {
+  if (!Array.isArray(byteValues) || byteValues.length <= 0) return [];
+  const family = (Number(reportCode) >>> 16) & 0xffff;
+  if (![0x0111, 0x0112].includes(family)) return [];
+
+  const ascii = byteValues
+    .map((byte) => (Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : "\x00"))
+    .join("");
+  const items = [];
+  const seen = new Set();
+  const add = (kind, label, offset, length, value) => {
+    const start = Number(offset);
+    const size = Number(length);
+    const text = String(value === undefined || value === null ? "" : value).trim();
+    if (!Number.isFinite(start) || start < 0 || !Number.isFinite(size) || size <= 0 || !text) return;
+    const key = `${kind}:${start}:${size}:${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ kind, label, offset: start, length: size, value: text });
+  };
+  const addMatch = (kind, label, pattern) => {
+    const match = pattern.exec(ascii);
+    if (!match || !match[1]) return;
+    const value = String(match[1]);
+    const relative = String(match[0]).indexOf(value);
+    add(kind, label, Number(match.index) + Math.max(0, relative), value.length, value);
+  };
+
+  if (byteValues.length > 0x11 && [0x00, 0x01].includes(Number(byteValues[0x11]))) {
+    add("requestFlag", "请求标志 +0x11", 0x11, 1, formatHexValue(byteValues[0x11], 2));
+  }
+  for (let offset = 10; offset + 1 < byteValues.length; offset += 1) {
+    const marker = ((Number(byteValues[offset]) & 0xff) << 8) | (Number(byteValues[offset + 1]) & 0xff);
+    if (![0x0a92, 0x5073].includes(marker)) continue;
+    add("marker", "内层 marker", offset, 2, formatHexValue(marker, 4));
+  }
+
+  addMatch("cs", "CS", /cs:([^;\x00]*?)(?=,ob:|;|\x00)/i);
+  addMatch("ob", "OB", /,ob:([^;\x00]*)/i);
+  addMatch("incId", "inc_id", /inc_id:([^;\x00]*)/i);
+  addMatch("obfId", "obf_id", /obf_id:([^;\x00]*)/i);
+  addMatch("state", "state", /state:([^,;\x00]*)(?=,r:|;|\x00)/i);
+  addMatch("r", "r", /,r:([^;\x00]*?)(?=,p:|;|\x00)/i);
+  addMatch("p", "p", /,p:([^;\x00]*)/i);
+
+  const accountPattern = /\d{16,32}/g;
+  let accountMatch = accountPattern.exec(ascii);
+  while (accountMatch) {
+    const start = Number(accountMatch.index);
+    const end = start + String(accountMatch[0]).length;
+    const leftIsDigit = start > 0 && /\d/.test(ascii[start - 1]);
+    const rightIsDigit = end < ascii.length && /\d/.test(ascii[end]);
+    if (!leftIsDigit && !rightIsDigit) {
+      add("account", "AccountID（账号标识）", start, String(accountMatch[0]).length, accountMatch[0]);
+      break;
+    }
+    accountMatch = accountPattern.exec(ascii);
+  }
+  return items.sort((left, right) => Number(left.offset) - Number(right.offset));
+}
+
 function childHexStructure(child, childBytes, options = {}) {
   const annotations = new Map();
   const fields = [];
@@ -14780,6 +14842,17 @@ function childHexStructure(child, childBytes, options = {}) {
         4,
         `${childUiTerm("ID")} @${hexOffsetText(idOffset)} ${formatHexValue(readBe32(childBytes, idOffset), 4)}`,
         "id",
+      );
+    }
+
+    for (const item of tssStructuredMetadataInsights(childBytes, report.value)) {
+      if (!["requestFlag", "marker", "account"].includes(String(item.kind))) continue;
+      addChildHexField(
+        fields,
+        item.offset,
+        item.length,
+        `${item.label} ${item.value}`,
+        item.kind,
       );
     }
 
@@ -15191,6 +15264,16 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 	  wrap.appendChild(body);
 
   const insights = [];
+  const metadataReport = detectTssReport(childBytes);
+  if (metadataReport) {
+    for (const item of tssStructuredMetadataInsights(childBytes, metadataReport.value)) {
+      insights.push({
+        kind: item.kind,
+        label: item.label,
+        value: `${hexOffsetText(item.offset)} ${item.value}`,
+      });
+    }
+  }
   if (identityDigestCandidate) {
     insights.push({
       kind: "identity",
@@ -15406,7 +15489,7 @@ function childSemanticRoleText(child) {
     return "state_snapshot / 状态快照";
   }
   if (Number(report) === 0x0102000a) return "typed leaf shell / 按完整 shape 分类";
-  if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) return "structured-metadata / 结构化元数据";
+  if ([0x0111, 0x0112].includes(Math.floor(Number(report || 0) / 0x10000))) return "structured-metadata / 结构化元数据";
   return "";
 }
 
@@ -15419,7 +15502,7 @@ function childRichTypeText(child) {
   if (Number(report) === 0x010a0011) return "需保留的子请求";
   if (Number(report) === 0x010a0010) return "子请求回执";
   if (Number(report) === 0x010a001b) return "父容器";
-  if (Math.floor(Number(report || 0) / 0x10000) === 0x0112) return "结构化数据";
+  if ([0x0111, 0x0112].includes(Math.floor(Number(report || 0) / 0x10000))) return "结构化数据";
   if (rawType === "text/binary-leaf") return "文本和二进制混合数据";
   if (rawType === "binary-like-leaf" || rawType === "binary-like") return "二进制数据";
   if (rawType === "structured" || rawType === "structured-metadata") return "结构化数据";

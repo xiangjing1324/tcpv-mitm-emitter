@@ -211,3 +211,61 @@ console.log(JSON.stringify({{ ok: true, renderCalls }}));
     result = subprocess.run([node, str(harness)], check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"ok": True, "renderCalls": 1}
+
+
+def test_0111_crc_plaintext_is_recognized_and_exposes_structured_fields(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if not node:
+        raise AssertionError("node is required for the focused TCPView metadata test")
+
+    source = APP_JS.read_text(encoding="utf-8")
+    functions = "\n\n".join(
+        _extract_function(source, name)
+        for name in (
+            "isLikelyTssReportCode",
+            "detectTssReport",
+            "tssStructuredMetadataInsights",
+        )
+    )
+    program = f"""
+function readBe32(bytes, offset) {{
+  if (!Array.isArray(bytes) || offset < 0 || offset + 3 >= bytes.length) return NaN;
+  return (((bytes[offset] * 0x1000000) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]) >>> 0);
+}}
+function formatHexValue(value, width) {{ return '0x' + Number(value).toString(16).padStart(Number(width || 0), '0'); }}
+{functions}
+const bytes = new Array(280).fill(0);
+bytes.splice(0, 10, 0, 0, 0, 1, 1, 24, 1, 0x11, 0x23, 0x88);
+bytes[0x11] = 1;
+bytes[0x30] = 0x50;
+bytes[0x31] = 0x73;
+function put(offset, text) {{
+  for (let i = 0; i < text.length; i += 1) bytes[offset + i] = text.charCodeAt(i);
+}}
+put(0x35, 'cs:00000000/00000000,ob:46/dc/c4/0/5;inc_id:11;obf_id:11');
+put(0x95, '15802830196042628030');
+put(0xaf, 'state:00201135,r:0/0/0/0/0/0/0,p:14216/15032,0');
+const report = detectTssReport(bytes);
+if (!report || report.value !== 0x01112388 || report.offset !== 6) throw new Error('0x0111 report was not recognized');
+const items = tssStructuredMetadataInsights(bytes, report.value);
+const byKind = Object.fromEntries(items.map((item) => [item.kind, item]));
+if (!byKind.marker || byKind.marker.value !== '0x5073') throw new Error('5073 marker missing');
+if (!byKind.requestFlag || byKind.requestFlag.value !== '0x01') throw new Error('request flag missing');
+if (!byKind.cs || byKind.cs.value !== '00000000/00000000') throw new Error('CS field missing');
+if (!byKind.ob || byKind.ob.value !== '46/dc/c4/0/5') throw new Error('OB field missing');
+if (!byKind.incId || byKind.incId.value !== '11') throw new Error('inc_id missing');
+if (!byKind.obfId || byKind.obfId.value !== '11') throw new Error('obf_id missing');
+if (!byKind.account || byKind.account.value !== '15802830196042628030') throw new Error('AccountID missing');
+if (!byKind.state || byKind.state.value !== '00201135') throw new Error('state missing');
+if (!byKind.r || byKind.r.value !== '0/0/0/0/0/0/0') throw new Error('r missing');
+if (!byKind.p || byKind.p.value !== '14216/15032,0') throw new Error('p missing');
+console.log(JSON.stringify({{ ok: true, report: report.value, fields: items.length }}));
+"""
+    harness = tmp_path / "metadata-0111.js"
+    harness.write_text(program, encoding="utf-8")
+    result = subprocess.run([node, str(harness)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    parsed = json.loads(result.stdout)
+    assert parsed["ok"] is True
+    assert parsed["report"] == 0x01112388
+    assert parsed["fields"] >= 10
