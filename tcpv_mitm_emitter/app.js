@@ -18957,7 +18957,8 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
     strip.appendChild(factChip);
   }
   const needsInner = !inner && (counts.has("0x010a0008") || counts.has("0x010a0009"));
-  const needsFacts = decoded && !factsKnown;
+  const missingBeforePayload = !isCSChannel2Event(ev) && Number(ev.before_len) > 0 && !String(ev.before_pay || "");
+  const needsFacts = decoded && (!factsKnown || missingBeforePayload);
   if (needsInner || needsFacts) cs2WatchInnerPreview(chip, ev, summaryText);
   if (decoded || rows.length) {
     const prefix = bytesFromHexPrefix(ev?.full_pfx, 2048);
@@ -19504,17 +19505,38 @@ function cs2SummaryFactsFromPresentation(presentation, applicationBytes) {
 
 function cs2SummaryFactsFromEvent(ev) {
   if (!ev || typeof ev !== "object" || !cs2IsModificationRow(ev, ev.summary)) return null;
+  const merged = [];
+  const seen = new Set();
+  const append = (facts) => {
+    for (const fact of Array.isArray(facts) ? facts : []) {
+      const key = `${fact.label}\u0000${fact.value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(fact);
+    }
+  };
   if (isCSChannel2Event(ev)) {
     const bytes = cs2VerifiedApplicationBytes(ev);
-    return bytes.length ? cs2SummaryFactsFromPresentation(ev.analysis.plaintext_presentation, bytes) : null;
+    if (!bytes.length) return null;
+    append(cs2SummaryFactsFromPresentation(ev.analysis.plaintext_presentation, bytes));
+    const before = cs2BeforeApplicationBytes(ev, ev.analysis, bytes);
+    const beforePresentation = cs2BeforePlaintextPresentation(ev.analysis, before);
+    if (before.length && beforePresentation) append(cs2SummaryFactsFromPresentation(beforePresentation, before));
+    return merged;
   }
   const summary = String(ev.summary || "");
   if (!/(?:^|\s)status=decoded(?=\s|$)/.test(summary)) return null;
-  const expected = Number(ev.full_len);
-  const bytes = b64ToBytes(String(ev.full_pay || ""));
-  if (!Number.isSafeInteger(expected) || expected <= 0 || bytes.length !== expected) return null;
-  const presentation = cs2PlaintextPresentationFromBytes(bytes);
-  return cs2SummaryFactsFromPresentation(presentation, bytes);
+  let recognized = false;
+  for (const [payloadKey, lengthKey] of [["full_pay", "full_len"], ["before_pay", "before_len"]]) {
+    const expected = Number(ev[lengthKey]);
+    const bytes = b64ToBytes(String(ev[payloadKey] || ""));
+    if (!Number.isSafeInteger(expected) || expected <= 0 || bytes.length !== expected) continue;
+    const presentation = cs2PlaintextPresentationFromBytes(bytes);
+    if (!["single-item", "batch-items"].includes(String(presentation.layout || ""))) continue;
+    recognized = true;
+    append(cs2SummaryFactsFromPresentation(presentation, bytes));
+  }
+  return recognized ? merged : null;
 }
 
 function cs2SharedVerifiedLayers(item, source) {

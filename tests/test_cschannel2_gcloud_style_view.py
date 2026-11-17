@@ -103,8 +103,13 @@ def test_cs2_facts_live_on_the_collapsed_summary_not_inside_expanded_preview() -
     assert 'factChip.textContent = csob ? `CSOB · ${fact.value}`' in summary
     assert '"cs2-summary-resource"' in summary
     assert "cs2WatchInnerPreview(chip, ev, summaryText)" in summary
+    assert "missingBeforePayload" in summary
     assert "cs2SummaryFactsFromEvent(ev)" in compact_cache
     assert "previewFacts" not in preview
+
+    facts = _packet_function(source, "cs2SummaryFactsFromEvent")
+    assert '[["full_pay", "full_len"], ["before_pay", "before_len"]]' in facts
+    assert "cs2BeforeApplicationBytes(ev, ev.analysis, bytes)" in facts
 
 
 def test_cs2_shared_card_renders_every_verified_inner_layer() -> None:
