@@ -19368,6 +19368,9 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-tersafe-view .child-preview-box{padding:5px 7px}
     .cs2-tersafe-view .child-preview-info{padding-bottom:2px}
     .cs2-tersafe-view .child-preview-label{margin-bottom:1px;line-height:1.3}
+    .cs2-tersafe-view .cs2-batch-fold{margin:0 5px 6px;border:1px solid var(--line);border-radius:6px;background:color-mix(in srgb,var(--panel) 97%,var(--dump-bg) 3%);overflow:hidden}
+    .cs2-tersafe-view .cs2-batch-fold>summary{padding:6px 8px;color:var(--muted);font-weight:650;cursor:pointer;user-select:none}
+    .cs2-tersafe-view .cs2-batch-fold>.child-compare-grid{padding-top:0}
     .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;background:color-mix(in srgb,var(--panel) 96%,transparent)}
     .cs2-tersafe-view .cs2-paired-fields-inner{width:100%;min-width:1180px}
     .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,440px) minmax(360px,1fr)}
@@ -19810,6 +19813,18 @@ function appendCS2CurrentPlaintext(card, section, bytes, label = "当前明文")
   card.appendChild(row);
 }
 
+function appendCS2GcloudStylePair(card, beforeSection, beforeBytes, afterSection, afterBytes,
+    beforeChanged, afterChanged) {
+  const row = document.createElement("div");
+  row.className = "child-preview-row cs2-plaintext-pair";
+  row.appendChild(makeCS2TersafePreviewBox(
+    beforeSection, beforeBytes, "修改前", "before", beforeChanged));
+  row.appendChild(makeCS2TersafePreviewBox(
+    afterSection, afterBytes, "修改后", "after", afterChanged));
+  card.appendChild(row);
+  return row;
+}
+
 function appendTerSafeLayers(card, report, annotateReportText = false) {
   if (report?.schema !== "tcpv.tersafe.layers.v1") return;
   const layers = Array.isArray(report.layers) ? report.layers : [];
@@ -19945,16 +19960,17 @@ function appendCS2TersafeRecords(panel, sections, after, before, beforePresentat
   if (before.length && !structuredPair) {
     appendCS2LengthMismatchOverview(panel, before, after);
   }
-  for (const [index, section] of sections.entries()) {
+  const primarySections = sections.filter((section) => section.title !== "批次头");
+  const batchSections = sections.filter((section) => section.title === "批次头");
+  for (const section of primarySections) {
+    const index = sections.indexOf(section);
     const card = makeCS2TersafeRecordCard(section);
     if (structuredPair) {
       const beforeSection = beforeSections[index];
       const {beforeChanged, afterChanged} = cs2StructuredDiffOffsets(beforeSection, before, section, after);
-      const pair = appendCS2PairedFieldTable(
+      const pair = appendCS2GcloudStylePair(
         card, beforeSection, before, section, after, beforeChanged, afterChanged);
-      if (pair) {
-        pair.className += ` cs2-plaintext-pair${aligned ? "" : " cs2-length-mismatch-pair"}`;
-      }
+      if (!aligned) pair.className += " cs2-length-mismatch-pair";
     } else {
       appendCS2CurrentPlaintext(card, section, after, before.length ? "修改后明文" : "当前明文");
     }
@@ -19962,6 +19978,29 @@ function appendCS2TersafeRecords(panel, sections, after, before, beforePresentat
     grid.appendChild(card);
   }
   panel.appendChild(grid);
+  if (batchSections.length) {
+    const fold = document.createElement("details");
+    fold.className = "cs2-batch-fold";
+    const summary = document.createElement("summary");
+    summary.textContent = "CSChannel2 批次头";
+    fold.appendChild(summary);
+    const batchGrid = document.createElement("div");
+    batchGrid.className = "child-compare-grid";
+    for (const section of batchSections) {
+      const index = sections.indexOf(section);
+      const card = makeCS2TersafeRecordCard(section);
+      if (structuredPair) {
+        const beforeSection = beforeSections[index];
+        const {beforeChanged, afterChanged} = cs2StructuredDiffOffsets(beforeSection, before, section, after);
+        appendCS2GcloudStylePair(card, beforeSection, before, section, after, beforeChanged, afterChanged);
+      } else {
+        appendCS2CurrentPlaintext(card, section, after, before.length ? "修改后明文" : "当前明文");
+      }
+      batchGrid.appendChild(card);
+    }
+    fold.appendChild(batchGrid);
+    panel.appendChild(fold);
+  }
 }
 
 function cs2WireFrameBytes(ev, analysis) {
@@ -19992,11 +20031,10 @@ function buildCSChannel2Panel(ev) {
   const head = document.createElement("div");
   head.className = "child-compare-head";
   const title = document.createElement("span");
-  title.textContent = verified ? (before.length ? "CSChannel2 明文对比" : "CSChannel2 明文") : "CSChannel2 线上帧";
+  title.textContent = verified ? (before.length ? "叶子节点替换观察" : "当前叶子结构") : "CSChannel2 线上帧";
   const status = document.createElement("small");
-  status.textContent = unchanged ? "未修改"
-    : before.length ? (before.length === after.length ? ""
-      : `长度不同 · 共同前缀 ${cs2CommonPrefixLength(before, after)} B · 按字段对齐高亮`)
+  status.textContent = unchanged ? `未修改 · ${after.length} B`
+    : before.length ? `修改前 ${before.length}B · 修改后 ${after.length}B`
     : verified ? "只验证了当前明文" : "无已校验明文";
   head.appendChild(title);
   if (status.textContent) head.appendChild(status);
