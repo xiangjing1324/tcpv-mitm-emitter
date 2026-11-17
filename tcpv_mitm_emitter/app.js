@@ -1452,7 +1452,7 @@ function getPreviewOffsetStep() {
 }
 
 function getExpectedPreviewWindowLen(ev, previewOffset, previewLen) {
-  const packetLen = Number(ev && ev.len);
+  const packetLen = Number(cs2SummaryDisplaySource(ev)?.length ?? ev?.len);
   if (Number.isFinite(packetLen) && packetLen >= 0) {
     if (previewOffset >= packetLen) return 0;
     return Math.min(previewLen, Math.max(0, packetLen - previewOffset));
@@ -3651,13 +3651,16 @@ function getPreviewInfo(ev, needFullScan = false) {
     return ev.__tcpvPreviewInfo;
   }
 
-  const inlinePay = String(ev && ev.pay ? ev.pay : "");
+  const cs2Source = cs2SummaryDisplaySource(ev);
+  const payloadKey = cs2Source?.payloadKey || "pay";
+  const prefixKey = cs2Source?.prefixKey || "pfx";
+  const inlinePay = String(ev?.[payloadKey] || "");
   let pay = inlinePay;
   let hasCachedPayload = false;
   let previewBytes = b64ToBytesWindow(pay, previewOffset, previewLen);
   if (previewBytes.length <= 0 && !pay && flowId && eventId) {
     const cached = readPayloadCache(flowId, eventId);
-    const cachedPay = String(cached && cached.pay ? cached.pay : "");
+    const cachedPay = String(cached?.[payloadKey] || "");
     if (cachedPay) {
       pay = cachedPay;
       hasCachedPayload = true;
@@ -3667,7 +3670,7 @@ function getPreviewInfo(ev, needFullScan = false) {
 
   let fallbackBytes = [];
   if (previewBytes.length <= 0) {
-    const fallback = normalizeHex(ev && ev.pfx ? ev.pfx : "");
+    const fallback = normalizeHex(ev?.[prefixKey] || "");
     fallbackBytes = (fallback.match(/.{1,2}/g) || []).map((x) => parseInt(x, 16));
     previewBytes = fallbackBytes.slice(previewOffset, previewOffset + previewLen);
   }
@@ -7924,6 +7927,7 @@ function eventModificationDiffText(ev) {
 }
 
 function eventModificationEvidence(ev, summaryText = "") {
+  if (cs2IsModificationRow(ev, summaryText)) return cs2ModificationEvidence(ev, summaryText);
   const summary = String(summaryText || (ev && ev.summary) || "");
   const reasons = [];
   const addReason = (reason) => {
@@ -10792,6 +10796,7 @@ function compactTypeInsight(summaryText) {
 }
 
 function buildSummaryInsightStrip(ev, summaryText) {
+  if (cs2IsModificationRow(ev, summaryText)) return buildCS2SummaryInsightStrip(ev, summaryText);
   const hasStructuredSemantic = !!(
     ev && ev.analysis && typeof ev.analysis === "object" && ev.analysis.schema === "tersafe.semantic.v1"
   );
@@ -10882,6 +10887,7 @@ function buildCompactGcloudSummaryStrip(ev, summaryText = "") {
 }
 
 function shouldHydrateSummaryBadges(ev, summaryText = "") {
+  if (cs2IsModificationRow(ev, summaryText)) return false;
   if (!ev || typeof ev !== "object") return false;
   const transport = gcloudProducerTransport(ev);
   const summary = String(summaryText || ev.summary || "");
@@ -14659,17 +14665,11 @@ function childDecodedCellsForRange(overlay, offset, end) {
       cells.push(childDecodedChar(overlay.decoded[decodedIndex]));
     }
   }
-  const notes = [];
-  for (const run of runs) {
-    const runStart = Number(run.start);
-    const runEnd = Number(run.end);
-    if (runStart >= start && runStart < stop) {
-      notes.push(`${run.kind || "string"} ${hexOffsetText(runStart)}-${hexOffsetText(Math.max(runStart, runEnd - 1))}`);
-    }
-  }
   return {
     cells,
-    note: notes.join("；"),
+    // Decoded characters already appear in the ASCII column. Do not add an
+    // unverified kind/range sentence that consumes a separate note row.
+    note: "",
   };
 }
 
@@ -14869,8 +14869,6 @@ function childHexStructure(child, childBytes, options = {}) {
             );
           }
           addChildHexAnnotation(annotations, valueStart, `body已闭合：${bodyLayout.algebra}；${bodyLayout.label}，具体字段/bit含义待证`);
-        } else if (valueStart >= 0 && valueStart < childBytes.length) {
-          addChildHexAnnotation(annotations, valueStart, `body candidate(值区候选) @${hexOffsetText(valueStart)}；未命中已确认布局，以下按16字节分行`);
         }
       }
     }
@@ -18522,7 +18520,1391 @@ function buildGcloudBytesPanel(ev, summaryText = "") {
   return panel;
 }
 
+/* CSChannel2 read-only frame tree start */
+function isCSChannel2Event(ev) {
+  const analysis = ev && ev.analysis;
+  return Boolean(analysis && String(analysis.schema || "") === "tcpv.cschannel2.analysis.v1");
+}
+
+function cs2IsModificationRow(ev, summaryText) {
+  const summary = String(summaryText || ev?.summary || "");
+  return isCSChannel2Event(ev) || (!ev?.analysis?.schema && /(?:^|\s)protocol=cschannel2(?=\s|$)/i.test(summary));
+}
+
+function cs2SummaryDisplaySource(ev) {
+  if (!cs2IsModificationRow(ev)) return null;
+  const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
+  const plaintextMapping = String(analysis?.display_mapping?.full_pay || "");
+  const verified = analysis
+    ? analysis.crypto?.decrypt_status === "crc_validated" && analysis.validation?.crc_match === true
+      && ["snappy_decompressed_plaintext", "modified_snappy_decompressed_plaintext"].includes(plaintextMapping)
+    : /(?:^|\s)status=decoded(?=\s|$)/.test(String(ev?.summary || ""));
+  if (verified && Number(ev.full_len) > 0 && (ev.full_pfx || ev.full_pay)) {
+    return {payloadKey: "full_pay", prefixKey: "full_pfx", length: Number(ev.full_len), label: "应用明文"};
+  }
+  if (Number(ev.raw_len) > 0 && (ev.raw_pfx || ev.raw_pay)) {
+    return {payloadKey: "raw_pay", prefixKey: "raw_pfx", length: Number(ev.raw_len), label: "线上帧"};
+  }
+  return null;
+}
+
+function cs2ModificationEvidence(ev, summaryText) {
+  const mutation = ev?.analysis?.mutation || {};
+  const detailed = isCSChannel2Event(ev);
+  const changed = mutation.modified === true || mutation.wire_mutated === true
+    || (!detailed && ev?.modified === true && Array.isArray(ev.modification_evidence)
+      && ev.modification_evidence.includes("analysis"));
+  // The compact stream omits analysis. CS2's current producer is observe-only;
+  // legacy "payload_diff" compares different decode layers, not packet edits.
+  if (!changed && !(mutation.modified === false && mutation.wire_mutated === false)
+      && !(detailed === false && cs2IsModificationRow(ev, summaryText))) return null;
+  return {
+    state: changed ? "modified" : "unchanged",
+    modified: changed,
+    reasons: [changed ? "CSChannel2 记录了修改" : "CSChannel2 仅解密展示，未记录修改"],
+    diff: { short: "", detail: "" },
+  };
+}
+
+function cs2CompactReportCounts(ev, summaryText) {
+  const counts = new Map();
+  const count = (code) => counts.set(code, (counts.get(code) || 0) + 1);
+  const summary = String(summaryText || ev?.summary || "");
+  const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
+  const view = analysis?.plaintext_presentation;
+  if (analysis?.crypto?.decrypt_status === "crc_validated"
+      && analysis?.validation?.crc_match === true && cs2ValidPlaintextPresentation(view)) {
+    for (const node of view.root.children || []) {
+      if (!/^node\[\d+\]$/.test(node.name)) continue;
+      const code = cs2ReportCode(node);
+      if (code) count(code);
+    }
+    return { counts, partial: false };
+  }
+  if (!/(?:^|\s)status=decoded(?=\s|$)/.test(summary)) return { counts, partial: false };
+  // full_pfx is the saved verified application plaintext prefix. The other
+  // prefixes may be ciphertext or a compression wrapper; never search them.
+  const prefix = bytesFromHexPrefix(ev?.full_pfx, 2048);
+  const total = Number(ev?.full_len);
+  if (!Number.isSafeInteger(total) || total <= 0 || prefix.length > total) return { counts, partial: false };
+  const read = (at, n) => prefix.slice(at, at + n).reduce((v, b) => v * 256 + b, 0);
+  const batch = prefix[0] === 4;
+  const size = batch ? prefix[1] : 1;
+  if (!size || (!batch && prefix[0] !== 3)) return { counts, partial: false };
+  let cursor = batch ? 2 : 0;
+  const invalid = () => ({ counts: new Map(), partial: false });
+  const incomplete = () => prefix.length < total ? { counts, partial: true } : invalid();
+  for (let i = 0; i < size; i++) {
+    if (batch && cursor + 2 > prefix.length) return incomplete();
+    const item = cursor + (batch ? 2 : 0);
+    const end = batch ? item + read(cursor, 2) : total;
+    if (item + 23 > end || end > total) return invalid();
+    if (item + 3 > prefix.length) return incomplete();
+    const record = item + 23 + (prefix[item] === 3 && prefix[item + 1] === 4 ? prefix[item + 2] : 0);
+    if (record > end) return invalid();
+    if (record > prefix.length) return incomplete();
+    const length = end - record;
+    if (read(record - 4, 4) !== length) return invalid();
+    if (length >= 14) {
+      if (record + 10 > prefix.length) return incomplete();
+      if (read(record, 4) === 1 && read(record + 4, 2) === length
+          && [0x010a, 0x0102, 0x0111, 0x0112].includes(read(record + 6, 2))) {
+        count(`0x${read(record + 6, 4).toString(16).padStart(8, "0")}`);
+      }
+    }
+    cursor = end;
+  }
+  return cursor === total ? { counts, partial: false } : invalid();
+}
+
+const cs2InnerSummaryCache = new WeakMap();
+const cs2InnerPreviewQueue = new Map();
+let cs2InnerPreviewObserver;
+let cs2InnerPreviewInFlight = 0;
+
+function cs2WatchInnerPreview(chip, ev, summaryText) {
+  if (typeof IntersectionObserver !== "function" || !el.events || !state.flowId) return;
+  cs2InnerPreviewQueue.set(chip, {ev, summaryText, flow: state.flowId, ready: false});
+  if (!cs2InnerPreviewObserver) {
+    cs2InnerPreviewObserver = new IntersectionObserver(entries => {
+      for (const {target, isIntersecting} of entries) {
+        const item = cs2InnerPreviewQueue.get(target);
+        if (item) item.ready = isIntersecting;
+      }
+      cs2DrainInnerPreviews();
+    }, {root: el.events});
+  }
+  cs2InnerPreviewObserver.observe(chip);
+}
+
+function cs2PruneInnerPreviews() {
+  for (const [chip, item] of cs2InnerPreviewQueue) {
+    if (!chip.isConnected || item.flow !== state.flowId) {
+      cs2InnerPreviewQueue.delete(chip);
+      cs2InnerPreviewObserver.unobserve(chip);
+    }
+  }
+}
+
+function cs2DrainInnerPreviews() {
+  cs2PruneInnerPreviews();
+  for (const [chip, item] of cs2InnerPreviewQueue) {
+    if (cs2InnerPreviewInFlight >= 2) break;
+    if (!item.ready) continue;
+    cs2InnerPreviewQueue.delete(chip);
+    cs2InnerPreviewObserver.unobserve(chip);
+    const eventId = getEventId(item.ev);
+    cs2InnerPreviewInFlight++;
+    fetchEventPayload(item.flow, eventId).then(detail => {
+      if (state.flowId !== item.flow) return;
+      cs2InnerSummaryCache.set(item.ev, cs2DecryptedReportCounts(detail));
+      const summary = chip.closest("summary");
+      if (summary?.isConnected) syncSummaryInsightStrip(summary, item.ev, item.summaryText);
+    }).catch(() => {}).finally(() => {
+      cs2InnerPreviewInFlight--;
+      cs2DrainInnerPreviews();
+    });
+  }
+}
+
+function buildCS2SummaryInsightStrip(ev, summaryText) {
+  ensureCS2TersafeCompactStyles();
+  const summary = String(summaryText || ev?.summary || "");
+  const decoded = /(?:^|\s)status=decoded(?=\s|$)/.test(summary);
+  const { counts, partial } = cs2CompactReportCounts(ev, summary);
+  const rows = [...counts].sort(([a, na], [b, nb]) => (
+    Number(b === "0x0102000a") - Number(a === "0x0102000a") || nb - na
+  ));
+  const label = ([code, n], approximate = partial) => `${code.slice(2).match(/../g).join(" ")}${approximate ? ` ≥${n}` : n > 1 ? ` ×${n}` : ""}`;
+  const type = /(?:^|\s)type=([127])(?=\s|$)/.exec(summary)?.[1];
+  const text = rows.length
+    ? `${rows.slice(0, 2).map(row => label(row)).join(" · ")}${rows.length > 2 ? ` +${rows.length - 2}` : ""}`
+    : decoded ? "已解密" : type === "1" || type === "2" ? `握手 ${type}` : "线上帧";
+  const strip = document.createElement("span");
+  strip.className = "summary-insights cs2-summary-insights";
+  const chip = document.createElement("span");
+  chip.className = "summary-insight-chip cs2-summary-chip";
+  chip.textContent = text;
+  chip.title = rows.length ? `外层报告：${rows.map(row => label(row)).join(" · ")}${partial ? "（只统计预览中可验证的记录）" : ""}` : text;
+  strip.appendChild(chip);
+  const inner = isCSChannel2Event(ev) && ev.full_pay ? cs2DecryptedReportCounts(ev) : cs2InnerSummaryCache.get(ev);
+  if (inner?.size) {
+    const values = [...inner].map(([code, n]) => label([code, n], false));
+    const innerChip = document.createElement("span");
+    innerChip.className = "summary-insight-chip cs2-summary-inner";
+    innerChip.textContent = `→ ${values.slice(0, 2).join(" · ")}${values.length > 2 ? ` +${values.length - 2}` : ""}`;
+    innerChip.title = `已校验内层：${values.join(" · ")}`;
+    strip.appendChild(innerChip);
+  } else if (!inner && (counts.has("0x010a0008") || counts.has("0x010a0009"))) {
+    cs2WatchInnerPreview(chip, ev, summaryText);
+  }
+  if (decoded || rows.length) {
+    const prefix = bytesFromHexPrefix(ev?.full_pfx, 2048);
+    const model = String.fromCharCode(...prefix).match(/\bmodel:([A-Za-z0-9_,.-]{2,40})(?=;)/i)?.[1];
+    if (model) {
+      const device = document.createElement("span");
+      device.className = "summary-insight-chip summary-insight-device cs2-summary-device";
+      device.textContent = model;
+      device.title = `设备型号：${model}`;
+      strip.appendChild(device);
+    }
+  }
+  return strip;
+}
+
+function cs2Offset(value) {
+  const number = Number(value || 0);
+  return `0x${number.toString(16).padStart(4, "0")}`;
+}
+
+function cs2PlaintextBytes(ev, plaintext, analysis) {
+  const expected = Number(plaintext && plaintext.actual_length);
+  const mapping = analysis && analysis.display_mapping;
+  if (!mapping || !["snappy_decompressed_plaintext", "modified_snappy_decompressed_plaintext"].includes(mapping.full_pay)
+      || !Number.isSafeInteger(expected) || expected <= 0
+      || (Number(ev && ev.full_len) > 0 && Number(ev.full_len) !== expected)
+      || typeof b64ToBytes !== "function") return [];
+  const encoded = String(ev && ev.full_pay || "");
+  if (!encoded) return [];
+  const bytes = b64ToBytes(encoded);
+  return Array.isArray(bytes) && bytes.length === expected ? bytes : [];
+}
+
+function cs2BeforeApplicationBytes(ev, analysis, currentBytes) {
+  // Exact verified-rebuild producer contract.  Do not interpret a legacy
+  // encrypted_payload (or a generic before buffer) as application plaintext.
+  const mapping = analysis.display_mapping || {};
+  if (!currentBytes.length || analysis.mutation?.modified !== true
+      || analysis.mutation?.wire_mutated !== true
+      || mapping.full_pay !== "modified_snappy_decompressed_plaintext"
+      || mapping.before_pay !== "original_snappy_decompressed_plaintext"
+      || mapping.raw_pay !== "rebuilt_complete_wire_frame"
+      || !/(?:^|\s)mutation=verified_rebuild(?=\s|$)/.test(String(ev.summary || ""))) return [];
+  const expected = Number(ev.before_len);
+  if (!Number.isSafeInteger(expected) || expected <= 0) return [];
+  const before = b64ToBytes(String(ev.before_pay || ""));
+  return before.length === expected ? before : [];
+}
+
+function cs2BeforePlaintextPresentation(analysis, beforeBytes) {
+  if (!beforeBytes.length) return null;
+  const stored = analysis?.before_plaintext_presentation;
+  if (cs2ValidPlaintextPresentation(stored, beforeBytes)) return stored;
+  const reparsed = cs2PlaintextPresentationFromBytes(beforeBytes);
+  return cs2ValidPlaintextPresentation(reparsed, beforeBytes) ? reparsed : null;
+}
+
+function cs2VerifiedApplicationBytes(ev) {
+  const analysis = ev?.analysis;
+  const plaintext = analysis?.plaintext_presentation;
+  if (!isCSChannel2Event(ev) || analysis.crypto?.decrypt_status !== "crc_validated"
+      || analysis.validation?.crc_match !== true) return [];
+  const bytes = cs2PlaintextBytes(ev, plaintext, analysis);
+  return bytes.length && cs2ValidPlaintextPresentation(plaintext, bytes) ? bytes : [];
+}
+
+function cs2NodeRange(node, bytes) {
+  const start = Number(node && node.offset);
+  const end = Number(node && node.end);
+  return Array.isArray(bytes) && Number.isSafeInteger(start) && Number.isSafeInteger(end)
+    && start >= 0 && end >= start && end <= bytes.length ? bytes.slice(start, end) : [];
+}
+
+function cs2PlainNode(name, start, end, options = {}) {
+  return {
+    name, offset: start, end, length: Math.max(0, end - start),
+    kind: options.kind || "field", status: options.status || "observed",
+    coordinate_space: "application_plaintext", encoding: options.encoding || "bytes",
+    value: options.value ?? null, description: options.description || "",
+    children: Array.isArray(options.children) ? options.children : [],
+  };
+}
+
+function cs2ReadBe(bytes, start, end) {
+  let value = 0;
+  for (let index = start; index < end; index++) value = value * 256 + Number(bytes[index] || 0);
+  return value;
+}
+
+function cs2ObservedAsciiPartition(bytes, absoluteStart) {
+  const children = [];
+  let cursor = 0;
+  let runs = 0;
+  while (cursor < bytes.length && runs < 128) {
+    let start = cursor;
+    while (start < bytes.length && !(bytes[start] >= 32 && bytes[start] < 127)) start++;
+    let end = start;
+    while (end < bytes.length && bytes[end] >= 32 && bytes[end] < 127) end++;
+    if (end - start < 4) {
+      cursor = start < bytes.length ? start + 1 : bytes.length;
+      continue;
+    }
+    if (start > 0) {
+      const previousEnd = children.length ? children[children.length - 1].end - absoluteStart : 0;
+      if (start > previousEnd) children.push(cs2PlainNode(
+        "未解释字节", absoluteStart + previousEnd, absoluteStart + start,
+        {kind:"opaque", status:"unparsed"}
+      ));
+    }
+    const text = bytes.slice(start, end).map(byte => String.fromCharCode(byte)).join("");
+    children.push(cs2PlainNode("可打印文本（观察值）", absoluteStart + start, absoluteStart + end, {
+      encoding:"ascii", value:text.length <= 192 ? text : `${text.slice(0, 192)}…`,
+    }));
+    cursor = end;
+    runs++;
+  }
+  const covered = children.length ? children[children.length - 1].end - absoluteStart : 0;
+  if (covered < bytes.length) children.push(cs2PlainNode(
+    "未解释字节", absoluteStart + covered, absoluteStart + bytes.length,
+    {kind:"opaque", status:"unparsed"}
+  ));
+  return children;
+}
+
+function cs2TssRecordNode(record, absoluteStart) {
+  if (record.length < 14 || record.slice(0, 4).join(",") !== "0,0,0,1"
+      || cs2ReadBe(record, 4, 6) !== record.length) return null;
+  const reportCode = cs2ReadBe(record, 6, 10);
+  const reportFamily = Math.floor(reportCode / 0x10000);
+  if (![0x010a, 0x0102, 0x0111, 0x0112].includes(reportFamily)) return null;
+  const end = absoluteStart + record.length;
+  const hex = (value, width) => `0x${value.toString(16).padStart(width, "0")}`;
+  const children = [
+    cs2PlainNode("记录版本", absoluteStart, absoluteStart + 4, {encoding:"be32", value:1}),
+    cs2PlainNode("记录总长度", absoluteStart + 4, absoluteStart + 6, {encoding:"be16", value:record.length}),
+    cs2PlainNode("报告编号", absoluteStart + 6, absoluteStart + 10, {encoding:"be32", value:hex(reportCode, 8)}),
+    cs2PlainNode("leaf_id（候选序号）", absoluteStart + 10, absoluteStart + 14, {
+      encoding:"be32", value:hex(cs2ReadBe(record, 10, 14), 8),
+    }),
+  ];
+  let bodyStart = 14;
+  if (reportCode === 0x0102000a && record.length >= 36
+      && cs2ReadBe(record, 20, 22) === record.length - 22) {
+    children.push(
+      cs2PlainNode("固定头字段（含义待确认）", absoluteStart + 14, absoluteStart + 20, {kind:"opaque", status:"unparsed"}),
+      cs2PlainNode("inner length", absoluteStart + 20, absoluteStart + 22, {encoding:"be16", value:cs2ReadBe(record, 20, 22)}),
+      cs2PlainNode("inner type", absoluteStart + 22, absoluteStart + 24, {encoding:"be16", value:hex(cs2ReadBe(record, 22, 24), 4)}),
+      cs2PlainNode("selector0", absoluteStart + 24, absoluteStart + 28, {encoding:"be32", value:hex(cs2ReadBe(record, 24, 28), 8)}),
+      cs2PlainNode("selector1", absoluteStart + 28, absoluteStart + 32, {encoding:"be32", value:hex(cs2ReadBe(record, 28, 32), 8)}),
+      cs2PlainNode("inner field", absoluteStart + 32, absoluteStart + 36, {encoding:"be32", value:hex(cs2ReadBe(record, 32, 36), 8)})
+    );
+    bodyStart = 36;
+  }
+  if (bodyStart < record.length) {
+    const body = record.slice(bodyStart);
+    children.push(cs2PlainNode("报告正文", absoluteStart + bodyStart, end, {
+      kind:"group", value:`${body.length} bytes`,
+      children:cs2ObservedAsciiPartition(body, absoluteStart + bodyStart),
+    }));
+  }
+  return cs2PlainNode(`TSS-like 报告 ${hex(reportCode, 8)}`, absoluteStart, end, {
+    kind:"container", value:`report=${hex(reportCode, 8)} len=${record.length}`, children,
+  });
+}
+
+function cs2ApplicationHeaderLength(bytes, start, end) {
+  const extra = bytes[start] === 3 && bytes[start + 1] === 4 && end - start >= 3 ? bytes[start + 2] : 0;
+  const width = 23 + extra;
+  return end - start >= width ? width : 0;
+}
+
+function cs2ApplicationHeaderNode(bytes, start, end) {
+  const data = bytes.slice(start, end);
+  if (data[0] !== 3 || data[1] !== 4) {
+    return cs2PlainNode("应用项头（布局待确认）", start, end, {kind:"opaque", status:"unparsed"});
+  }
+  const extra = data[2];
+  const fixed = start + extra;
+  const children = [
+    cs2PlainNode("项类型", start, start + 1, {encoding:"u8", value:data[0]}),
+    cs2PlainNode("项子类型", start + 1, start + 2, {encoding:"u8", value:data[1]}),
+    cs2PlainNode("可选字段长度", start + 2, start + 3, {encoding:"u8", value:extra}),
+  ];
+  if (extra) children.push(cs2PlainNode(
+    "可选字段（内容待确认）", start + 3, fixed + 3, {kind:"opaque", status:"unparsed"}
+  ));
+  children.push(
+    cs2PlainNode("应用类型码", fixed + 3, fixed + 5, {encoding:"hex", value:`0x${data.slice(extra + 3, extra + 5).map(byte => byte.toString(16).padStart(2, "0")).join("")}`}),
+    cs2PlainNode("附加值（含义待确认）", fixed + 5, fixed + 7, {encoding:"hex", value:`0x${data.slice(extra + 5, extra + 7).map(byte => byte.toString(16).padStart(2, "0")).join("")}`}),
+    cs2PlainNode("Unix 秒时间戳", fixed + 7, fixed + 11, {encoding:"be32", value:cs2ReadBe(data, extra + 7, extra + 11)}),
+    cs2PlainNode("保留/状态区", fixed + 11, fixed + 19, {kind:"opaque", status:"unparsed"}),
+    cs2PlainNode("正文长度", fixed + 19, fixed + 23, {encoding:"be32", value:cs2ReadBe(data, data.length - 4, data.length)})
+  );
+  return cs2PlainNode("应用项头", start, end, {kind:"group", children});
+}
+
+function cs2ApplicationItemNode(bytes, index, prefixStart, itemStart, itemEnd) {
+  const headerLength = cs2ApplicationHeaderLength(bytes, itemStart, itemEnd);
+  const bodyStart = itemStart + headerLength;
+  const body = bytes.slice(bodyStart, itemEnd);
+  let record = cs2TssRecordNode(body, bodyStart);
+  if (!record && body.length) record = cs2PlainNode("应用正文（未识别为 TSS-like 记录）", bodyStart, itemEnd, {
+    kind:"group", status:"unparsed", value:`${body.length} bytes`,
+    children:cs2ObservedAsciiPartition(body, bodyStart),
+  });
+  const children = [];
+  let start = itemStart;
+  if (prefixStart !== null) {
+    start = prefixStart;
+    children.push(cs2PlainNode("项总长度", prefixStart, itemStart, {encoding:"be16", value:itemEnd - itemStart}));
+  }
+  children.push(cs2ApplicationHeaderNode(bytes, itemStart, bodyStart));
+  if (record) children.push(record);
+  return cs2PlainNode(`node[${index}]`, start, itemEnd, {kind:"container", children});
+}
+
+function cs2PlaintextPresentationFromBytes(bytes, source = "verified_original_plaintext_ui_reparse") {
+  const raw = Array.isArray(bytes) ? bytes : [];
+  const children = [];
+  let layout = "unrecognized";
+  let nodeCount = 0;
+  if (raw.length >= 23 && raw[0] === 3) {
+    const headerLength = cs2ApplicationHeaderLength(raw, 0, raw.length);
+    if (headerLength && cs2ReadBe(raw, headerLength - 4, headerLength) === raw.length - headerLength) {
+      children.push(cs2ApplicationItemNode(raw, 0, null, 0, raw.length));
+      layout = "single-item";
+      nodeCount = 1;
+    }
+  } else if (raw.length >= 4 && raw[0] === 4) {
+    const declared = raw[1];
+    let cursor = 2;
+    const nodes = [];
+    let valid = declared > 0;
+    for (let index = 0; index < declared; index++) {
+      if (cursor + 2 > raw.length) { valid = false; break; }
+      const length = cs2ReadBe(raw, cursor, cursor + 2);
+      const itemStart = cursor + 2;
+      const itemEnd = itemStart + length;
+      const headerLength = itemEnd <= raw.length ? cs2ApplicationHeaderLength(raw, itemStart, itemEnd) : 0;
+      const headerEnd = itemStart + headerLength;
+      if (!headerLength || itemEnd > raw.length
+          || cs2ReadBe(raw, headerEnd - 4, headerEnd) !== length - headerLength) { valid = false; break; }
+      nodes.push(cs2ApplicationItemNode(raw, index, cursor, itemStart, itemEnd));
+      cursor = itemEnd;
+    }
+    if (valid && cursor === raw.length && nodes.length === declared) {
+      children.push(cs2PlainNode("批次头", 0, 2, {kind:"group", children:[
+        cs2PlainNode("批次类型", 0, 1, {encoding:"u8", value:raw[0]}),
+        cs2PlainNode("node 数量", 1, 2, {encoding:"u8", value:declared}),
+      ]}));
+      children.push(...nodes);
+      layout = "batch-items";
+      nodeCount = nodes.length;
+    }
+  }
+  if (!children.length) children.push(cs2PlainNode("已验证明文（外层结构待确认）", 0, raw.length, {
+    kind:"group", status:"unparsed", value:`${raw.length} bytes`, children:cs2ObservedAsciiPartition(raw, 0),
+  }));
+  const root = cs2PlainNode("CSChannel2 解密明文", 0, raw.length, {kind:"container", children});
+  return {
+    schema:"tcpv.cschannel2.plaintext-presentation.v1", source,
+    coordinate_space:"application_plaintext", layout, node_count:nodeCount,
+    root, exact_partition:true, actual_length:raw.length,
+    semantic_depth:"application-envelope+tss-record+observed-ascii",
+  };
+}
+
+function cs2ValidPlaintextPresentation(plaintext, bytes) {
+  if (!plaintext || plaintext.schema !== "tcpv.cschannel2.plaintext-presentation.v1"
+      || ![
+        "native_crc_validated_full_plaintext",
+        "verified_original_plaintext",
+        "verified_original_plaintext_ui_reparse",
+      ].includes(String(plaintext.source || ""))
+      || plaintext.coordinate_space !== "application_plaintext"
+      || plaintext.exact_partition !== true) return false;
+  const length = Number(plaintext.actual_length);
+  const root = plaintext.root;
+  if (!Number.isSafeInteger(length) || length < 0 || !root || root.offset !== 0 || root.end !== length
+      || root.length !== length || (Array.isArray(bytes) && bytes.length > 0 && bytes.length !== length)) return false;
+  let budget = 4096;
+  const visit = (node) => {
+    if (!node || typeof node !== "object" || --budget < 0
+        || node.coordinate_space !== "application_plaintext"
+        || !Number.isSafeInteger(node.offset) || !Number.isSafeInteger(node.end)
+        || node.offset < 0 || node.end < node.offset || node.end > length
+        || node.length !== node.end - node.offset
+        || !["container", "group", "field", "opaque"].includes(String(node.kind || "field"))
+        || !["observed", "unparsed", "invalid"].includes(String(node.status || "observed"))) return false;
+    const children = Array.isArray(node.children) ? node.children : [];
+    if (!children.length) return true;
+    let cursor = node.offset;
+    for (const child of children) {
+      if (!visit(child) || child.offset !== cursor || child.end > node.end) return false;
+      cursor = child.end;
+    }
+    return cursor === node.end;
+  };
+  return visit(root);
+}
+
+function cs2ReportCode(node) {
+  const text = `${String(node && node.name || "")} ${String(node && node.value || "")}`;
+  const match = text.match(/(?:report=|报告\s+)(0x[0-9a-f]{8})/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function cs2Report0102000aTextRanges(record, body, plaintextBytes) {
+  // Known 0xfffe shapes only. Match lengths, selectors, and fixed field
+  // boundaries before applying the observed XOR; do not scan unknown bytes.
+  if (body.offset !== record.offset + 36 || body.end !== record.end) return [];
+  const raw = cs2NodeRange(record, plaintextBytes);
+  const read = (bytes, offset, width) => bytes.slice(offset, offset + width).reduce((n, b) => n * 256 + b, 0);
+  if (raw.length < 36 || read(raw, 0, 4) !== 1 || read(raw, 4, 2) !== raw.length
+      || read(raw, 6, 4) !== 0x0102000a || read(raw, 20, 2) !== raw.length - 22
+      || read(raw, 22, 2) !== 0xfffe || read(raw, 24, 4) !== 0x21680002) return [];
+
+  const data = raw.slice(36);
+  const shape = read(raw, 28, 4);
+  const field = read(raw, 32, 4);
+  const signedDecimal = /^-?\d+$/;
+  const hex = /^0x[0-9a-f]+$/;
+  let slots;
+  if (shape === 0x34560001 && field === 0xfb && [11, 12, 13].includes(data.length)) {
+    slots = [[0, data.length - 2, signedDecimal]];
+  } else if (shape === 0x34560006 && field === 0x2b && [69, 70].includes(data.length)
+      && read(data, 12, 4) === field && read(data, 54, 4) === field) {
+    slots = [[0, 10, hex], [16, 10, hex], [42, 10, signedDecimal], [58, data.length - 60, hex]];
+  } else {
+    return [];
+  }
+  const ranges = [];
+  for (const [prefix, length, pattern] of slots) {
+    const start = prefix + 2;
+    const end = start + length;
+    if (end > data.length || data[prefix] !== 1 || data[prefix + 1] !== length) return [];
+    const decoded = String.fromCharCode(...data.slice(start, end).map(byte => byte ^ 0xb6));
+    if (!pattern.test(decoded)) return [];
+    ranges.push({
+      offset: body.offset + start,
+      end: body.offset + end,
+      reportOffset: 36 + start,
+      decoded,
+      label: "异或文本",
+      encoding: "xor-text",
+    });
+  }
+  return ranges;
+}
+
+function cs2FieldRows(root, plaintextBytes, annotateReportText = false) {
+  const rows = [];
+  const fieldRow = (node) => ({
+    offset: node.offset, end: node.end,
+    label: String(node.name || "字段"), value: node.value,
+    encoding: String(node.encoding || "bytes").toLowerCase(), kind: node.kind,
+  });
+  const appendReportTextRows = (record, body) => {
+    const ranges = cs2Report0102000aTextRanges(record, body, plaintextBytes);
+    const fields = body.children?.length ? body.children : [body];
+    // Existing parsed text and other known fields must not be replaced.
+    if (!ranges.length || !ranges.every(({offset, end}) => fields.some(field =>
+      field.kind === "opaque" && offset >= field.offset && end <= field.end))) return false;
+    for (const field of fields) {
+      let offset = field.offset;
+      for (const range of ranges) {
+        if (range.offset < field.offset || range.end > field.end) continue;
+        if (offset < range.offset) rows.push({...fieldRow(field), offset, end: range.offset});
+        rows.push(range);
+        offset = range.end;
+      }
+      if (offset < field.end) rows.push({...fieldRow(field), offset});
+    }
+    return true;
+  };
+  const visit = (node) => {
+    const children = Array.isArray(node.children) ? node.children : [];
+    // The historical tree merged a variable-length prefix and two integers.
+    // Only reinterpret the byte-exact subtype 04 header with an empty prefix.
+    if (node.name === "应用项头" && node.end - node.offset === 23) {
+      const raw = cs2NodeRange(node, plaintextBytes);
+      if (raw.length === 23 && raw[0] === 3 && raw[1] === 4 && raw[2] === 0) {
+        const at = node.offset;
+        const uint = (i, end) => raw.slice(i, end).reduce((n, byte) => n * 256 + byte, 0);
+        rows.push(
+          { offset: at, end: at + 1, label: "项类型", encoding: "u8", value: raw[0] },
+          { offset: at + 1, end: at + 2, label: "项子类型", encoding: "u8", value: raw[1] },
+          { offset: at + 2, end: at + 3, label: "可选字段长度", encoding: "u8", value: raw[2] },
+          { offset: at + 3, end: at + 5, label: "应用类型码", encoding: "hex", value: `0x${uint(3, 5).toString(16).padStart(4, "0")}` },
+          { offset: at + 5, end: at + 7, label: "附加值（含义待确认）", encoding: "hex", value: `0x${uint(5, 7).toString(16).padStart(4, "0")}` },
+          { offset: at + 7, end: at + 11, label: "Unix 秒时间戳", encoding: "be32", value: uint(7, 11) },
+          { offset: at + 11, end: at + 19, label: "保留/状态区", encoding: "bytes" },
+          { offset: at + 19, end: at + 23, label: "正文长度", encoding: "be32", value: uint(19, 23) },
+        );
+        return;
+      }
+    }
+    if (children.length) {
+      for (const child of children) {
+        if (annotateReportText && child.name === "报告正文" && cs2ReportCode(node) === "0x0102000a"
+            && appendReportTextRows(node, child)) continue;
+        visit(child);
+      }
+    } else rows.push(fieldRow(node));
+  };
+  visit(root);
+  return rows;
+}
+
+function cs2RecordSections(root, nodeCount, bytes) {
+  const split = nodeCount > 0 && Array.isArray(root.children) && root.children.length > 0;
+  return (split ? root.children : [root]).map((node) => ({
+    node,
+    title: node === root ? "明文" : String(node.name || "结构节点"),
+    code: cs2ReportCode(node),
+    rows: cs2FieldRows(node, bytes, true),
+  }));
+}
+
+const cs2BeijingClock = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+});
+
+// Reuse the exact 1.12 TerSafe card vocabulary and layout, but keep CS2 as the
+// sole semantic authority.  These adapters deliberately do not call the
+// TerSafe parser or its before/after mutation model: field boundaries, names,
+// values and offsets all come from the CRC-validated CS2 plaintext tree.
+function cs2TersafeHexRows(section, plaintextBytes) {
+  const rows = [];
+  const nodeStart = Number(section && section.node && section.node.offset || 0);
+  const rowLimit = 16;
+  for (const field of Array.isArray(section && section.rows) ? section.rows : []) {
+    const start = field.offset;
+    const bytes = cs2NodeRange(field, plaintextBytes);
+    if (!bytes.length) continue;
+    const { encoding, kind, value } = field;
+    let note = field.label;
+    const tone = note === "Unix 秒时间戳" ? "time"
+      : /报告编号/.test(note) ? "report"
+      : /长度|数量/.test(note) ? "length"
+      : /类型|selector|inner field|leaf_id/.test(note) ? "type"
+      : "";
+    let tooltip = "";
+    if (encoding === "xor-text") {
+      note = `异或文本 · 报告 ${hexOffsetText(field.reportOffset)} · ${bytes.length} B：${field.decoded}`;
+    } else if (kind === "opaque" && note === "未解释字节") {
+      note = `未解析 · ${bytes.length} B`;
+    } else if (encoding === "ascii" && note === "可打印文本（观察值）") {
+      note = `文本（观察） · ${bytes.length} B`;
+    } else if (tone === "time" && Number.isInteger(value) && value >= 0 && value <= 0xffffffff) {
+      note = `时间戳：${cs2BeijingClock.format(new Date(value * 1000))}（北京时间）`;
+      tooltip = `Unix 秒时间戳：${value}`;
+    } else if (/^(?:u8|be16|be32|be64|hex)$/.test(encoding) && /^(?:0x[0-9a-f]+|\d+)$/i.test(value)) {
+      note = `${note}：${value}`;
+    }
+    // Keep the parsed boundary even if it falls in the middle of a 16-byte row.
+    // Only long fields need continuation rows; never merge across fields.
+    for (let i = 0; i < bytes.length; i += rowLimit) {
+      rows.push({
+        offset: start - nodeStart + i,
+        bytes: bytes.slice(i, i + rowLimit),
+        note: i === 0 ? note : "",
+        encoding,
+        tone,
+        tooltip: i === 0 ? tooltip : "",
+      });
+    }
+  }
+  return rows;
+}
+
+function appendCS2TersafeHexTable(box, section, plaintextBytes, changed = null, showNotes = true) {
+  const rows = cs2TersafeHexRows(section, plaintextBytes);
+  if (!rows.length) return;
+  const wrap = document.createElement("div");
+  wrap.className = "child-hex-table";
+  const body = document.createElement("div");
+  body.className = "child-hex-body";
+  for (const row of rows) {
+    const line = document.createElement("div");
+    line.className = `child-hex-row child-hex-row-marked${row.encoding === "ascii" ? " child-hex-row-string" : ""}${row.encoding === "xor-text" ? " cs2-field-xor" : ""}${row.tone ? ` cs2-field-${row.tone}` : ""}`;
+    const offset = document.createElement("code");
+    offset.className = "child-hex-offset";
+    offset.textContent = hexOffsetText(row.offset);
+    const bytes = document.createElement("code");
+    bytes.className = "child-hex-bytes child-hex-byte-grid";
+    const ascii = document.createElement("code");
+    ascii.className = "child-hex-ascii";
+    for (const [index, rawValue] of row.bytes.entries()) {
+      const value = Number(rawValue) & 0xff;
+      const differs = changed?.has(row.offset + index);
+      const byte = document.createElement("span");
+      byte.className = `child-hex-byte-cell${row.encoding === "ascii" ? " child-hex-byte-cell-string" : ""}${differs ? " child-hex-byte-cell-changed" : ""}`;
+      byte.textContent = value.toString(16).padStart(2, "0");
+      bytes.appendChild(byte);
+      const char = document.createElement("span");
+      char.className = `child-hex-ascii-cell${row.encoding === "ascii" ? " child-hex-ascii-cell-string" : ""}${differs ? " child-hex-ascii-cell-changed" : ""}`;
+      char.textContent = value >= 32 && value < 127 ? String.fromCharCode(value) : ".";
+      ascii.appendChild(char);
+    }
+    line.appendChild(offset); line.appendChild(bytes); line.appendChild(ascii);
+    if (showNotes && row.note) {
+      const note = document.createElement("span");
+      note.className = "child-hex-note";
+      note.textContent = row.note;
+      if (row.tooltip) note.title = row.tooltip;
+      line.appendChild(note);
+    }
+    body.appendChild(line);
+  }
+  wrap.appendChild(body);
+  box.appendChild(wrap);
+}
+
+function ensureCS2TersafeCompactStyles() {
+  if (document.getElementById && document.getElementById("tcpv-cs2-tersafe-compact-styles")) return;
+  const style = document.createElement("style");
+  style.id = "tcpv-cs2-tersafe-compact-styles";
+  style.textContent = `
+    .cs2-tersafe-view .child-compare-grid{gap:5px;padding:5px}
+    .cs2-tersafe-view .cs2-inner-report-chip{color:#64d8cb;white-space:nowrap}
+    .cs2-tersafe-view .child-preview-row:not(.child-preview-row-single){grid-template-columns:repeat(2,minmax(0,1fr))}
+    .cs2-tersafe-view .child-preview-row-single{display:grid;grid-template-columns:minmax(0,1fr)}
+    .cs2-tersafe-view .child-preview-row>.child-preview-before{border-right:1px solid var(--line);border-bottom:0}
+    .cs2-tersafe-view .child-preview-label small{color:var(--muted);font-weight:400;margin-left:7px}
+    .cs2-tersafe-view .child-preview-empty{padding:5px 0}
+    .cs2-tersafe-view .cs2-wire-reference>summary{min-height:0;padding:3px 5px;color:var(--muted)}
+    .cs2-tersafe-view .cs2-observed-kv{display:flex;flex-wrap:wrap;gap:3px 12px;margin-top:4px;color:var(--muted);font-size:11px}
+    .cs2-tersafe-view .cs2-observed-kv code{min-width:0;overflow-wrap:anywhere;color:color-mix(in srgb,#4ade80 80%,var(--text))}
+    .cs2-tersafe-view .child-pair-title{padding:4px 7px}
+    .cs2-tersafe-view .child-preview-box{padding:5px 7px}
+    .cs2-tersafe-view .child-preview-info{padding-bottom:2px}
+    .cs2-tersafe-view .child-preview-label{margin-bottom:1px;line-height:1.3}
+    .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;background:color-mix(in srgb,var(--panel) 96%,transparent)}
+    .cs2-tersafe-view .cs2-paired-fields-inner{width:100%;min-width:1180px}
+    .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,440px) minmax(360px,1fr)}
+    .cs2-tersafe-view .cs2-paired-field-head{position:sticky;top:0;z-index:1;background:var(--panel);border-bottom:1px solid var(--line);font:600 12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif}
+    .cs2-tersafe-view .cs2-paired-field-head>div{padding:6px 10px}
+    .cs2-tersafe-view .cs2-paired-field-head-middle{text-align:center;color:var(--muted);border-inline:1px solid var(--line)}
+    .cs2-tersafe-view .cs2-paired-field-head-before{color:color-mix(in srgb,#d6a85a 82%,var(--text));border-top:2px solid color-mix(in srgb,#d6a85a 70%,transparent);background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 10%,transparent),transparent 72%)}
+    .cs2-tersafe-view .cs2-paired-field-head-after{color:color-mix(in srgb,#67c58c 82%,var(--text));border-top:2px solid color-mix(in srgb,#67c58c 68%,transparent);background:linear-gradient(270deg,color-mix(in srgb,#67c58c 9%,transparent),transparent 72%)}
+    .cs2-tersafe-view .cs2-paired-field-head-kicker{display:inline-block;margin-right:7px;padding:1px 5px;border:1px solid currentColor;border-radius:999px;font-size:10px;line-height:1.25;opacity:.82}
+    .cs2-tersafe-view .cs2-paired-field-head-detail{color:var(--muted);font-weight:500}
+    .cs2-tersafe-view .cs2-paired-field{border-bottom:1px solid color-mix(in srgb,var(--line) 46%,transparent)}
+    .cs2-tersafe-view .cs2-paired-side{min-width:0;padding:0 3px;background:color-mix(in srgb,var(--panel) 97%,transparent)}
+    .cs2-tersafe-view .cs2-paired-side.child-preview-before{border-right:0;background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 4%,transparent),transparent 76%)}
+    .cs2-tersafe-view .cs2-paired-side.child-preview-after{background:linear-gradient(270deg,color-mix(in srgb,#67c58c 4%,transparent),transparent 76%)}
+    .cs2-tersafe-view .cs2-paired-side-empty{display:flex;align-items:center;justify-content:center;color:var(--muted);font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-table{margin-top:0;border:0;border-radius:0;overflow:visible;background:transparent}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-body{min-width:0;padding:0}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-row{grid-template-columns:6.5ch 41ch 16ch;min-width:63.5ch;padding-block:1px;line-height:1.25}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-bytes{width:auto;column-gap:.65ch;justify-content:start}
+    .cs2-tersafe-view .cs2-paired-side-more{margin:0 6px 3px;border:0}
+    .cs2-tersafe-view .cs2-paired-side-more>summary{display:block;min-height:0;padding:1px 0;color:var(--muted);font:500 10px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;cursor:pointer;list-style:none}
+    .cs2-tersafe-view .cs2-paired-side-more>summary::-webkit-details-marker{display:none}
+    .cs2-tersafe-view .cs2-paired-side-more>summary::before{content:"＋ ";color:color-mix(in srgb,var(--muted) 72%,var(--text))}
+    .cs2-tersafe-view .cs2-paired-side-more[open]>summary::before{content:"－ "}
+    .cs2-tersafe-view .cs2-paired-field-note{display:grid;grid-template-columns:minmax(9em,max-content) minmax(0,1fr);align-items:center;column-gap:8px;row-gap:1px;min-width:0;padding:3px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 58%,transparent);font:12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 94%,transparent)}
+    .cs2-tersafe-view .cs2-paired-field-name{font-weight:600;color:var(--muted);overflow-wrap:anywhere}
+    .cs2-tersafe-view .cs2-paired-field-value{display:flex;flex-wrap:nowrap;align-items:baseline;gap:4px;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text)}
+    .cs2-tersafe-view .cs2-paired-field-value>span{min-width:0}
+    .cs2-tersafe-view .cs2-paired-field-value-long :is(.cs2-paired-field-old,.cs2-paired-field-new){flex:1 1 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .cs2-tersafe-view .cs2-paired-value-more{min-width:0;margin:0}
+    .cs2-tersafe-view .cs2-paired-value-more>summary{display:grid;grid-template-columns:10px minmax(0,1fr);align-items:baseline;min-width:0;list-style:none;cursor:pointer}
+    .cs2-tersafe-view .cs2-paired-value-more>summary::-webkit-details-marker{display:none}
+    .cs2-tersafe-view .cs2-paired-value-more>summary::before{content:"▸";color:var(--muted);font-size:10px}
+    .cs2-tersafe-view .cs2-paired-value-more[open]>summary::before{content:"▾"}
+    .cs2-tersafe-view .cs2-paired-value-full{margin:3px 0 1px 10px;padding:3px 6px;border-left:2px solid color-mix(in srgb,var(--muted) 36%,transparent);color:color-mix(in srgb,var(--text) 86%,var(--muted));background:color-mix(in srgb,var(--muted) 6%,transparent);font-size:11px;line-height:1.35;overflow-wrap:anywhere}
+    .cs2-tersafe-view :is(.cs2-paired-field-old,.cs2-paired-field-new){display:inline-flex;align-items:baseline;gap:4px;min-width:0}
+    .cs2-tersafe-view .cs2-paired-field-old::before,.cs2-tersafe-view .cs2-paired-field-new::before{flex:0 0 auto;padding:0 3px;border:1px solid currentColor;border-radius:3px;font-size:9px;line-height:1.35;opacity:.75}
+    .cs2-tersafe-view .cs2-paired-field-old::before{content:"旧"}
+    .cs2-tersafe-view .cs2-paired-field-new::before{content:"新"}
+    .cs2-tersafe-view .cs2-paired-field-old{color:color-mix(in srgb,#d6a85a 78%,var(--text));font-weight:550}
+    .cs2-tersafe-view .cs2-paired-field-arrow{color:#8b949e;font-weight:600}
+    .cs2-tersafe-view .cs2-paired-field-new{color:color-mix(in srgb,#67c58c 82%,var(--text));font-weight:600}
+    .cs2-tersafe-view .cs2-paired-field-state{grid-column:2;color:var(--muted);font-size:10px}
+    .cs2-tersafe-view .cs2-paired-field-diff{grid-column:1/-1;margin-top:2px;padding:2px 6px;border-left:2px solid color-mix(in srgb,#d6a85a 48%,transparent);border-radius:2px;color:color-mix(in srgb,#d6b56d 72%,var(--text));background:color-mix(in srgb,#d6b56d 7%,transparent);font:500 11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+    .cs2-tersafe-view .cs2-paired-field-length .cs2-paired-field-name{color:#38bdf8}
+    .cs2-tersafe-view .cs2-paired-field-time .cs2-paired-field-name{color:#2dd4bf}
+    .cs2-tersafe-view .cs2-paired-field-report .cs2-paired-field-name{color:#a78bfa}
+    .cs2-tersafe-view .cs2-paired-field-type .cs2-paired-field-name{color:#fb923c}
+    .cs2-tersafe-view .child-preview-before .child-hex-byte-cell-changed{color:color-mix(in srgb,#d6a85a 82%,var(--text));background:color-mix(in srgb,#d6a85a 10%,transparent);box-shadow:inset 0 -1px color-mix(in srgb,#d6a85a 38%,transparent);font-weight:650;border-radius:2px}
+    .cs2-tersafe-view .child-preview-after .child-hex-byte-cell-changed{color:color-mix(in srgb,#67c58c 84%,var(--text));background:color-mix(in srgb,#67c58c 8%,transparent);box-shadow:inset 0 -1px color-mix(in srgb,#67c58c 34%,transparent);font-weight:650;border-radius:2px}
+    .cs2-tersafe-view .child-preview-before .child-hex-ascii-cell-changed{color:color-mix(in srgb,#d6a85a 78%,var(--text));background:transparent;box-shadow:inset 0 -1px color-mix(in srgb,#d6a85a 32%,transparent);font-weight:600;border-radius:0}
+    .cs2-tersafe-view .child-preview-after .child-hex-ascii-cell-changed{color:color-mix(in srgb,#67c58c 80%,var(--text));background:transparent;box-shadow:inset 0 -1px color-mix(in srgb,#67c58c 30%,transparent);font-weight:600;border-radius:0}
+    .cs2-tersafe-view .child-hex-table{overflow-x:auto}
+    .cs2-tersafe-view .child-hex-body{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;min-width:calc(64ch + 28px);padding:2px 0;font-variant-numeric:tabular-nums}
+    .cs2-tersafe-view .child-hex-row{grid-template-columns:7ch 41ch 16ch minmax(0,1fr);column-gap:4px;row-gap:0;padding:1px 6px;border-left:2px solid transparent;font:inherit}
+    .cs2-tersafe-view .child-hex-row-string{border-left-color:color-mix(in srgb,#22c55e 42%,transparent)}
+    .cs2-tersafe-view .cs2-field-xor{border-left-color:color-mix(in srgb,#2dd4bf 64%,transparent)}
+    .cs2-tersafe-view .cs2-field-xor .child-hex-note{color:color-mix(in srgb,#2dd4bf 75%,var(--text))}
+    .cs2-tersafe-view .child-hex-offset,.cs2-tersafe-view .child-hex-bytes,.cs2-tersafe-view .child-hex-ascii{grid-row:1;margin:0;font:inherit;overflow:visible}
+    .cs2-tersafe-view .child-hex-offset{display:block;grid-column:1;white-space:nowrap}
+    .cs2-tersafe-view .child-hex-bytes{grid-column:2;column-gap:.6ch}
+    .cs2-tersafe-view .child-hex-ascii{grid-column:3}
+    .cs2-tersafe-view .child-hex-note{grid-column:4;grid-row:1;min-width:0;padding:0;white-space:normal;overflow-wrap:anywhere;font-size:11px;line-height:1.35}
+    .cs2-tersafe-view .cs2-field-report{--cs2-field-tone:#a78bfa}
+    .cs2-tersafe-view .cs2-field-time{--cs2-field-tone:#2dd4bf}
+    .cs2-tersafe-view .cs2-field-length{--cs2-field-tone:#38bdf8}
+    .cs2-tersafe-view .cs2-field-type{--cs2-field-tone:#fb923c}
+    .cs2-tersafe-view :is(.cs2-field-report,.cs2-field-time,.cs2-field-length,.cs2-field-type){
+      border-left-color:color-mix(in srgb,var(--cs2-field-tone) 65%,transparent)
+    }
+    .cs2-tersafe-view :is(.cs2-field-report,.cs2-field-time,.cs2-field-length,.cs2-field-type) :is(.child-hex-note,.child-hex-byte-cell:not(.child-hex-byte-cell-changed)){
+      color:color-mix(in srgb,var(--cs2-field-tone) 66%,var(--text))
+    }
+    @container child-hex (max-width: 530px) {
+      .cs2-tersafe-view .child-hex-note{grid-column:2 / -1;grid-row:2}
+    }
+    details > summary:has(> .cs2-summary-insights) > .summary-preview{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
+    details > summary > .cs2-summary-insights{display:flex;flex:0 0 auto;min-width:0;max-width:48%;overflow:hidden}
+    .cs2-summary-insights .summary-insight-chip{min-width:0;overflow:hidden;text-overflow:ellipsis}
+    .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
+    .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
+    .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
+  `;
+  document.head.appendChild(style);
+}
+
+function appendCS2ObservedKv(parent, section, plaintextBytes) {
+  const values = [];
+  for (const row of section.rows) {
+    if (row.encoding !== "ascii") continue;
+    const text = cs2NodeRange(row, plaintextBytes).map(byte => String.fromCharCode(byte)).join("");
+    for (const part of text.split(";")) {
+      const match = part.match(/^\s*,?\s*([A-Za-z_][A-Za-z0-9_]{0,47})\s*[:=]\s*([!-~][ -~]*)$/);
+      if (match) values.push(`${match[1]}=${match[2].trim()}`);
+    }
+  }
+  if (!values.length) return;
+  const footer = document.createElement("div");
+  footer.className = "cs2-observed-kv";
+  const label = document.createElement("span");
+  label.textContent = "文本键值";
+  footer.appendChild(label);
+  for (const value of values) {
+    const item = document.createElement("code");
+    item.textContent = value;
+    footer.appendChild(item);
+  }
+  parent.appendChild(footer);
+}
+
+function makeCS2TersafePreviewBox(section, plaintextBytes, label, side, changed = null) {
+  const box = document.createElement("div");
+  box.className = `child-preview-box child-preview-${side}`;
+  const heading = document.createElement("div");
+  heading.className = "child-preview-label";
+  heading.textContent = label;
+  box.appendChild(heading);
+  const meta = document.createElement("small");
+  meta.textContent = `${section.node.length} B${section.node.offset ? ` · ${cs2Offset(section.node.offset)}` : ""}`;
+  heading.appendChild(meta);
+  appendCS2TersafeHexTable(box, section, plaintextBytes, changed);
+  appendCS2ObservedKv(box, section, plaintextBytes);
+  return box;
+}
+
+function makeCS2TersafeRecordCard(section) {
+  const card = document.createElement("div");
+  card.className = "child-pair-card";
+  if (section.title) {
+    const title = document.createElement("div");
+    title.className = "child-pair-title";
+    const name = document.createElement("span");
+    name.className = "child-rail-name";
+    name.textContent = section.code ? `${section.title} · ${section.code}` : section.title;
+    title.appendChild(name);
+    card.appendChild(title);
+  }
+  return card;
+}
+
+function cs2SharedFieldTone(label) {
+  return label === "Unix 秒时间戳" ? "time"
+    : /报告编号/.test(label) ? "report"
+    : /长度|数量/.test(label) ? "length"
+    : /类型|版本|selector|inner field|leaf_id/.test(label) ? "type"
+    : "";
+}
+
+function cs2SharedFieldValue(field, bytes) {
+  if (!bytes.length) return "";
+  const label = String(field?.label || "");
+  const encoding = String(field?.encoding || "bytes").toLowerCase();
+  if (label === "Unix 秒时间戳" && bytes.length === 4) {
+    const value = bytes.reduce((number, byte) => number * 256 + byte, 0);
+    return `${cs2BeijingClock.format(new Date(value * 1000))}（北京时间）`;
+  }
+  if (/报告编号|leaf_id|应用类型码|附加值/.test(label)) {
+    return `0x${bytes.map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+  if (encoding === "hex") return `0x${bytes.map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+  if (/^(?:u8|be16|be32|be64)$/.test(encoding) && bytes.length <= 8) {
+    let value = 0n;
+    for (const byte of bytes) value = value * 256n + BigInt(byte);
+    return value.toString();
+  }
+  if (encoding === "xor-text" && typeof field?.decoded === "string") return field.decoded;
+  if (encoding === "ascii") {
+    const value = bytes.map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : ".").join("");
+    return value.length > 56 ? `${value.slice(0, 53)}…` : value;
+  }
+  return `${bytes.length} B`;
+}
+
+function cs2MergedFieldKeys(beforeFields, afterFields) {
+  const beforeKeys = [...beforeFields.keys()];
+  const afterKeys = [...afterFields.keys()];
+  const table = Array.from({length: beforeKeys.length + 1}, () =>
+    Array(afterKeys.length + 1).fill(0));
+  for (let left = beforeKeys.length - 1; left >= 0; left--) {
+    for (let right = afterKeys.length - 1; right >= 0; right--) {
+      table[left][right] = beforeKeys[left] === afterKeys[right]
+        ? table[left + 1][right + 1] + 1
+        : Math.max(table[left + 1][right], table[left][right + 1]);
+    }
+  }
+  const keys = [];
+  let left = 0;
+  let right = 0;
+  while (left < beforeKeys.length || right < afterKeys.length) {
+    if (left < beforeKeys.length && right < afterKeys.length
+        && beforeKeys[left] === afterKeys[right]) {
+      keys.push(beforeKeys[left]); left++; right++;
+    } else if (right >= afterKeys.length
+        || (left < beforeKeys.length && table[left + 1][right] >= table[left][right + 1])) {
+      keys.push(beforeKeys[left]); left++;
+    } else {
+      keys.push(afterKeys[right]); right++;
+    }
+  }
+  return keys;
+}
+
+function cs2SameRawBytes(left, right) {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+function cs2PairedFieldName(field) {
+  const label = String(field?.label || "字段");
+  return field?.encoding === "xor-text" && Number.isSafeInteger(field.reportOffset)
+    ? `${label} · 报告 ${hexOffsetText(field.reportOffset)}` : label;
+}
+
+function makeCS2PairedSide(section, field, bytes, side, changed) {
+  const cell = document.createElement("div");
+  cell.className = `cs2-paired-side child-preview-${side}`;
+  if (!field) {
+    cell.className += " cs2-paired-side-empty";
+    cell.textContent = "—";
+    return cell;
+  }
+  appendCS2PairedFieldPreview(cell, section, field, bytes, changed);
+  return cell;
+}
+
+function appendCS2PairedFieldPreview(cell, section, field, bytes, changed) {
+  const length = Math.max(0, Number(field.end) - Number(field.offset));
+  const visibleLength = Math.min(16, length);
+  const visible = {...field, end: Number(field.offset) + visibleLength, length: visibleLength};
+  appendCS2TersafeHexTable(cell, {node: section.node, rows: [visible]}, bytes, changed, false);
+  if (length <= visibleLength) return;
+  const more = document.createElement("details");
+  more.className = "cs2-paired-side-more";
+  const summary = document.createElement("summary");
+  summary.textContent = `展开剩余 ${length - visibleLength} B`;
+  more.appendChild(summary);
+  const remainder = {
+    ...field,
+    offset: Number(field.offset) + visibleLength,
+    length: length - visibleLength,
+  };
+  appendCS2TersafeHexTable(more, {node: section.node, rows: [remainder]}, bytes, changed, false);
+  cell.appendChild(more);
+}
+
+function makeCS2PairedFieldNote(beforeField, beforeBytes, afterField, afterBytes) {
+  const field = afterField || beforeField;
+  const beforeRaw = beforeField ? cs2NodeRange(beforeField, beforeBytes) : [];
+  const afterRaw = afterField ? cs2NodeRange(afterField, afterBytes) : [];
+  const changed = !beforeField || !afterField || !cs2SameRawBytes(beforeRaw, afterRaw);
+  const tone = cs2SharedFieldTone(String(field?.label || ""));
+  const note = document.createElement("div");
+  note.className = `cs2-paired-field-note${changed ? " cs2-paired-field-changed" : ""}${tone ? ` cs2-paired-field-${tone}` : ""}`;
+  const name = document.createElement("span");
+  name.className = "cs2-paired-field-name";
+  name.textContent = cs2PairedFieldName(field);
+  const value = document.createElement("span");
+  value.className = "cs2-paired-field-value";
+  const beforeValue = beforeField ? cs2SharedFieldValue(beforeField, beforeRaw) : "";
+  const afterValue = afterField ? cs2SharedFieldValue(afterField, afterRaw) : "";
+  let valueText = afterValue;
+  if (!beforeField || !afterField || changed) {
+    const oldText = beforeField ? beforeValue : "—";
+    const newText = afterField
+      ? `${afterValue}${beforeField && beforeValue === afterValue ? "（内容变化）" : ""}` : "—";
+    valueText = `${oldText} → ${newText}`;
+    const oldValue = document.createElement("span");
+    oldValue.className = "cs2-paired-field-old";
+    oldValue.textContent = oldText;
+    const arrow = document.createElement("span");
+    arrow.className = "cs2-paired-field-arrow";
+    arrow.textContent = "→";
+    const newValue = document.createElement("span");
+    newValue.className = "cs2-paired-field-new";
+    newValue.textContent = newText;
+    value.appendChild(oldValue); value.appendChild(arrow); value.appendChild(newValue);
+  } else {
+    value.textContent = afterValue;
+  }
+  note.appendChild(name);
+  valueText = String(valueText || "");
+  if (valueText.length > 44) {
+    value.className += " cs2-paired-field-value-long";
+    const more = document.createElement("details");
+    more.className = "cs2-paired-value-more";
+    const summary = document.createElement("summary");
+    summary.title = "点击展开完整解析值";
+    summary.appendChild(value);
+    const full = document.createElement("div");
+    full.className = "cs2-paired-value-full";
+    full.textContent = valueText;
+    more.appendChild(summary);
+    more.appendChild(full);
+    note.appendChild(more);
+  } else {
+    note.appendChild(value);
+  }
+  if (!beforeField || !afterField) {
+    const state = document.createElement("span");
+    state.className = "cs2-paired-field-state";
+    state.textContent = beforeField ? "仅修改前" : "仅修改后";
+    note.appendChild(state);
+  }
+  return note;
+}
+
+function appendCS2PairedFieldTable(card, beforeSection, beforeBytes, afterSection, afterBytes,
+    beforeChanged, afterChanged) {
+  const beforeFields = cs2KeyedFieldRows(beforeSection);
+  const afterFields = cs2KeyedFieldRows(afterSection);
+  if (!beforeFields.size || !afterFields.size) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "cs2-paired-fields";
+  const inner = document.createElement("div");
+  inner.className = "cs2-paired-fields-inner";
+  const head = document.createElement("div");
+  head.className = "cs2-paired-field-head";
+  for (const [className, kicker, text] of [
+    ["cs2-paired-field-head-before", "原始", `修改前明文 · ${beforeSection.node.length} B`],
+    ["cs2-paired-field-head-middle", "对照", "字段变化（旧 → 新）"],
+    ["cs2-paired-field-head-after", "发送", `修改后明文 · ${afterSection.node.length} B`],
+  ]) {
+    const label = document.createElement("div");
+    label.className = className;
+    const badge = document.createElement("span");
+    badge.className = "cs2-paired-field-head-kicker";
+    badge.textContent = kicker;
+    const detail = document.createElement("span");
+    detail.className = "cs2-paired-field-head-detail";
+    detail.textContent = text;
+    label.appendChild(badge);
+    label.appendChild(detail);
+    head.appendChild(label);
+  }
+  inner.appendChild(head);
+  for (const key of cs2MergedFieldKeys(beforeFields, afterFields)) {
+    const beforeField = beforeFields.get(key);
+    const afterField = afterFields.get(key);
+    const row = document.createElement("div");
+    row.className = "cs2-paired-field";
+    row.appendChild(makeCS2PairedSide(beforeSection, beforeField, beforeBytes, "before", beforeChanged));
+    row.appendChild(makeCS2PairedFieldNote(beforeField, beforeBytes, afterField, afterBytes));
+    row.appendChild(makeCS2PairedSide(afterSection, afterField, afterBytes, "after", afterChanged));
+    inner.appendChild(row);
+  }
+  wrap.appendChild(inner);
+  card.appendChild(wrap);
+  return wrap;
+}
+
+function cs2WholeSection(bytes) {
+  return {
+    node: { offset: 0, end: bytes.length, length: bytes.length },
+    rows: [{ offset: 0, end: bytes.length, label: "", encoding: "bytes" }],
+  };
+}
+
+function cs2RelativeDiffOffsets(beforeSection, beforeBytes, afterSection, afterBytes) {
+  const before = beforeSection ? cs2NodeRange(beforeSection.node, beforeBytes) : [];
+  const after = afterSection ? cs2NodeRange(afterSection.node, afterBytes) : [];
+  const beforeChanged = new Set();
+  const afterChanged = new Set();
+  const limit = Math.max(before.length, after.length);
+  for (let index = 0; index < limit; index++) {
+    if (index < before.length && index < after.length && before[index] === after[index]) continue;
+    if (index < before.length) beforeChanged.add(index);
+    if (index < after.length) afterChanged.add(index);
+  }
+  return {beforeChanged, afterChanged};
+}
+
+function cs2KeyedFieldRows(section) {
+  const counters = new Map();
+  const keyed = new Map();
+  for (const row of Array.isArray(section?.rows) ? section.rows : []) {
+    const label = String(row?.label || "");
+    if (!label) continue;
+    const index = counters.get(label) || 0;
+    counters.set(label, index + 1);
+    keyed.set(`${label}\u0000${index}`, row);
+  }
+  return keyed;
+}
+
+function cs2StructuredDiffOffsets(beforeSection, beforeBytes, afterSection, afterBytes) {
+  const beforeRows = cs2KeyedFieldRows(beforeSection);
+  const afterRows = cs2KeyedFieldRows(afterSection);
+  if (!beforeRows.size || !afterRows.size) {
+    return cs2RelativeDiffOffsets(beforeSection, beforeBytes, afterSection, afterBytes);
+  }
+  const beforeChanged = new Set();
+  const afterChanged = new Set();
+  const beforeStart = Number(beforeSection.node.offset);
+  const afterStart = Number(afterSection.node.offset);
+  const mark = (set, row, nodeStart, index) => set.add(Number(row.offset) - nodeStart + index);
+  for (const key of new Set([...beforeRows.keys(), ...afterRows.keys()])) {
+    const beforeRow = beforeRows.get(key);
+    const afterRow = afterRows.get(key);
+    const beforeRaw = beforeRow ? cs2NodeRange(beforeRow, beforeBytes) : [];
+    const afterRaw = afterRow ? cs2NodeRange(afterRow, afterBytes) : [];
+    const limit = Math.max(beforeRaw.length, afterRaw.length);
+    for (let index = 0; index < limit; index++) {
+      if (index < beforeRaw.length && index < afterRaw.length && beforeRaw[index] === afterRaw[index]) continue;
+      if (beforeRow && index < beforeRaw.length) mark(beforeChanged, beforeRow, beforeStart, index);
+      if (afterRow && index < afterRaw.length) mark(afterChanged, afterRow, afterStart, index);
+    }
+  }
+  return {beforeChanged, afterChanged};
+}
+
+function cs2CommonPrefixLength(before, after) {
+  const limit = Math.min(before.length, after.length);
+  let offset = 0;
+  while (offset < limit && before[offset] === after[offset]) offset++;
+  return offset;
+}
+
+function appendCS2LengthMismatchOverview(panel, before, after) {
+  const card = makeCS2TersafeRecordCard({
+    title: `明文总览 · ${before.length} B → ${after.length} B`,
+    code: "",
+  });
+  const pair = document.createElement("div");
+  pair.className = "child-preview-row cs2-plaintext-pair cs2-length-mismatch-pair";
+  const beforeSection = cs2WholeSection(before);
+  const afterSection = cs2WholeSection(after);
+  const {beforeChanged, afterChanged} = cs2RelativeDiffOffsets(beforeSection, before, afterSection, after);
+  pair.appendChild(makeCS2TersafePreviewBox(beforeSection, before, "修改前明文", "before", beforeChanged));
+  pair.appendChild(makeCS2TersafePreviewBox(afterSection, after, "修改后明文", "after", afterChanged));
+  card.appendChild(pair);
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid cs2-length-mismatch-overview";
+  grid.appendChild(card);
+  panel.appendChild(grid);
+}
+
+function appendCS2CurrentPlaintext(card, section, bytes, label = "当前明文") {
+  const row = document.createElement("div");
+  row.className = "child-preview-row child-preview-row-single";
+  row.appendChild(makeCS2TersafePreviewBox(section, bytes, label, "same"));
+  card.appendChild(row);
+}
+
+function appendTerSafeLayers(card, report, annotateReportText = false) {
+  if (report?.schema !== "tcpv.tersafe.layers.v1") return;
+  const layers = Array.isArray(report.layers) ? report.layers : [];
+  const header = card.querySelector(".child-pair-title");
+  const top = layers.filter((layer) => layer.depth === 1);
+  if (header && top.length) {
+    const chip = document.createElement("span");
+    chip.className = "cs2-inner-report-chip";
+    chip.textContent = top.length === 1
+      ? ` · 内层 ${top[0].report_code || "未知报告"} · ${top[0].length} B · ${top[0].kind === "decrypted" ? "校验通过" : "结构子记录"}`
+      : ` · ${top.length} 条直接子记录`;
+    header.appendChild(chip);
+  }
+  for (const layer of layers) {
+    const bytes = b64ToBytes(String(layer.plaintext_b64 || ""));
+    const node = layer.root;
+    if (!node || node.coordinate_space !== "tersafe_inner_plaintext" || node.offset !== 0
+        || bytes.length !== layer.length || node.end !== bytes.length
+        || (layer.kind === "decrypted" && !/^0x[\da-f]{8}$/i.test(layer.crc32 || ""))
+        || !["structural", "decrypted"].includes(layer.kind)) continue;
+    const kind = layer.kind === "decrypted" ? `CRC32 通过 ${layer.crc32}` : "结构子记录 · 未额外解密";
+    const prefix = layer.synthetic_prefix_bytes ? ` · 补 ${layer.synthetic_prefix_bytes} B 头用于解析` : "";
+    const child = {
+      node, title: `内层 ${layer.depth} · ${layer.path} · ${kind}${prefix}`,
+      code: layer.report_code, rows: cs2FieldRows(node, bytes, annotateReportText),
+    };
+    const childCard = makeCS2TersafeRecordCard(child);
+    appendCS2CurrentPlaintext(childCard, child, bytes);
+    card.appendChild(childCard);
+  }
+  const reasons = {
+    invalid_length: "长度不符", crc_mismatch: "CRC32 不符", codec_unavailable: "暂不支持解密",
+    unverified_structure: "结构待确认", depth_limit: "达到展示深度上限", output_limit: "达到展示容量上限",
+  };
+  for (const stop of Array.isArray(report.stops) ? report.stops : []) {
+    const note = document.createElement("div");
+    note.className = "child-preview-empty";
+    note.textContent = `内层 ${stop.depth} · ${stop.path || "$"} · ${reasons[stop.reason] || "未验证"} · 未展示候选明文`;
+    card.appendChild(note);
+  }
+}
+
+function buildLegacyTerSafeLayersPanel(ev) {
+  const report = ev?.analysis?.legacy_tersafe_layers;
+  if (report?.schema !== "tcpv.tersafe.layers.v1" || report.source !== "tersafe1_trusted_capture") return null;
+  ensureChildCommonStyles();
+  ensureCS2TersafeCompactStyles();
+  const panel = document.createElement("section");
+  panel.className = "child-compare cs2-panel cs2-tersafe-view";
+  const card = makeCS2TersafeRecordCard({title:"TerSafe1 分层明文", code:report.parent_report_code});
+  appendTerSafeLayers(card, report);
+  panel.appendChild(card);
+  return panel;
+}
+
+function cs2VerifiedNestedRecord(node, outer) {
+  const nested = node.tersafe_inner;
+  if (nested?.schema !== "tcpv.cschannel2.tersafe-inner.v1" || nested.crc_match !== true
+      || nested.coordinate_space !== "tersafe_inner_plaintext") return;
+  const start = nested.outer_report_offset;
+  if (!Number.isSafeInteger(start) || start < node.offset
+      || nested.cipher_offset !== start + 28
+      || nested.cipher_offset + nested.length > node.end
+      || !["1,10,0,8", "1,10,0,9"].includes(outer.slice(start + 6, start + 10).join(","))) return;
+  const bytes = b64ToBytes(String(nested.plaintext_b64 || ""));
+  const root = nested.root;
+  if (!root || root.coordinate_space !== nested.coordinate_space
+      || bytes.length !== nested.length || cs2NodeRange(root, bytes).length !== bytes.length
+      || root.offset !== 0 || root.end !== bytes.length) return;
+  return {nested, bytes, root};
+}
+
+function cs2DecryptedReportCounts(ev) {
+  const counts = new Map();
+  const outer = cs2VerifiedApplicationBytes(ev);
+  if (!outer.length) return counts;
+  const add = (code, length, encoded) => {
+    if (!/^0x[\da-f]{8}$/i.test(code || "") || !Number.isSafeInteger(length) || length < 14) return;
+    const bytes = b64ToBytes(String(encoded || ""));
+    if (bytes.length !== length || bytes.slice(0, 4).join(",") !== "0,0,0,1"
+        || bytes[4] * 256 + bytes[5] !== length) return;
+    const report = "0x" + bytes.slice(6, 10).map(byte => byte.toString(16).padStart(2, "0")).join("");
+    if (report === code.toLowerCase()) counts.set(report, (counts.get(report) || 0) + 1);
+  };
+  for (const node of ev.analysis.plaintext_presentation.root.children || []) {
+    if (node.tersafe_layers?.schema === "tcpv.tersafe.layers.v1") {
+      for (const layer of node.tersafe_layers.layers || []) {
+        if (layer.kind === "decrypted" && /^0x[\da-f]{8}$/i.test(layer.crc32 || "")) {
+          add(layer.report_code, layer.length, layer.plaintext_b64);
+        }
+      }
+    } else {
+      const result = cs2VerifiedNestedRecord(node, outer);
+      if (result) add(result.nested.report_code, result.nested.length, result.nested.plaintext_b64);
+    }
+  }
+  return counts;
+}
+
+function appendCS2NestedTerSafe(card, section, outer) {
+  if (section.node.tersafe_layers?.schema === "tcpv.tersafe.layers.v1") {
+    appendTerSafeLayers(card, section.node.tersafe_layers, true);
+    return;
+  }
+  const result = cs2VerifiedNestedRecord(section.node, outer);
+  if (!result) return;
+  const {nested, bytes, root} = result;
+  const title = card.querySelector(".child-pair-title");
+  if (title) {
+    const chip = document.createElement("span");
+    chip.className = "cs2-inner-report-chip";
+    chip.textContent = ` · 内层 ${nested.report_code} · ${bytes.length} B · 校验通过`;
+    title.appendChild(chip);
+  }
+  const child = {
+    node: root,
+    title: "child[0] · TerSafe 内层 · CRC32 通过",
+    code: nested.report_code,
+    rows: cs2FieldRows(root, bytes, true),
+  };
+  const childCard = makeCS2TersafeRecordCard(child);
+  appendCS2CurrentPlaintext(childCard, child, bytes);
+  card.appendChild(childCard);
+}
+
+function appendCS2TersafeRecords(panel, sections, after, before, beforePresentation = null) {
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  const aligned = before.length > 0 && before.length === after.length;
+  const beforeSections = beforePresentation && cs2ValidPlaintextPresentation(beforePresentation, before)
+    ? cs2RecordSections(beforePresentation.root, Number(beforePresentation.node_count), before) : [];
+  const structuredPair = beforeSections.length === sections.length && beforeSections.length > 0;
+  if (before.length && !structuredPair) {
+    appendCS2LengthMismatchOverview(panel, before, after);
+  }
+  for (const [index, section] of sections.entries()) {
+    const card = makeCS2TersafeRecordCard(section);
+    if (structuredPair) {
+      const beforeSection = beforeSections[index];
+      const {beforeChanged, afterChanged} = cs2StructuredDiffOffsets(beforeSection, before, section, after);
+      const pair = appendCS2PairedFieldTable(
+        card, beforeSection, before, section, after, beforeChanged, afterChanged);
+      if (pair) {
+        pair.className += ` cs2-plaintext-pair${aligned ? "" : " cs2-length-mismatch-pair"}`;
+      }
+    } else {
+      appendCS2CurrentPlaintext(card, section, after, before.length ? "修改后明文" : "当前明文");
+    }
+    appendCS2NestedTerSafe(card, section, after);
+    grid.appendChild(card);
+  }
+  panel.appendChild(grid);
+}
+
+function cs2WireFrameBytes(ev, analysis) {
+  for (const key of ["raw_pay", "full_pay"]) {
+    const kind = analysis.display_mapping?.[key];
+    if (!["complete_wire_frame", "rebuilt_complete_wire_frame"].includes(kind)) continue;
+    const bytes = b64ToBytes(String(ev[key] || ""));
+    const expected = Number(ev[key === "raw_pay" ? "raw_len" : "full_len"]);
+    if (bytes.length && (!Number.isSafeInteger(expected) || expected <= 0 || bytes.length === expected)) return bytes;
+  }
+  return [];
+}
+
+function buildCSChannel2Panel(ev) {
+  if (!isCSChannel2Event(ev)) return null;
+  const analysis = ev.analysis;
+  const plaintext = analysis.plaintext_presentation || {};
+  const after = cs2VerifiedApplicationBytes(ev);
+  const verified = after.length > 0;
+  const unchanged = verified && analysis.mutation?.modified === false && analysis.mutation?.wire_mutated === false;
+  const candidate = verified && !unchanged ? cs2BeforeApplicationBytes(ev, analysis, after) : [];
+  const before = candidate.length === after.length && candidate.every((byte, i) => byte === after[i])
+    ? [] : candidate;
+  const panel = document.createElement("section");
+  panel.className = "child-compare cs2-panel cs2-tersafe-view";
+  ensureChildCommonStyles();
+  ensureCS2TersafeCompactStyles();
+  const head = document.createElement("div");
+  head.className = "child-compare-head";
+  const title = document.createElement("span");
+  title.textContent = verified ? (before.length ? "CSChannel2 明文对比" : "CSChannel2 明文") : "CSChannel2 线上帧";
+  const status = document.createElement("small");
+  status.textContent = unchanged ? "未修改"
+    : before.length ? (before.length === after.length ? ""
+      : `长度不同 · 共同前缀 ${cs2CommonPrefixLength(before, after)} B · 按字段对齐高亮`)
+    : verified ? "只验证了当前明文" : "无已校验明文";
+  head.appendChild(title);
+  if (status.textContent) head.appendChild(status);
+  panel.appendChild(head);
+  if (verified) {
+    const sections = cs2RecordSections(plaintext.root, Number(plaintext.node_count), after);
+    const beforePresentation = before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
+    appendCS2TersafeRecords(panel, sections, after, before, beforePresentation);
+    const wire = cs2WireFrameBytes(ev, analysis);
+    if (wire.length) {
+      const details = document.createElement("details");
+      details.className = "child-preview-box cs2-wire-reference";
+      const label = document.createElement("summary");
+      label.textContent = `${analysis.display_mapping?.raw_pay === "rebuilt_complete_wire_frame" ? "重封装" : "原始"}线上帧 · ${wire.length} B`;
+      details.appendChild(label);
+      details.addEventListener("toggle", () => {
+        if (details.open && !details.querySelector(".child-hex-table")) {
+          appendCS2TersafeHexTable(details, cs2WholeSection(wire), wire);
+        }
+      });
+      panel.appendChild(details);
+    }
+  } else {
+    const wire = cs2WireFrameBytes(ev, analysis);
+    const body = document.createElement("div");
+    body.className = "child-preview-box";
+    if (wire.length) appendCS2TersafeHexTable(body, cs2WholeSection(wire), wire);
+    else {
+      body.className += " child-preview-empty";
+      body.textContent = "当前记录没有可显示的帧字节";
+    }
+    panel.appendChild(body);
+  }
+  return panel;
+}
+/* CSChannel2 read-only frame tree end */
+
 function buildEventBody(ev, hideAscii, eventId = "") {
+  if (isCSChannel2Event(ev)) {
+    const body = document.createElement("div");
+    body.className = "body";
+    body.appendChild(buildCSChannel2Panel(ev));
+    return body;
+  }
   installGcloudCompareStyles();
   const body = document.createElement("div");
   body.className = "body";
@@ -18559,6 +19941,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
     body.appendChild(buildGcloudBytesPanel(ev, summaryText));
     return body;
   }
+  const legacyLayers = buildLegacyTerSafeLayersPanel(ev);
+  if (legacyLayers) body.appendChild(legacyLayers);
   const wssJsonPanel = isWssJsonEvent ? buildWssJsonPanel(ev, summaryText) : null;
   if (wssJsonPanel) body.appendChild(modernView ? packetFold("资源与校验详情", wssJsonPanel) : wssJsonPanel);
   if (modernView && !isGcloudEvent) {
@@ -18946,7 +20330,11 @@ async function ensureEventPayload(ev, account, eventId) {
     && !ev.__tcpvPayloadDetailFetched;
   const needsFullPayload = !String(ev.full_pay || "");
   const needsBeforePayload = !String(ev.before_pay || "") && !ev.__tcpvPayloadDetailFetched;
-  if (hasPayload && !needsFullPayload && !needsBeforePayload && !needsRawPayload) {
+  const needsCS2Analysis = cs2IsModificationRow(ev, summaryText)
+    && !isCSChannel2Event(ev) && !ev.__tcpvPayloadDetailFetched;
+  const needsLegacyLayerDetail = !ev.__tcpvPayloadDetailFetched
+    && /\[TSS\/类型\]/.test(summaryText) && /:443(?:\s|$)/.test(String(ev.cid || ""));
+  if (hasPayload && !needsFullPayload && !needsBeforePayload && !needsRawPayload && !needsCS2Analysis && !needsLegacyLayerDetail) {
     return ev;
   }
 
@@ -18959,12 +20347,14 @@ async function ensureEventPayload(ev, account, eventId) {
   const cached = readPayloadCache(accountText, idText);
   const cachedHasNeededBefore = !needsBeforePayload || !!String(cached && cached.before_pay ? cached.before_pay : "");
   const cachedHasNeededRaw = !needsRawPayload || !!String(cached && cached.raw_pay ? cached.raw_pay : "");
-  if (cached && cachedHasNeededBefore && cachedHasNeededRaw && applyEventPayloadDetail(ev, cached)) {
+  const cachedHasNeededCS2Analysis = !needsCS2Analysis || isCSChannel2Event(cached);
+  if (cached && cachedHasNeededBefore && cachedHasNeededRaw && cachedHasNeededCS2Analysis
+      && applyEventPayloadDetail(ev, cached)) {
     ev.__tcpvPayloadDetailFetched = true;
     return ev;
   }
 
-  const detail = (needsBeforePayload || needsRawPayload)
+  const detail = (needsBeforePayload || needsRawPayload || needsCS2Analysis)
     ? await apiGetEvent(accountText, idText)
     : await fetchEventPayload(accountText, idText);
   if (!applyEventPayloadDetail(ev, detail)) {
@@ -19590,10 +20980,11 @@ function renderEvents() {
     lenWrap.appendChild(document.createTextNode("[l="));
     const lenSpan = document.createElement("span");
     lenSpan.className = "len-field";
-    lenSpan.textContent = String(ev.len ?? "");
+    const cs2Source = cs2SummaryDisplaySource(ev);
+    lenSpan.textContent = String(cs2Source?.length ?? ev.len ?? "");
     lenWrap.appendChild(lenSpan);
     lenWrap.appendChild(document.createTextNode("]"));
-    lenWrap.title = `len=${String(ev.len ?? "")}`;
+    lenWrap.title = `len=${String(cs2Source?.length ?? ev.len ?? "")}`;
     summary.appendChild(lenWrap);
 
     const previewWrap = document.createElement("span");
@@ -19603,7 +20994,7 @@ function renderEvents() {
       const suffix = preview.needsWindowFetch ? " (window loading...)" : " (window incomplete)";
       previewWrap.title += suffix;
     }
-    previewWrap.appendChild(document.createTextNode("["));
+    previewWrap.appendChild(document.createTextNode(cs2Source ? `[${cs2Source.label} ` : "["));
     const previewSpan = document.createElement("span");
     previewSpan.className = "preview-hex";
     renderPreviewBytes(previewSpan, preview.previewBytes, previewRanges, preview.previewText || "");
@@ -19690,6 +21081,7 @@ function renderEvents() {
       try {
         await ensureEventPayload(ev, flowIdAtStart, eventId);
         if (!wrap.isConnected || state.flowId !== flowIdAtStart) return;
+        if (isCSChannel2Event(ev)) syncSummaryInsightStrip(summary, ev, summaryText);
         syncSummaryHiBadge(summary, ev);
         syncSummaryTimestampBadge(summary, ev);
         syncSummaryIdfvBadge(summary, ev, summaryText);
@@ -19747,6 +21139,7 @@ function renderEvents() {
     listFrag.appendChild(wrap);
   }
   el.events.appendChild(listFrag);
+  cs2PruneInnerPreviews();
 
   state.hitEventIds = nextHitEventIds;
   if (nextHitEventIds.length <= 0) {
