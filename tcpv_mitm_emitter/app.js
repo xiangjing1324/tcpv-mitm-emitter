@@ -14834,7 +14834,6 @@ function childHexStructure(child, childBytes, options = {}) {
   const cs2Fields = Array.isArray(child && child.cs2ApplicationFields)
     ? child.cs2ApplicationFields : [];
   if (cs2Fields.length) {
-    addChildHexAnnotation(annotations, 0, "完整 CSChannel2 node 起点");
     for (const field of cs2Fields) {
       const offset = Math.max(0, Number(field.offset) || 0);
       const length = Math.max(0, Number(field.end) - offset);
@@ -14853,11 +14852,36 @@ function childHexStructure(child, childBytes, options = {}) {
         );
       }
     }
+    const semanticOffset = Math.max(0, Number(child && child.cs2SemanticOffset) || 0);
+    const recordBytes = childBytes.slice(semanticOffset);
+    const recordChild = {
+      ...child,
+      recordStart: 0,
+      recordEnd: recordBytes.length,
+      len: recordBytes.length,
+      reportOffset: Math.max(-1, Number(child.reportOffset) - semanticOffset),
+      cs2ApplicationFields: [],
+      cs2SemanticOffset: 0,
+    };
+    const recordModel = childHexStructure(recordChild, recordBytes, options);
+    for (const [offset, notes] of recordModel.annotations.entries()) {
+      for (const note of notes) addChildHexAnnotation(annotations, semanticOffset + offset, note);
+    }
+    for (const field of recordModel.fields) {
+      fields.push({...field, offset: semanticOffset + Number(field.offset)});
+    }
+    const shiftedTimestamps = (Array.isArray(recordModel.timestamps) ? recordModel.timestamps : [])
+      .map((item) => ({
+        ...item,
+        start: semanticOffset + Number(item.start),
+        end: semanticOffset + Number(item.end),
+      }));
     return {
       annotations,
       fields,
-      valueStart: Number(child && child.cs2SemanticOffset) || 0,
-      timestamps: [],
+      valueStart: Number.isFinite(Number(recordModel.valueStart))
+        ? semanticOffset + Number(recordModel.valueStart) : semanticOffset,
+      timestamps: shiftedTimestamps,
     };
   }
   addChildHexAnnotation(annotations, 0, "record start(记录起点)");
@@ -19333,9 +19357,12 @@ function cs2SharedComparableFieldNote(field, bytes) {
   return value ? `${label}：${value}` : label;
 }
 
-function cs2SharedComparableFields(item, source) {
+function cs2SharedComparableFields(item, source, bodyOffset) {
   const start = Number(item && item.offset || 0);
-  return cs2FieldRows(item, source, true).map((field) => {
+  const stop = Number(bodyOffset);
+  return cs2FieldRows(item, source, true).filter((field) => (
+    Number.isFinite(stop) && Number(field.end) <= stop
+  )).map((field) => {
     const offset = Number(field.offset) - start;
     const end = Number(field.end) - start;
     const bytes = source.slice(Number(field.offset), Number(field.end));
@@ -19403,7 +19430,7 @@ function cs2SharedComparablePayload(presentation, applicationBytes) {
     children.push(cs2SharedComparableChild(completeNode, index, start, {
       semanticRecord,
       semanticOffset: Number(payloadNode.offset) - Number(item.offset),
-      fields: cs2SharedComparableFields(item, source),
+      fields: cs2SharedComparableFields(item, source, Number(payloadNode.offset)),
     }));
   }
   return { bytes, parsed: { root: null, children } };
