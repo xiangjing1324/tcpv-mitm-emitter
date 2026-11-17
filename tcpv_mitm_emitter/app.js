@@ -2491,7 +2491,12 @@ async function syncLatestEvents(options = {}) {
 
   try {
     const modeSpec = parseHighlightMode(state.search.mode || "full_contains");
-    const needPayloadInList = state.search.active && modeSpec.scope === "full";
+    // CSOB is frequently located well beyond the compact prefix (for example
+    // after +0x700 in a CS2 report). The filter therefore needs the complete
+    // payload just like full-payload search; prefix-only rows cannot prove a
+    // negative match.
+    const needPayloadInList = (state.search.active && modeSpec.scope === "full")
+      || state.filters.csobOnly;
     const includeAnalysisInList = false;
     let page = 0;
     let changed = false;
@@ -14826,6 +14831,35 @@ function childHexStructure(child, childBytes, options = {}) {
   const fields = [];
   let valueStart = null;
   if (!Array.isArray(childBytes) || childBytes.length <= 0) return { annotations, fields, valueStart };
+  const cs2Fields = Array.isArray(child && child.cs2ApplicationFields)
+    ? child.cs2ApplicationFields : [];
+  if (cs2Fields.length) {
+    addChildHexAnnotation(annotations, 0, "完整 CSChannel2 node 起点");
+    for (const field of cs2Fields) {
+      const offset = Math.max(0, Number(field.offset) || 0);
+      const length = Math.max(0, Number(field.end) - offset);
+      if (!length || offset >= childBytes.length) continue;
+      // Preserve every field boundary while keeping long text/body fields at
+      // the same 16-byte visual width as the shared TerSafe1 card.
+      for (let consumed = 0; consumed < length; consumed += 16) {
+        const width = Math.min(16, length - consumed, childBytes.length - offset - consumed);
+        if (width <= 0) break;
+        addChildHexField(
+          fields,
+          offset + consumed,
+          width,
+          consumed === 0 ? String(field.note || field.label || "字段") : "",
+          String(field.cs2Kind || "field"),
+        );
+      }
+    }
+    return {
+      annotations,
+      fields,
+      valueStart: Number(child && child.cs2SemanticOffset) || 0,
+      timestamps: [],
+    };
+  }
   addChildHexAnnotation(annotations, 0, "record start(记录起点)");
 
   const detected = detectTssReport(childBytes);
@@ -19269,21 +19303,59 @@ function cs2SharedPayloadNode(itemNode) {
   return applicationBody || itemNode;
 }
 
-function cs2SharedDeepestVerifiedBytes(rawBytes) {
-  let current = Array.isArray(rawBytes) ? rawBytes.slice() : [];
-  for (let depth = 0; depth < 6 && current.length >= 10; depth += 1) {
-    const encrypted = decryptDisplayableTssEnvelope(current);
-    if (!encrypted || !encrypted.supported || !encrypted.crcMatch
-        || !Array.isArray(encrypted.plain) || encrypted.plain.length < 10) break;
-    const inner = detectTssReport(encrypted.plain);
-    if (!inner || !isLikelyTssReportCode(inner.value)) break;
-    current = encrypted.plain.slice();
-  }
-  return current;
+function cs2SharedComparableFieldKind(field) {
+  const label = String(field && field.label || "");
+  if (label === "Unix 秒时间戳") return "timestamp";
+  if (/报告编号|TSS-like/.test(label)) return "report";
+  if (/长度|数量/.test(label)) return "len";
+  if (/项类型|项子类型|应用类型码|附加值|leaf_id|selector|inner field/.test(label)) return "appType";
+  if (/保留|状态/.test(label)) return "status";
+  return "field";
 }
 
-function cs2SharedComparableChild(rawBytes, index, recordStart) {
-  const record = Array.isArray(rawBytes) ? rawBytes : [];
+function cs2SharedComparableFieldNote(field, bytes) {
+  const label = String(field && field.label || "字段");
+  const encoding = String(field && field.encoding || "bytes").toLowerCase();
+  if (label === "Unix 秒时间戳" && bytes.length === 4) {
+    const value = bytes.reduce((number, byte) => number * 256 + byte, 0);
+    return `时间戳：${cs2BeijingClock.format(new Date(value * 1000))}（北京时间）`;
+  }
+  if (encoding === "ascii" && label === "可打印文本（观察值）") {
+    return `文本（观察） · ${bytes.length} B`;
+  }
+  if (field && field.kind === "opaque" && label === "未解释字节") {
+    return `未解析 · ${bytes.length} B`;
+  }
+  if (encoding === "xor-text" && typeof field.decoded === "string") {
+    return `异或文本 · ${field.decoded}`;
+  }
+  const value = cs2SharedFieldValue(field, bytes);
+  return value ? `${label}：${value}` : label;
+}
+
+function cs2SharedComparableFields(item, source) {
+  const start = Number(item && item.offset || 0);
+  return cs2FieldRows(item, source, true).map((field) => {
+    const offset = Number(field.offset) - start;
+    const end = Number(field.end) - start;
+    const bytes = source.slice(Number(field.offset), Number(field.end));
+    return {
+      ...field,
+      offset,
+      end,
+      length: end - offset,
+      note: cs2SharedComparableFieldNote(field, bytes),
+      cs2Kind: cs2SharedComparableFieldKind(field),
+    };
+  });
+}
+
+function cs2SharedComparableChild(rawBytes, index, recordStart, options = {}) {
+  const completeNode = Array.isArray(rawBytes) ? rawBytes : [];
+  const semanticRecord = Array.isArray(options.semanticRecord) && options.semanticRecord.length
+    ? options.semanticRecord : completeNode;
+  const semanticOffset = Math.max(0, Number(options.semanticOffset) || 0);
+  const record = semanticRecord;
   const report = detectTssReport(record);
   const reportCode = report && isLikelyTssReportCode(report.value) ? Number(report.value) : null;
   const identity = report ? tssRecordIdentity(record, report) : { idValue: null, idText: "" };
@@ -19293,11 +19365,11 @@ function cs2SharedComparableChild(rawBytes, index, recordStart) {
     nodeLabel: `node[${index}]`,
     offset: recordStart,
     recordStart,
-    recordEnd: recordStart + record.length,
-    len: record.length,
+    recordEnd: recordStart + completeNode.length,
+    len: completeNode.length,
     lengthEndian: "",
     reportCode,
-    reportOffset: report ? report.offset : -1,
+    reportOffset: report ? semanticOffset + report.offset : -1,
     idValue: identity.idValue,
     idText: identity.idText,
     className,
@@ -19306,6 +19378,8 @@ function cs2SharedComparableChild(rawBytes, index, recordStart) {
     hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
     xorCommonPreview: className === "binary-like-leaf" || Number(reportCode) === 0x0102000a
       ? summarizeCommonFixedXor(record, reportCode) : "",
+    cs2ApplicationFields: Array.isArray(options.fields) ? options.fields : [],
+    cs2SemanticOffset: semanticOffset,
   };
   return attachLocalChildSemantic(child, record);
 }
@@ -19321,12 +19395,16 @@ function cs2SharedComparablePayload(presentation, applicationBytes) {
   const children = [];
   for (const [index, item] of items.entries()) {
     const payloadNode = cs2SharedPayloadNode(item);
-    const raw = cs2NodeRange(payloadNode, source);
-    if (!raw.length) continue;
-    const displayed = cs2SharedDeepestVerifiedBytes(raw);
+    const completeNode = cs2NodeRange(item, source);
+    const semanticRecord = cs2NodeRange(payloadNode, source);
+    if (!completeNode.length || !semanticRecord.length) continue;
     const start = bytes.length;
-    bytes.push(...displayed);
-    children.push(cs2SharedComparableChild(displayed, index, start));
+    bytes.push(...completeNode);
+    children.push(cs2SharedComparableChild(completeNode, index, start, {
+      semanticRecord,
+      semanticOffset: Number(payloadNode.offset) - Number(item.offset),
+      fields: cs2SharedComparableFields(item, source),
+    }));
   }
   return { bytes, parsed: { root: null, children } };
 }
@@ -20821,7 +20899,8 @@ async function applySearch(focusFirstHit = true) {
   renderEvents();
 }
 
-function applyFilters() {
+async function applyFilters() {
+  const previousCsobOnly = Boolean(state.filters && state.filters.csobOnly);
   state.filters = getFilterDraftState();
   if (el.filterDir) {
     el.filterDir.value = state.filters.dir || "all";
@@ -20837,6 +20916,23 @@ function applyFilters() {
   }
   saveRules();
   saveAppliedFilters();
+  if (state.filters.csobOnly && !previousCsobOnly) {
+    state.events = [];
+    state.afterId = null;
+    state.hasMore = true;
+    state.hitEventIds = [];
+    state.filteredCount = 0;
+    renderEvents();
+    const flow = getCurrentFlowMeta();
+    const expectedPackets = Math.max(0, Number(flow && flow.total_count) || 0);
+    const expectedPages = expectedPackets > 0 ? Math.ceil(expectedPackets / EVENTS_FETCH_LIMIT) + 1 : 1;
+    setStatus("loading complete payloads for CSOB filter...");
+    await syncLatestEvents({
+      drain: true,
+      maxPages: Math.max(INITIAL_DRAIN_PAGES, Math.min(expectedPages, 1000)),
+    });
+    return;
+  }
   renderEvents();
 }
 
@@ -21529,7 +21625,7 @@ if (el.filterCsobOnly) {
 
 if (el.filterApply) {
   el.filterApply.addEventListener("click", () => {
-    applyFilters();
+    void applyFilters();
   });
 }
 
