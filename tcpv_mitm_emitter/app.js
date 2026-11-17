@@ -16197,20 +16197,26 @@ function buildEventTimestampStrip(summaryText, beforeBase64, decodedBase64) {
 }
 
 function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", panelOptions = {}) {
-  if (!beforeBase64 && !decodedBase64) return null;
+  const suppliedBeforeBytes = Array.isArray(panelOptions && panelOptions.beforeBytes)
+    ? panelOptions.beforeBytes : null;
+  const suppliedAfterBytes = Array.isArray(panelOptions && panelOptions.afterBytes)
+    ? panelOptions.afterBytes : null;
+  if (!beforeBase64 && !decodedBase64 && !suppliedBeforeBytes?.length && !suppliedAfterBytes?.length) return null;
   if (isOpaqueUndecryptedSummary(summaryText)) return null;
   const forceCurrentOnly = Boolean(panelOptions && panelOptions.forceCurrentOnly);
-  const originalOnly = !forceCurrentOnly && !beforeBase64 && Boolean(decodedBase64);
-  const beforeBytes = b64ToBytes(beforeBase64);
-  const afterBytes = b64ToBytes(decodedBase64);
+  const beforeBytes = suppliedBeforeBytes || b64ToBytes(beforeBase64);
+  const afterBytes = suppliedAfterBytes || b64ToBytes(decodedBase64);
+  const originalOnly = !forceCurrentOnly && beforeBytes.length === 0 && afterBytes.length > 0;
   const forceSideBySideSame = Boolean(
     panelOptions
     && panelOptions.forceSideBySideSame
     && beforeBytes.length > 0
     && afterBytes.length > 0
   );
-  const beforeParsed = parseTssChildRecords(beforeBytes);
-  const afterParsed = parseTssChildRecords(afterBytes);
+  const beforeParsed = panelOptions && panelOptions.beforeParsed
+    ? panelOptions.beforeParsed : parseTssChildRecords(beforeBytes);
+  const afterParsed = panelOptions && panelOptions.afterParsed
+    ? panelOptions.afterParsed : parseTssChildRecords(afterBytes);
   const parsedBeforeChildren = Array.isArray(beforeParsed.children) ? beforeParsed.children : [];
   const parsedAfterChildren = Array.isArray(afterParsed.children) ? afterParsed.children : [];
   const hasChildRecords = parsedBeforeChildren.length > 0 || parsedAfterChildren.length > 0;
@@ -19252,6 +19258,77 @@ function cs2RecordSections(root, nodeCount, bytes) {
   }));
 }
 
+function cs2SharedPayloadNode(itemNode) {
+  if (!itemNode || typeof itemNode !== "object") return null;
+  const children = Array.isArray(itemNode.children) ? itemNode.children : [];
+  const directRecord = children.find((node) => /^TSS-like 报告\s+/i.test(String(node && node.name || "")));
+  if (directRecord) return directRecord;
+  const applicationBody = children.find((node) => /^应用正文/.test(String(node && node.name || "")));
+  return applicationBody || itemNode;
+}
+
+function cs2SharedDeepestVerifiedBytes(rawBytes) {
+  let current = Array.isArray(rawBytes) ? rawBytes.slice() : [];
+  for (let depth = 0; depth < 6 && current.length >= 10; depth += 1) {
+    const encrypted = decryptDisplayableTssEnvelope(current);
+    if (!encrypted || !encrypted.supported || !encrypted.crcMatch
+        || !Array.isArray(encrypted.plain) || encrypted.plain.length < 10) break;
+    const inner = detectTssReport(encrypted.plain);
+    if (!inner || !isLikelyTssReportCode(inner.value)) break;
+    current = encrypted.plain.slice();
+  }
+  return current;
+}
+
+function cs2SharedComparableChild(rawBytes, index, recordStart) {
+  const record = Array.isArray(rawBytes) ? rawBytes : [];
+  const report = detectTssReport(record);
+  const reportCode = report && isLikelyTssReportCode(report.value) ? Number(report.value) : null;
+  const identity = report ? tssRecordIdentity(record, report) : { idValue: null, idText: "" };
+  const className = classifyRecordBytes(record, reportCode);
+  const child = {
+    index,
+    nodeLabel: `node[${index}]`,
+    offset: recordStart,
+    recordStart,
+    recordEnd: recordStart + record.length,
+    len: record.length,
+    lengthEndian: "",
+    reportCode,
+    reportOffset: report ? report.offset : -1,
+    idValue: identity.idValue,
+    idText: identity.idText,
+    className,
+    valuePreview: formatRecordValuePreview(record, reportCode),
+    timestampCandidates: extractTimestampCandidatesFromRecord(record),
+    hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
+    xorCommonPreview: className === "binary-like-leaf" || Number(reportCode) === 0x0102000a
+      ? summarizeCommonFixedXor(record, reportCode) : "",
+  };
+  return attachLocalChildSemantic(child, record);
+}
+
+function cs2SharedComparablePayload(presentation, applicationBytes) {
+  const source = Array.isArray(applicationBytes) ? applicationBytes : [];
+  const root = presentation && presentation.root;
+  const declaredCount = Number(presentation && presentation.node_count || 0);
+  const items = declaredCount > 0 && Array.isArray(root && root.children)
+    ? root.children.filter((node) => /^node\[\d+\]$/.test(String(node && node.name || "")))
+    : root ? [root] : [];
+  const bytes = [];
+  const children = [];
+  for (const [index, item] of items.entries()) {
+    const payloadNode = cs2SharedPayloadNode(item);
+    const raw = cs2NodeRange(payloadNode, source);
+    if (!raw.length) continue;
+    const displayed = cs2SharedDeepestVerifiedBytes(raw);
+    const start = bytes.length;
+    bytes.push(...displayed);
+    children.push(cs2SharedComparableChild(displayed, index, start));
+  }
+  return { bytes, parsed: { root: null, children } };
+}
+
 const cs2BeijingClock = new Intl.DateTimeFormat("sv-SE", {
   timeZone: "Asia/Shanghai",
   year: "numeric", month: "2-digit", day: "2-digit",
@@ -19368,9 +19445,6 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-tersafe-view .child-preview-box{padding:5px 7px}
     .cs2-tersafe-view .child-preview-info{padding-bottom:2px}
     .cs2-tersafe-view .child-preview-label{margin-bottom:1px;line-height:1.3}
-    .cs2-tersafe-view .cs2-batch-fold{margin:0 5px 6px;border:1px solid var(--line);border-radius:6px;background:color-mix(in srgb,var(--panel) 97%,var(--dump-bg) 3%);overflow:hidden}
-    .cs2-tersafe-view .cs2-batch-fold>summary{padding:6px 8px;color:var(--muted);font-weight:650;cursor:pointer;user-select:none}
-    .cs2-tersafe-view .cs2-batch-fold>.child-compare-grid{padding-top:0}
     .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;background:color-mix(in srgb,var(--panel) 96%,transparent)}
     .cs2-tersafe-view .cs2-paired-fields-inner{width:100%;min-width:1180px}
     .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,440px) minmax(360px,1fr)}
@@ -19813,18 +19887,6 @@ function appendCS2CurrentPlaintext(card, section, bytes, label = "当前明文")
   card.appendChild(row);
 }
 
-function appendCS2GcloudStylePair(card, beforeSection, beforeBytes, afterSection, afterBytes,
-    beforeChanged, afterChanged) {
-  const row = document.createElement("div");
-  row.className = "child-preview-row cs2-plaintext-pair";
-  row.appendChild(makeCS2TersafePreviewBox(
-    beforeSection, beforeBytes, "修改前", "before", beforeChanged));
-  row.appendChild(makeCS2TersafePreviewBox(
-    afterSection, afterBytes, "修改后", "after", afterChanged));
-  card.appendChild(row);
-  return row;
-}
-
 function appendTerSafeLayers(card, report, annotateReportText = false) {
   if (report?.schema !== "tcpv.tersafe.layers.v1") return;
   const layers = Array.isArray(report.layers) ? report.layers : [];
@@ -19950,59 +20012,6 @@ function appendCS2NestedTerSafe(card, section, outer) {
   card.appendChild(childCard);
 }
 
-function appendCS2TersafeRecords(panel, sections, after, before, beforePresentation = null) {
-  const grid = document.createElement("div");
-  grid.className = "child-compare-grid";
-  const aligned = before.length > 0 && before.length === after.length;
-  const beforeSections = beforePresentation && cs2ValidPlaintextPresentation(beforePresentation, before)
-    ? cs2RecordSections(beforePresentation.root, Number(beforePresentation.node_count), before) : [];
-  const structuredPair = beforeSections.length === sections.length && beforeSections.length > 0;
-  if (before.length && !structuredPair) {
-    appendCS2LengthMismatchOverview(panel, before, after);
-  }
-  const primarySections = sections.filter((section) => section.title !== "批次头");
-  const batchSections = sections.filter((section) => section.title === "批次头");
-  for (const section of primarySections) {
-    const index = sections.indexOf(section);
-    const card = makeCS2TersafeRecordCard(section);
-    if (structuredPair) {
-      const beforeSection = beforeSections[index];
-      const {beforeChanged, afterChanged} = cs2StructuredDiffOffsets(beforeSection, before, section, after);
-      const pair = appendCS2GcloudStylePair(
-        card, beforeSection, before, section, after, beforeChanged, afterChanged);
-      if (!aligned) pair.className += " cs2-length-mismatch-pair";
-    } else {
-      appendCS2CurrentPlaintext(card, section, after, before.length ? "修改后明文" : "当前明文");
-    }
-    appendCS2NestedTerSafe(card, section, after);
-    grid.appendChild(card);
-  }
-  panel.appendChild(grid);
-  if (batchSections.length) {
-    const fold = document.createElement("details");
-    fold.className = "cs2-batch-fold";
-    const summary = document.createElement("summary");
-    summary.textContent = "CSChannel2 批次头";
-    fold.appendChild(summary);
-    const batchGrid = document.createElement("div");
-    batchGrid.className = "child-compare-grid";
-    for (const section of batchSections) {
-      const index = sections.indexOf(section);
-      const card = makeCS2TersafeRecordCard(section);
-      if (structuredPair) {
-        const beforeSection = beforeSections[index];
-        const {beforeChanged, afterChanged} = cs2StructuredDiffOffsets(beforeSection, before, section, after);
-        appendCS2GcloudStylePair(card, beforeSection, before, section, after, beforeChanged, afterChanged);
-      } else {
-        appendCS2CurrentPlaintext(card, section, after, before.length ? "修改后明文" : "当前明文");
-      }
-      batchGrid.appendChild(card);
-    }
-    fold.appendChild(batchGrid);
-    panel.appendChild(fold);
-  }
-}
-
 function cs2WireFrameBytes(ev, analysis) {
   for (const key of ["raw_pay", "full_pay"]) {
     const kind = analysis.display_mapping?.[key];
@@ -20024,51 +20033,39 @@ function buildCSChannel2Panel(ev) {
   const candidate = verified && !unchanged ? cs2BeforeApplicationBytes(ev, analysis, after) : [];
   const before = candidate.length === after.length && candidate.every((byte, i) => byte === after[i])
     ? [] : candidate;
-  const panel = document.createElement("section");
-  panel.className = "child-compare cs2-panel cs2-tersafe-view";
-  ensureChildCommonStyles();
-  ensureCS2TersafeCompactStyles();
-  const head = document.createElement("div");
-  head.className = "child-compare-head";
-  const title = document.createElement("span");
-  title.textContent = verified ? (before.length ? "叶子节点替换观察" : "当前叶子结构") : "CSChannel2 线上帧";
-  const status = document.createElement("small");
-  status.textContent = unchanged ? `未修改 · ${after.length} B`
-    : before.length ? `修改前 ${before.length}B · 修改后 ${after.length}B`
-    : verified ? "只验证了当前明文" : "无已校验明文";
-  head.appendChild(title);
-  if (status.textContent) head.appendChild(status);
-  panel.appendChild(head);
-  if (verified) {
-    const sections = cs2RecordSections(plaintext.root, Number(plaintext.node_count), after);
-    const beforePresentation = before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
-    appendCS2TersafeRecords(panel, sections, after, before, beforePresentation);
-    const wire = cs2WireFrameBytes(ev, analysis);
-    if (wire.length) {
-      const details = document.createElement("details");
-      details.className = "child-preview-box cs2-wire-reference";
-      const label = document.createElement("summary");
-      label.textContent = `${analysis.display_mapping?.raw_pay === "rebuilt_complete_wire_frame" ? "重封装" : "原始"}线上帧 · ${wire.length} B`;
-      details.appendChild(label);
-      details.addEventListener("toggle", () => {
-        if (details.open && !details.querySelector(".child-hex-table")) {
-          appendCS2TersafeHexTable(details, cs2WholeSection(wire), wire);
-        }
-      });
-      panel.appendChild(details);
-    }
-  } else {
-    const wire = cs2WireFrameBytes(ev, analysis);
-    const body = document.createElement("div");
-    body.className = "child-preview-box";
-    if (wire.length) appendCS2TersafeHexTable(body, cs2WholeSection(wire), wire);
-    else {
-      body.className += " child-preview-empty";
-      body.textContent = "当前记录没有可显示的帧字节";
-    }
-    panel.appendChild(body);
-  }
-  return panel;
+  const afterComparable = verified
+    ? cs2SharedComparablePayload(plaintext, after)
+    : (() => {
+      const wire = cs2WireFrameBytes(ev, analysis);
+      return {
+        bytes: wire,
+        parsed: { root: null, children: wire.length ? [cs2SharedComparableChild(wire, 0, 0)] : [] },
+      };
+    })();
+  if (!afterComparable.bytes.length) return null;
+  const beforePresentation = verified && before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
+  const beforeComparable = beforePresentation
+    ? cs2SharedComparablePayload(beforePresentation, before)
+    : { bytes: [], parsed: { root: null, children: [] } };
+  const panel = buildChildComparePanel("", "", "", {
+    beforeBytes: beforeComparable.bytes,
+    afterBytes: afterComparable.bytes,
+    beforeParsed: beforeComparable.parsed,
+    afterParsed: afterComparable.parsed,
+    forceCurrentOnly: beforeComparable.bytes.length === 0,
+    forceSideBySideSame: beforeComparable.bytes.length > 0,
+    title: beforeComparable.bytes.length > 0 ? "叶子节点替换观察" : (verified ? "当前叶子结构" : "当前线上帧"),
+    meta: beforeComparable.bytes.length > 0
+      ? `修改前 ${beforeComparable.bytes.length}B · 修改后 ${afterComparable.bytes.length}B`
+      : `${afterComparable.bytes.length}B`,
+  });
+  if (!panel) return null;
+  panel.classList.add(
+    "cs2-panel", "gcloud-tss-decrypted", "gcloud-security-primary", "child-compare-inline");
+  const stack = document.createElement("div");
+  stack.className = "gcloud-security-deep-stack";
+  stack.appendChild(panel);
+  return stack;
 }
 /* CSChannel2 read-only frame tree end */
 
@@ -20076,7 +20073,8 @@ function buildEventBody(ev, hideAscii, eventId = "") {
   if (isCSChannel2Event(ev)) {
     const body = document.createElement("div");
     body.className = "body";
-    body.appendChild(buildCSChannel2Panel(ev));
+    const panel = buildCSChannel2Panel(ev);
+    if (panel) body.appendChild(panel);
     return body;
   }
   installGcloudCompareStyles();
