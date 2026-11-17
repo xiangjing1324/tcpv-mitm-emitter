@@ -126,14 +126,18 @@ console.log(JSON.stringify(installed[0].textContent));
         self.assertNotIn(_property(note, "white-space"), {"nowrap", "pre"})
         self.assertNotRegex(note, r"(?:overflow|text-overflow)\s*:\s*(?:hidden|ellipsis)")
 
-    def test_extremely_narrow_hex_keeps_full_scrollable_data_and_natural_row_height(self) -> None:
+    def test_extremely_narrow_hex_has_no_nested_scrollbars_and_keeps_natural_row_height(self) -> None:
         narrow = self.query("child-hex", "max-width", 520)
         ascii_rule = _css_block(narrow, ".child-hex-ascii")
         self.assertRegex(_property(ascii_rule, "grid-column"), r"2(?:\s*/\s*-1)?$")
-        for selector in (".child-hex-bytes", ".child-hex-ascii"):
+        for selector in (".child-hex-offset", ".child-hex-bytes", ".child-hex-ascii"):
             rule = _base_rule(self.css, selector)
-            self.assertRegex(_property(rule, "overflow-x"), r"^(?:auto|scroll)$")
+            self.assertEqual(_property(rule, "overflow"), "clip")
             self.assertNotRegex(rule, r"(?:text-overflow\s*:\s*ellipsis|display\s*:\s*none)")
+        for selector in (".child-hex-bytes", ".child-hex-ascii"):
+            self.assertEqual(_property(_base_rule(self.css, selector), "scrollbar-width"), "none")
+        self.assertIn(".child-hex-bytes::-webkit-scrollbar", self.css)
+        self.assertIn(".child-hex-ascii::-webkit-scrollbar", self.css)
         row = _css_block(self.css, ".child-hex-row")
         for name in ("height", "min-height", "grid-auto-rows"):
             if re.search(r"(?:^|;)\s*" + name + r"\s*:", row):

@@ -14152,7 +14152,7 @@ function ensureChildCommonStyles() {
       grid-auto-columns: 1ch;
       min-width: 0;
       max-width: 100%;
-      overflow-x: auto;
+      overflow: clip;
       color: var(--muted);
       opacity: 0.9;
     }
@@ -14247,9 +14247,11 @@ function ensureChildCommonStyles() {
     .child-hex-bytes {
       min-width: 0;
       max-width: 100%;
-      overflow-x: auto;
+      overflow: clip;
     }
-    .child-hex-bytes, .child-hex-ascii { scrollbar-width: thin; }
+    .child-hex-bytes, .child-hex-ascii { scrollbar-width: none; }
+    .child-hex-bytes::-webkit-scrollbar,
+    .child-hex-ascii::-webkit-scrollbar { display: none; }
     .child-hex-time-value { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
     .child-hex-byte-cell.child-hex-byte-cell-changed,
     .child-hex-ascii-cell.child-hex-ascii-cell-changed {
