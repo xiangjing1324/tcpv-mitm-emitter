@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+
 from test_packet_field_tables import _packet_function
 from test_uagame_display_recovery import APP_JS
 
@@ -48,6 +51,7 @@ def test_cs2_shared_card_keeps_the_complete_application_item_and_field_boundarie
     assert "semanticOffset + Number(field.offset)" in hex_structure
     assert 'if (label === "Unix 秒时间戳") return "inlineTimestamp"' in source
     assert "const hasTimeTone = isTimestamp || isInlineTimestamp" in source
+    assert 'String(kind || "") === "inlineTimestamp"' in source
     assert "for (let consumed = 0; consumed < length; consumed += 16)" in hex_structure
     for label in ("项类型", "项子类型", "应用类型码", "附加值", "Unix 秒时间戳", "正文长度"):
         assert label in source
@@ -64,4 +68,27 @@ def test_csob_filter_loads_complete_payloads_before_filtering() -> None:
     assert "state.filters.csobOnly && !previousCsobOnly" in apply_filters
     assert "state.events = []" in apply_filters
     assert "await syncLatestEvents({" in apply_filters
+
+
+def test_cs2_preview_facts_report_node_index_and_exact_resource_names() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    function = _packet_function(source, "cs2SharedPreviewFacts")
+    sample = b"xxcs:1/2,ob:a/b;state:00c01857,r:7,p:8;config2.dat|CONFIG3.DAT"
+    control = b"cs:1/2;state:00c01857,r:7;config23.dat"
+    script = (
+        function
+        + "\nconsole.log(JSON.stringify(["
+        + f"cs2SharedPreviewFacts({json.dumps(list(sample))}, 8),"
+        + f"cs2SharedPreviewFacts({json.dumps(list(control))}, 4)"
+        + "]));\n"
+    )
+    result = subprocess.run(["node"], input=script, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    facts, negative = json.loads(result.stdout)
+    assert facts == [
+        {"label": "CSOB", "value": "node[8]"},
+        {"label": "资源", "value": "config2.dat · node[8]"},
+        {"label": "资源", "value": "config3.dat · node[8]"},
+    ]
+    assert negative == []
 

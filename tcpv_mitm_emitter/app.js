@@ -15093,7 +15093,9 @@ function buildChildHexModel(child, childBytes, options = {}) {
 	        : [],
 	      decoded: childDecodedCellsForRange(overlay, safeOffset, end),
 	      note: uniqueNotes.join("；"),
-	      kind: uniqueNotes.some((note) => /时间戳/.test(note)) ? "timestamp" : String(kind || ""),
+	      kind: String(kind || "") === "inlineTimestamp"
+	        ? "inlineTimestamp"
+	        : uniqueNotes.some((note) => /时间戳/.test(note)) ? "timestamp" : String(kind || ""),
 	    });
   };
   const emitGapRows = (start, end) => {
@@ -15632,6 +15634,13 @@ function childPreviewRichLines(child, childBytes, options = {}) {
   const lines = [];
   const meta = childCompactMetaLine(child);
   if (meta) lines.push({ text: meta, className: "child-preview-line-meta" });
+  const previewFacts = Array.isArray(child.previewFacts) ? child.previewFacts : [];
+  if (previewFacts.length) {
+    lines.push({
+      text: previewFacts.map((fact) => `${String(fact.label || "")} ${String(fact.value || "")}`.trim()).join(" | "),
+      className: "child-preview-line-cs2-facts",
+    });
+  }
   const semanticRows = splitChildSemanticRows(child);
   const semanticLimit = options.merged ? 4 : 3;
   for (const [label, value] of semanticRows.primaryRows) {
@@ -15655,6 +15664,7 @@ function childPreviewSegmentKind(label, fallbackClass = "") {
   if (value === "规则") return "rule";
   if (value === "风险" || value === "注意") return "risk";
   if (["解析", "用途", "结构", "发现", "文本"].includes(value)) return "parse";
+  if (value === "csob" || value === "资源") return "parse";
   if (["body布局", "运行时钟", "探测分组", "typed值", "字段槽"].includes(value)) return "parse";
   if (value === "可打印xor") return "xor";
   if (value === "时间戳" || value === "候选时间戳") return "time";
@@ -15667,6 +15677,8 @@ function childPreviewSegmentParts(rawSegment, fallbackClass = "") {
   const raw = String(rawSegment || "").trim();
   if (!raw) return null;
   const labels = [
+    "CSOB",
+    "资源",
     "处理",
     "注意",
     "用途",
@@ -19381,6 +19393,26 @@ function cs2SharedComparableFields(item, source, bodyOffset) {
   });
 }
 
+function cs2SharedPreviewFacts(record, index) {
+  const raw = Array.isArray(record) ? record : [];
+  const text = raw
+    .map((byte) => Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : "\x00")
+    .join("");
+  const facts = [];
+  const node = `node[${Number(index)}]`;
+  if (/cs:[^;\x00]{1,240},ob:/i.test(text) && /state:[0-9a-f]{8},r:/i.test(text)) {
+    facts.push({label:"CSOB", value:node});
+  }
+  const seen = new Set();
+  for (const match of text.matchAll(/\b(config[23]\.dat)\b/ig)) {
+    const name = String(match[1] || "").toLowerCase();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    facts.push({label:"资源", value:`${name} · ${node}`});
+  }
+  return facts;
+}
+
 function cs2SharedComparableChild(rawBytes, index, recordStart, options = {}) {
   const completeNode = Array.isArray(rawBytes) ? rawBytes : [];
   const semanticRecord = Array.isArray(options.semanticRecord) && options.semanticRecord.length
@@ -19411,6 +19443,7 @@ function cs2SharedComparableChild(rawBytes, index, recordStart, options = {}) {
       ? summarizeCommonFixedXor(record, reportCode) : "",
     cs2ApplicationFields: Array.isArray(options.fields) ? options.fields : [],
     cs2SemanticOffset: semanticOffset,
+    previewFacts: cs2SharedPreviewFacts(record, index),
   };
   return attachLocalChildSemantic(child, record);
 }
