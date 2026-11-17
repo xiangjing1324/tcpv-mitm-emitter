@@ -46,6 +46,8 @@ def test_cs2_shared_card_keeps_the_complete_application_item_and_field_boundarie
     assert '"完整 CSChannel2 node 起点"' not in hex_structure
     assert "const recordModel = childHexStructure(recordChild, recordBytes, options)" in hex_structure
     assert "semanticOffset + Number(field.offset)" in hex_structure
+    assert 'if (label === "Unix 秒时间戳") return "inlineTimestamp"' in source
+    assert "const hasTimeTone = isTimestamp || isInlineTimestamp" in source
     assert "for (let consumed = 0; consumed < length; consumed += 16)" in hex_structure
     for label in ("项类型", "项子类型", "应用类型码", "附加值", "Unix 秒时间戳", "正文长度"):
         assert label in source

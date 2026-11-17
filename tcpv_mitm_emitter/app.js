@@ -15238,8 +15238,10 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
   for (const row of rows) {
     const decoded = row && row.decoded && Array.isArray(row.decoded.cells) ? row.decoded : null;
     const isTimestamp = row && row.kind === "timestamp";
+    const isInlineTimestamp = row && row.kind === "inlineTimestamp";
+    const hasTimeTone = isTimestamp || isInlineTimestamp;
     const line = document.createElement("div");
-    line.className = `child-hex-row${row.note ? " child-hex-row-marked" : ""}${row.kind === "timestamp" ? " child-hex-row-time" : ""}${childHexRowKindClass(row.kind)}`;
+    line.className = `child-hex-row${row.note ? " child-hex-row-marked" : ""}${hasTimeTone ? " child-hex-row-time" : ""}${childHexRowKindClass(row.kind)}`;
 
     const offset = document.createElement("code");
     offset.className = "child-hex-offset";
@@ -15267,14 +15269,14 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 	        const candidateByte = Number(identityDigestCandidate.decodedBody[candidateIndex]);
 	        if (candidateByte >= 32 && candidateByte < 127) decodedChar = String.fromCharCode(candidateByte);
 	      }
-	      span.className = `child-hex-byte-cell${changedIndexes[index] ? " child-hex-byte-cell-changed" : ""}${decodedChar ? " child-hex-byte-cell-string" : ""}${isTimestamp ? " child-hex-byte-cell-time" : ""}${isIdentity ? " child-hex-byte-cell-identity" : ""}${isDigest ? " child-hex-byte-cell-digest" : ""}`;
+	      span.className = `child-hex-byte-cell${changedIndexes[index] ? " child-hex-byte-cell-changed" : ""}${decodedChar ? " child-hex-byte-cell-string" : ""}${hasTimeTone ? " child-hex-byte-cell-time" : ""}${isIdentity ? " child-hex-byte-cell-identity" : ""}${isDigest ? " child-hex-byte-cell-digest" : ""}`;
 	      span.textContent = childHexByteText(byte);
 	      if (decodedChar) span.title = isIdentity
 	        ? `18位标识候选字符 "${decodedChar}"`
 	        : isDigest
 	          ? `32字符摘要候选字符 "${decodedChar}"`
 	          : `string char "${decodedChar}"`;
-	      if (isTimestamp) span.title = [span.title, row.note].filter(Boolean).join("；");
+	      if (hasTimeTone) span.title = [span.title, row.note].filter(Boolean).join("；");
 	      bytes.appendChild(span);
 	    }
 
@@ -19329,7 +19331,9 @@ function cs2SharedPayloadNode(itemNode) {
 
 function cs2SharedComparableFieldKind(field) {
   const label = String(field && field.label || "");
-  if (label === "Unix 秒时间戳") return "timestamp";
+  // Keep the CS2 application-header clock on the right side of its byte row.
+  // Shared TerSafe record timestamps retain their existing detail row.
+  if (label === "Unix 秒时间戳") return "inlineTimestamp";
   if (/报告编号|TSS-like/.test(label)) return "report";
   if (/长度|数量/.test(label)) return "len";
   if (/项类型|项子类型|应用类型码|附加值|leaf_id|selector|inner field/.test(label)) return "appType";
