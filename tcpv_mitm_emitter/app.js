@@ -1170,6 +1170,31 @@ function installDumpAsciiRowStyles() {
       display: grid;
       gap: 10px;
     }
+    .gcloud-security-primary {
+      order: 0;
+    }
+    .gcloud-security-fold {
+      margin: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--panel) 97%, var(--dump-bg) 3%);
+      overflow: hidden;
+    }
+    .gcloud-security-fold > summary {
+      padding: 9px 11px;
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 750;
+      user-select: none;
+    }
+    .gcloud-security-fold > .gcloud-ace-deep,
+    .gcloud-security-fold > .gcloud-ace-recursive-tree-wrap {
+      margin: 0;
+      border-left: 0;
+      border-right: 0;
+      border-bottom: 0;
+      border-radius: 0;
+    }
     .gcloud-security-deep-stack > .gcloud-ace-deep,
     .gcloud-security-deep-stack > .gcloud-tss-decrypted {
       margin: 10px 8px 0;
@@ -17680,7 +17705,7 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "", displayOptions = {
 
   const stack = document.createElement("div");
   stack.className = "gcloud-security-deep-stack";
-  stack.appendChild(panel);
+  let innerPanel = null;
   // Successful decoding is already visible in the nodes. Keep failures visible.
   if (encrypted && (!compact || !encrypted.supported || !encrypted.crcMatch)) {
     const status = document.createElement("div");
@@ -17707,9 +17732,11 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "", displayOptions = {
       const innerReport = encrypted.innerRoot
         ? formatHexValue(encrypted.innerRoot.value, 8)
         : "未识别 record root";
-      const innerPanel = buildChildComparePanel(beforePlainBase64, plainBase64, "", {
+      innerPanel = buildChildComparePanel(beforePlainBase64, plainBase64, summaryText, {
         forceCurrentOnly: !beforePlainBase64,
-        title: gcloudSecurityThirdLayerTitle(securityCommand),
+        // Reuse the exact TerSafe1 comparison title/layout. GCloud's extra
+        // transport/envelope layers are evidence, not the primary report UI.
+        title: "",
         meta: compact
           ? (beforePlainBase64 ? `修改前 ${beforePlain.length}B · 修改后 ${encrypted.plain.length}B` : `${encrypted.plain.length}B`)
           : beforePlainBase64
@@ -17718,17 +17745,43 @@ function buildGcloudAceCarrierDeepPanel(ev, summaryText = "", displayOptions = {
         forceSideBySideSame: Boolean(beforePlainBase64),
       });
       if (innerPanel) {
-        innerPanel.classList.add("gcloud-tss-decrypted", "child-compare-inline");
+        innerPanel.classList.add("gcloud-tss-decrypted", "gcloud-security-primary", "child-compare-inline");
         stack.appendChild(innerPanel);
       }
     }
+  }
+
+  if (innerPanel) {
+    const outerFold = document.createElement("details");
+    outerFold.className = "gcloud-security-fold gcloud-security-envelope-fold";
+    const outerSummary = document.createElement("summary");
+    outerSummary.textContent = beforePayload.length > 0
+      ? `外层加密封套（修改前 ${beforePayload.length}B / 修改后 ${displayPayload.length}B）`
+      : `外层加密封套（${displayPayload.length}B）`;
+    outerFold.appendChild(outerSummary);
+    outerFold.appendChild(panel);
+    stack.appendChild(outerFold);
+  } else {
+    // If decryption is unavailable or CRC verification fails, keep the outer
+    // envelope visible so a failure can never be mistaken for a clean report.
+    stack.appendChild(panel);
   }
   const decodeTree = root ? buildTssRecursiveDecodeTree(displayPayload, { kind: channelLabel }) : null;
   if (decodeTree && decodeTree.root) {
     const treeWrap = document.createElement("div");
     treeWrap.className = "gcloud-ace-recursive-tree-wrap";
     renderTssRecursiveTree(decodeTree, treeWrap);
-    stack.appendChild(treeWrap);
+    if (innerPanel) {
+      const treeFold = document.createElement("details");
+      treeFold.className = "gcloud-security-fold gcloud-security-recursive-fold";
+      const treeSummary = document.createElement("summary");
+      treeSummary.textContent = "递归解码证据（CRC / 密钥槽 / 原始字节）";
+      treeFold.appendChild(treeSummary);
+      treeFold.appendChild(treeWrap);
+      stack.appendChild(treeFold);
+    } else {
+      stack.appendChild(treeWrap);
+    }
   }
   return stack;
 }

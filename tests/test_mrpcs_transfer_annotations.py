@@ -15,7 +15,19 @@ def _extract_function(source: str, name: str) -> str:
     match = re.search(rf"\bfunction\s+{re.escape(name)}\s*\(", source)
     assert match, f"missing function {name}"
     start = match.start()
-    brace = source.find("{", match.end())
+    # Skip braces used by default parameters such as `options = {}` and find
+    # the actual function-body brace after the matching closing parenthesis.
+    paren = match.end() - 1
+    paren_depth = 0
+    while paren < len(source):
+        if source[paren] == "(":
+            paren_depth += 1
+        elif source[paren] == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                break
+        paren += 1
+    brace = source.find("{", paren + 1)
     assert brace >= 0
 
     depth = 0
@@ -258,8 +270,10 @@ def test_live_retagged_0037_family1_decrypts_third_layer_mrpcs_reference(
     source = APP_JS.read_text(encoding="utf-8")
     deep_panel = _extract_function(source, "buildGcloudAceCarrierDeepPanel")
     assert "decryptDisplayableTssEnvelope(displayPayload)" in deep_panel
-    assert "gcloudSecurityThirdLayerTitle(securityCommand)" in deep_panel
+    assert 'title: ""' in deep_panel
     assert "stack.appendChild(innerPanel)" in deep_panel
+    assert "gcloud-security-envelope-fold" in deep_panel
+    assert "gcloud-security-recursive-fold" in deep_panel
     assert "buildTssRecursiveDecodeTree(displayPayload" in deep_panel
     crypto_constants = source[
         source.index("const TSS_CRYPTO_KEY_LABELS"):

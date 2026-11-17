@@ -190,6 +190,11 @@ for (const cls of ['child-pair-card', 'tss-recursive-tree']) {
 assert(nodes(compact, 'child-pair-card').length === 3, 'second/third-layer cards missing');
 assert(nodes(compact, 'child-preview-before').length === 3, 'before columns missing');
 assert(nodes(compact, 'child-preview-after').length === 3, 'after columns missing');
+assert(compact.children[0].classList.contains('gcloud-security-primary'), 'decrypted TerSafe comparison is not first');
+const envelopeFold = nodes(compact, 'gcloud-security-envelope-fold');
+const recursiveFold = nodes(compact, 'gcloud-security-recursive-fold');
+assert(envelopeFold.length === 1 && !envelopeFold[0].open, 'outer encrypted envelope must be collapsed');
+assert(recursiveFold.length === 1 && !recursiveFold[0].open, 'recursive evidence must be collapsed');
 const recursive = nodes(compact, 'tss-recursive-node');
 assert(recursive.length === 4 && recursive[0].open && recursive.slice(1).every(node => !node.open), 'recursive expansion changed');
 assert(text(compact).includes('first-child-content') && text(compact).includes('second-child-content'), 'child strings missing');
