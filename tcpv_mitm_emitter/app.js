@@ -13132,6 +13132,9 @@ function childSemanticLines(child) {
   if (child.semanticLabel) {
     lines.push(`semantic=${child.semanticLabel} [${semanticTierLabel(child.semanticTier)}] category=${child.semanticCategory || "unknown"}`);
   }
+  if (child.mrpcsEmptyAck) {
+    lines.push("mrpcs_ack=应用 0x03e9 · 关联字段 20 B · 状态 2 · 正文 0 B");
+  }
   if (child.typedLayout) {
     const layout = child.typedLayout;
     lines.push(
@@ -13191,6 +13194,11 @@ function splitChildSemanticRows(child) {
       const raw = semanticValueText(line, "shape=");
       const compact = compactChildShapeText(raw);
       if (compact) primaryRows.push(["结构", compact, "child-card-line-long child-card-shape"]);
+      debugLines.push(line);
+      continue;
+    }
+    if (line.startsWith("mrpcs_ack=")) {
+      primaryRows.push(["结构", semanticValueText(line, "mrpcs_ack="), "child-card-line-long child-card-shape"]);
       debugLines.push(line);
       continue;
     }
@@ -19300,6 +19308,29 @@ function cs2TssRecordNode(record, absoluteStart) {
   });
 }
 
+function cs2MrpcsEmptyAckInfo(bytes) {
+  const raw = Array.isArray(bytes) ? bytes : [];
+  if (raw.length !== 43 || raw[0] !== 3 || raw[1] !== 4 || raw[2] !== 0x14) return null;
+  const read = (start, end) => raw.slice(start, end)
+    .reduce((value, byte) => value * 256 + Number(byte || 0), 0);
+  const applicationType = read(23, 25);
+  const extraValue = read(25, 27);
+  const timestamp = read(27, 31);
+  const statusPrefixIsZero = raw.slice(31, 38).every((byte) => byte === 0);
+  const status = raw[38];
+  const bodyLength = read(39, 43);
+  if (applicationType !== 0x03e9 || extraValue !== 0 || !statusPrefixIsZero || status !== 2
+      || bodyLength !== 0 || timestamp < 1577836800 || timestamp > 4102444800) return null;
+  return {
+    associationHex: `0x${raw.slice(3, 23).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+    applicationType,
+    extraValue,
+    timestamp,
+    status,
+    bodyLength,
+  };
+}
+
 function cs2ApplicationHeaderLength(bytes, start, end) {
   const extra = bytes[start] === 3 && bytes[start + 1] === 4 && end - start >= 3 ? bytes[start + 2] : 0;
   const width = 23 + extra;
@@ -19512,6 +19543,25 @@ function cs2FieldRows(root, plaintextBytes, annotateReportText = false) {
   };
   const visit = (node) => {
     const children = Array.isArray(node.children) ? node.children : [];
+    if (node.name === "应用项头") {
+      const raw = cs2NodeRange(node, plaintextBytes);
+      const ack = cs2MrpcsEmptyAckInfo(raw);
+      if (ack) {
+        const at = node.offset;
+        rows.push(
+          { offset: at, end: at + 1, label: "项类型", encoding: "u8", value: raw[0] },
+          { offset: at + 1, end: at + 2, label: "项子类型", encoding: "u8", value: raw[1] },
+          { offset: at + 2, end: at + 3, label: "可选字段长度", encoding: "u8", value: raw[2] },
+          { offset: at + 3, end: at + 23, label: "MRPCS 关联字段", encoding: "hex", value: ack.associationHex },
+          { offset: at + 23, end: at + 25, label: "应用类型码", encoding: "hex", value: "0x03e9" },
+          { offset: at + 25, end: at + 27, label: "附加值", encoding: "hex", value: "0x0000" },
+          { offset: at + 27, end: at + 31, label: "Unix 秒时间戳", encoding: "be32", value: ack.timestamp },
+          { offset: at + 31, end: at + 39, label: "确认状态", encoding: "be64", value: ack.status },
+          { offset: at + 39, end: at + 43, label: "正文长度", encoding: "be32", value: ack.bodyLength },
+        );
+        return;
+      }
+    }
     // The historical tree merged a variable-length prefix and two integers.
     // Only reinterpret the byte-exact subtype 04 header with an empty prefix.
     if (node.name === "应用项头" && node.end - node.offset === 23) {
@@ -19788,7 +19838,18 @@ function cs2SharedComparableChild(rawBytes, index, recordStart, options = {}) {
     verifiedLayers: Array.isArray(options.verifiedLayers) ? options.verifiedLayers : [],
     verifiedLayerStops: Array.isArray(options.verifiedLayerStops) ? options.verifiedLayerStops : [],
   };
-  return attachLocalChildSemantic(child, record);
+  attachLocalChildSemantic(child, record);
+  const mrpcsEmptyAck = cs2MrpcsEmptyAckInfo(completeNode);
+  if (mrpcsEmptyAck) {
+    child.mrpcsEmptyAck = mrpcsEmptyAck;
+    child.semanticRole = "mrpcs_empty_ack";
+    child.semanticCategory = "response.ack";
+    child.semanticLabel = "MRPCS 空确认";
+    child.semanticTier = "observed";
+    child.semanticEvidence = ["exact_43_byte_shape", "20_byte_association_echo", "status_2", "empty_body"];
+    child.valuePreview = "";
+  }
+  return child;
 }
 
 function cs2SharedComparablePayload(presentation, applicationBytes) {
