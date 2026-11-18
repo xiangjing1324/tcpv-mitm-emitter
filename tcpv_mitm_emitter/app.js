@@ -13133,7 +13133,8 @@ function childSemanticLines(child) {
     lines.push(`semantic=${child.semanticLabel} [${semanticTierLabel(child.semanticTier)}] category=${child.semanticCategory || "unknown"}`);
   }
   if (child.mrpcsEmptyAck) {
-    lines.push("mrpcs_ack=应用 0x03e9 · 关联字段 20 B · 状态 2 · 正文 0 B");
+    const ack = child.mrpcsEmptyAck;
+    lines.push(`mrpcs_ack=应用 0x03e9 · 服务 ${ack.serviceValueHex} · 类型 ${ack.typeFieldHex} · 请求 ${ack.requestFieldHex} · 版本 ${ack.version} · 状态 ${ack.status} · 正文 ${ack.bodyLength} B`);
   }
   if (child.typedLayout) {
     const layout = child.typedLayout;
@@ -14956,6 +14957,12 @@ function childHexStructure(child, childBytes, options = {}) {
           String(field.cs2Kind || "field"),
         );
       }
+    }
+    // A 43-byte MRPCS empty acknowledgement is entirely an application
+    // header.  There is no nested record to recurse into, and all bytes are
+    // already covered by the verified field list above.
+    if (child && child.mrpcsEmptyAck) {
+      return { annotations, fields, valueStart: 23, timestamps: [] };
     }
     const semanticOffset = Math.max(0, Number(child && child.cs2SemanticOffset) || 0);
     const recordBytes = childBytes.slice(semanticOffset);
@@ -19313,6 +19320,8 @@ function cs2MrpcsEmptyAckInfo(bytes) {
   if (raw.length !== 43 || raw[0] !== 3 || raw[1] !== 4 || raw[2] !== 0x14) return null;
   const read = (start, end) => raw.slice(start, end)
     .reduce((value, byte) => value * 256 + Number(byte || 0), 0);
+  const hexRange = (start, end) => `0x${raw.slice(start, end)
+    .map((byte) => Number(byte || 0).toString(16).padStart(2, "0")).join("")}`;
   const applicationType = read(23, 25);
   const extraValue = read(25, 27);
   const timestamp = read(27, 31);
@@ -19322,7 +19331,15 @@ function cs2MrpcsEmptyAckInfo(bytes) {
   if (applicationType !== 0x03e9 || extraValue !== 0 || !statusPrefixIsZero || status !== 2
       || bodyLength !== 0 || timestamp < 1577836800 || timestamp > 4102444800) return null;
   return {
-    associationHex: `0x${raw.slice(3, 23).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+    associationHex: hexRange(3, 23),
+    transactionFieldHex: hexRange(3, 7),
+    serviceValueHex: hexRange(7, 11),
+    typeFieldHex: hexRange(11, 13),
+    requestFieldHex: hexRange(13, 15),
+    version: read(15, 16),
+    connectionFieldHex: hexRange(16, 20),
+    sequenceFieldHex: hexRange(20, 23),
+    sequenceValue: read(20, 23),
     applicationType,
     extraValue,
     timestamp,
@@ -19551,8 +19568,14 @@ function cs2FieldRows(root, plaintextBytes, annotateReportText = false) {
         rows.push(
           { offset: at, end: at + 1, label: "项类型", encoding: "u8", value: raw[0] },
           { offset: at + 1, end: at + 2, label: "项子类型", encoding: "u8", value: raw[1] },
-          { offset: at + 2, end: at + 3, label: "可选字段长度", encoding: "u8", value: raw[2] },
-          { offset: at + 3, end: at + 23, label: "MRPCS 关联字段", encoding: "hex", value: ack.associationHex },
+          { offset: at + 2, end: at + 3, label: "MRPCS 头长度", encoding: "u8", value: raw[2] },
+          { offset: at + 3, end: at + 7, label: "MRPCS 事务字段（观察）", encoding: "hex", value: ack.transactionFieldHex },
+          { offset: at + 7, end: at + 11, label: "MRPCS 服务值（观察）", encoding: "hex", value: ack.serviceValueHex },
+          { offset: at + 11, end: at + 13, label: "MRPCS 类型字段（观察）", encoding: "hex", value: ack.typeFieldHex },
+          { offset: at + 13, end: at + 15, label: "MRPCS 请求字段（观察）", encoding: "hex", value: ack.requestFieldHex },
+          { offset: at + 15, end: at + 16, label: "MRPCS 版本", encoding: "u8", value: ack.version },
+          { offset: at + 16, end: at + 20, label: "MRPCS 连接段（同连接稳定）", encoding: "hex", value: ack.connectionFieldHex },
+          { offset: at + 20, end: at + 23, label: "MRPCS 序列段（同连接变化）", encoding: "hex", value: ack.sequenceFieldHex },
           { offset: at + 23, end: at + 25, label: "应用类型码", encoding: "hex", value: "0x03e9" },
           { offset: at + 25, end: at + 27, label: "附加值", encoding: "hex", value: "0x0000" },
           { offset: at + 27, end: at + 31, label: "Unix 秒时间戳", encoding: "be32", value: ack.timestamp },
@@ -19867,12 +19890,17 @@ function cs2SharedComparablePayload(presentation, applicationBytes) {
     const semanticRecord = cs2NodeRange(payloadNode, source);
     if (!completeNode.length || !semanticRecord.length) continue;
     const verified = cs2SharedVerifiedLayers(item, source);
+    const mrpcsEmptyAck = cs2MrpcsEmptyAckInfo(completeNode);
+    // Empty acknowledgements have no payload node.  Their application header
+    // spans the complete item, so using payloadNode.offset as the boundary
+    // would incorrectly filter every parsed field out of the shared card.
+    const applicationFieldStop = mrpcsEmptyAck ? Number(item.end) : Number(payloadNode.offset);
     const start = bytes.length;
     bytes.push(...completeNode);
     children.push(cs2SharedComparableChild(completeNode, index, start, {
       semanticRecord,
       semanticOffset: Number(payloadNode.offset) - Number(item.offset),
-      fields: cs2SharedComparableFields(item, source, Number(payloadNode.offset)),
+      fields: cs2SharedComparableFields(item, source, applicationFieldStop),
       verifiedLayers: verified.layers,
       verifiedLayerStops: verified.stops,
     }));

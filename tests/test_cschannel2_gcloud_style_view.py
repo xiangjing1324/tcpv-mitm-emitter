@@ -27,7 +27,7 @@ def test_cs2_reuses_the_exact_gcloud_child_compare_component() -> None:
     assert "panelOptions.afterParsed" in shared
     assert "const completeNode = cs2NodeRange(item, source)" in adapter
     assert "semanticRecord," in adapter
-    assert "fields: cs2SharedComparableFields(item, source, Number(payloadNode.offset))" in adapter
+    assert "fields: cs2SharedComparableFields(item, source, applicationFieldStop)" in adapter
     assert "bytes.push(...completeNode)" in adapter
     assert "cs2SharedDeepestVerifiedBytes(raw)" not in adapter
 
@@ -96,14 +96,41 @@ def test_cs2_mrpcs_empty_ack_is_game_agnostic_and_exposes_fixed_fields() -> None
     assert [first["bodyLength"], second["bodyLength"], third["bodyLength"]] == [0, 0, 0]
     assert first["associationHex"] == "0xfa5c00640000164f0208b07601c0b970b3b57a84"
     assert third["associationHex"] == "0x5fdb06cd0000164f01da99ad01b1e28909376518"
+    assert first["transactionFieldHex"] == "0xfa5c0064"
+    assert first["serviceValueHex"] == "0x0000164f"
+    assert first["typeFieldHex"] == "0x0208"
+    assert first["requestFieldHex"] == "0xb076"
+    assert first["version"] == 1
+    assert first["connectionFieldHex"] == "0xc0b970b3"
+    assert first["sequenceFieldHex"] == "0xb57a84"
+    assert first["sequenceValue"] == int("b57a84", 16)
+    assert third["typeFieldHex"] == "0x01da"
+    assert third["connectionFieldHex"] == "0xb1e28909"
     assert rejected is None
 
     fields = _packet_function(source, "cs2FieldRows")
     adapter = _packet_function(source, "cs2SharedComparableChild")
-    assert 'label: "MRPCS 关联字段"' in fields
+    payload = _packet_function(source, "cs2SharedComparablePayload")
+    hex_structure = _packet_function(source, "childHexStructure")
+    for label in (
+        "MRPCS 头长度",
+        "MRPCS 事务字段（观察）",
+        "MRPCS 服务值（观察）",
+        "MRPCS 类型字段（观察）",
+        "MRPCS 请求字段（观察）",
+        "MRPCS 版本",
+        "MRPCS 连接段（同连接稳定）",
+        "MRPCS 序列段（同连接变化）",
+    ):
+        assert f'label: "{label}"' in fields
+    assert 'label: "MRPCS 关联字段"' not in fields
     assert 'label: "确认状态"' in fields
     assert 'child.semanticLabel = "MRPCS 空确认"' in adapter
     assert 'child.semanticRole = "mrpcs_empty_ack"' in adapter
+    assert "const mrpcsEmptyAck = cs2MrpcsEmptyAckInfo(completeNode)" in payload
+    assert "const applicationFieldStop = mrpcsEmptyAck ? Number(item.end) : Number(payloadNode.offset)" in payload
+    assert "fields: cs2SharedComparableFields(item, source, applicationFieldStop)" in payload
+    assert "if (child && child.mrpcsEmptyAck)" in hex_structure
 
 
 def test_csob_filter_loads_complete_payloads_before_filtering() -> None:
