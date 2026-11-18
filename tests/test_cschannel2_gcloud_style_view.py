@@ -154,12 +154,15 @@ def test_child_compare_expands_every_node_and_has_sticky_jump_navigation() -> No
     assert "节点未展开显示" not in source
     assert "当前视图优先展示前 8 个" not in source
     assert "makeChildNodeNavigator(" in panel
+    assert 'panel.className = "child-compare child-compare-all-nodes"' in panel
     assert "节点导航 · ${ordered.length}项全部展开" in navigator
     assert 'card.scrollIntoView({behavior: "smooth", block: "start"})' in navigator
     assert 'previous.textContent = "上一个"' in navigator
     assert 'next.textContent = "下一个"' in navigator
     assert ".child-node-navigator {" in source
     assert "position: sticky" in source
+    assert ".child-compare.child-compare-all-nodes" in source
+    assert "overflow: visible" in source
 
 
 def test_hex_annotations_use_short_chinese_and_stay_on_one_line() -> None:

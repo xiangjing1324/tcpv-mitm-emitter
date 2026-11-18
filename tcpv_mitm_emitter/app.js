@@ -13522,6 +13522,9 @@ function ensureChildCommonStyles() {
       box-shadow: 0 5px 16px color-mix(in srgb, #000 28%, transparent);
       backdrop-filter: blur(8px);
     }
+    .child-compare.child-compare-all-nodes {
+      overflow: visible;
+    }
     .child-node-navigator strong {
       color: color-mix(in srgb, #7dd3fc 82%, var(--text));
       font-size: 12px;
@@ -16530,7 +16533,7 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
   const visibleIndices = Array.from({length: total}, (_, index) => index);
   const visible = visibleIndices.length;
   const panel = document.createElement("section");
-  panel.className = "child-compare";
+  panel.className = "child-compare child-compare-all-nodes";
   if (originalOnly || currentOnly) panel.classList.add("child-compare-current-only");
 
   const head = document.createElement("div");
