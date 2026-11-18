@@ -14434,18 +14434,18 @@ function appendChildRailMeta(container, label, value) {
 
 function childUiTerm(term) {
   const labels = {
-    idx: "idx(索引)",
-    report: "report(报告码)",
-    type: "type(类型)",
-    ID: "leaf_id?(候选ID/序号)",
-    len: "len(长度)",
-    diff: "diff(差异)",
-    offset: "offset(偏移)",
-    source: "source(来源)",
-    hex: "hex(十六进制)",
-    head: "head(头)",
-    tail: "tail(尾)",
-    all: "all(全部)",
+    idx: "序号",
+    report: "报告码",
+    type: "类型",
+    ID: "候选序号",
+    len: "长度",
+    diff: "差异",
+    offset: "偏移",
+    source: "来源",
+    hex: "十六进制",
+    head: "头部",
+    tail: "尾部",
+    all: "全部",
   };
   return labels[term] || term;
 }
@@ -14801,7 +14801,7 @@ function tssStructuredMetadataInsights(byteValues, reportCode) {
   for (let offset = 10; offset + 1 < byteValues.length; offset += 1) {
     const marker = ((Number(byteValues[offset]) & 0xff) << 8) | (Number(byteValues[offset + 1]) & 0xff);
     if (![0x0a92, 0x5073].includes(marker)) continue;
-    add("marker", "内层 marker", offset, 2, formatHexValue(marker, 4));
+    add("marker", "内层标记", offset, 2, formatHexValue(marker, 4));
   }
 
   addMatch("cs", "CS", /cs:([^;\x00]*?)(?=,ob:|;|\x00)/i);
@@ -14820,7 +14820,7 @@ function tssStructuredMetadataInsights(byteValues, reportCode) {
     const leftIsDigit = start > 0 && /\d/.test(ascii[start - 1]);
     const rightIsDigit = end < ascii.length && /\d/.test(ascii[end]);
     if (!leftIsDigit && !rightIsDigit) {
-      add("account", "AccountID（账号标识）", start, String(accountMatch[0]).length, accountMatch[0]);
+      add("account", "账号ID", start, String(accountMatch[0]).length, accountMatch[0]);
       break;
     }
     accountMatch = accountPattern.exec(ascii);
@@ -14886,7 +14886,7 @@ function childHexStructure(child, childBytes, options = {}) {
       timestamps: shiftedTimestamps,
     };
   }
-  addChildHexAnnotation(annotations, 0, "record start(记录起点)");
+  addChildHexAnnotation(annotations, 0, "记录起点");
 
   const detected = detectTssReport(childBytes);
   const fallbackReport = parseReportCodeNumber(child && child.reportCode);
@@ -14906,28 +14906,31 @@ function childHexStructure(child, childBytes, options = {}) {
       && Number.isFinite(framedTotal)
       && Math.abs(Number(framedTotal) - childBytes.length) <= 4;
     if (hasTssLikeFrame) {
-      addChildHexField(fields, 0, 4, `record version ${framedVersion} · TSS-like framing observed`, "version");
-      addChildHexField(fields, 4, 2, `record total ${framedTotal} byte · actual ${childBytes.length}`, "total");
+      addChildHexField(fields, 0, 4, `版本 ${framedVersion} · TSS帧`, "version");
+      const totalNote = Number(framedTotal) === childBytes.length
+        ? `记录长度 ${framedTotal} B`
+        : `记录长度 ${framedTotal} B（实际 ${childBytes.length} B）`;
+      addChildHexField(fields, 4, 2, totalNote, "total");
       valueStart = 14;
     }
     addChildHexField(
       fields,
       reportOffset,
       4,
-      `${childUiTerm("report")} @${hexOffsetText(reportOffset)} ${formatHexValue(report.value, 8)}${Number(report.value) === 0x010a0013 ? " · byte split candidate 01 | 0a | 0013(19)" : ""}`,
+      `报告码 ${formatHexValue(report.value, 8)}（${hexOffsetText(reportOffset)}）${Number(report.value) === 0x010a0013 ? " · 字节候选 01|0a|0013(19)" : ""}`,
       "report",
     );
     const idOffset = childRecordIdOffset(childBytes, report);
     if (Number(report.value) === 0x010a0013 && childBytes.length >= 20) {
       const tlvHeader = parseTssTlvRecord0013(childBytes);
-      addChildHexField(fields, 10, 8, `header ID/sequence candidate · BE64 raw ${tlvHeader ? tlvHeader.headerIdHex : `0x${formatHexBytesCompact(childBytes.slice(10, 18))}`}`, "headerId");
-      addChildHexField(fields, 18, 2, `flags/reserved candidate ${formatHexValue(readBe16(childBytes, 18), 4)}`, "flags");
+      addChildHexField(fields, 10, 8, `头ID/序列候选 · 大端64位 ${tlvHeader ? tlvHeader.headerIdHex : `0x${formatHexBytesCompact(childBytes.slice(10, 18))}`}`, "headerId");
+      addChildHexField(fields, 18, 2, `标志/保留候选 ${formatHexValue(readBe16(childBytes, 18), 4)}`, "flags");
     } else if (Number.isFinite(idOffset) && idOffset >= 0 && idOffset + 3 < childBytes.length) {
       addChildHexField(
         fields,
         idOffset,
         4,
-        `${childUiTerm("ID")} @${hexOffsetText(idOffset)} ${formatHexValue(readBe32(childBytes, idOffset), 4)}`,
+        `候选序号 ${formatHexValue(readBe32(childBytes, idOffset), 4)}（${hexOffsetText(idOffset)}）`,
         "id",
       );
     }
@@ -14946,24 +14949,28 @@ function childHexStructure(child, childBytes, options = {}) {
     const encrypted = decryptDisplayableTssEnvelope(childBytes);
     if (encrypted) {
       valueStart = 28;
-      addChildHexField(fields, 20, 1, `crypto family ${encrypted.family} · ${encrypted.familyName}`, "cryptoFamily");
-      addChildHexField(fields, 21, 1, `key slot[${encrypted.slot}]${encrypted.keyLabel ? ` · ${encrypted.keyLabel}` : ""}`, "cryptoSlot");
-      addChildHexField(fields, 22, 4, `plaintext CRC32 ${formatHexValue(encrypted.expectedCrc, 8)}`, "crc");
-      addChildHexField(fields, 26, 2, `cipher len ${encrypted.cipherLength} byte · available ${encrypted.availableLength}`, "cipherLen");
-      addChildHexAnnotation(annotations, 28, `ciphertext start · ${encrypted.cipherLength} byte；此区不做 ASCII/XOR 语义猜测`);
+      const familyName = encrypted.family === 0 ? "GENE" : encrypted.family === 1 ? "MARS" : encrypted.family === 2 ? "RC6" : encrypted.familyName;
+      addChildHexField(fields, 20, 1, `算法族 ${encrypted.family} · ${familyName}`, "cryptoFamily");
+      addChildHexField(fields, 21, 1, `密钥槽 ${encrypted.slot}${encrypted.keyLabel ? ` · ${encrypted.keyLabel}` : ""}`, "cryptoSlot");
+      addChildHexField(fields, 22, 4, `明文 CRC32 ${formatHexValue(encrypted.expectedCrc, 8)}`, "crc");
+      const cipherNote = Number(encrypted.cipherLength) === Number(encrypted.availableLength)
+        ? `密文长度 ${encrypted.cipherLength} B`
+        : `密文长度 ${encrypted.cipherLength} B（可用 ${encrypted.availableLength} B）`;
+      addChildHexField(fields, 26, 2, cipherNote, "cipherLen");
+      addChildHexAnnotation(annotations, 28, `密文起点 · ${encrypted.cipherLength} B（不推测文本/XOR）`);
     }
 
     const tlvRecord = parseTssTlvRecord0013(childBytes);
     if (tlvRecord && tlvRecord.valid) {
       valueStart = 20;
       for (const item of tlvRecord.items) {
-        addChildHexField(fields, item.offset, 1, `TLV[${item.index}] type ${item.type}`, "tlvType");
-        addChildHexField(fields, item.offset + 1, 1, `TLV[${item.index}] len ${item.length} byte`, "tlvLen");
+        addChildHexField(fields, item.offset, 1, `TLV[${item.index}] 类型 ${item.type}`, "tlvType");
+        addChildHexField(fields, item.offset + 1, 1, `TLV[${item.index}] 长度 ${item.length} B`, "tlvLen");
         addChildHexField(
           fields,
           item.valueOffset,
           item.length,
-          `TLV[${item.index}] value${item.text ? ` · text "${item.text}"` : ""} · ${hexOffsetText(item.valueOffset)} + ${item.length} = ${hexOffsetText(item.end)} (record end)`,
+          `TLV[${item.index}] 值${item.text ? ` · 文本“${item.text}”` : ""} · ${hexOffsetText(item.valueOffset)}~${hexOffsetText(item.end)}（记录尾）`,
           "tlvValue",
         );
       }
@@ -14980,55 +14987,55 @@ function childHexStructure(child, childBytes, options = {}) {
         const innerFieldOffset = Number(layout.shift) + 0x20;
         valueStart = Number(layout.shift) + 0x24;
         const bodyLayout = child && child.bodyLayout ? child.bodyLayout : parseTypedBodyStructure(childBytes, layout);
-        addChildHexField(fields, lenOffset, 2, `total len(总长度) ${Number(layout.len)}，confirmed`, "len");
-        addChildHexField(fields, innerLenOffset, 2, `inner len(内部结构长度) ${Number(layout.innerLen || 0)}；从inner_type起覆盖到record末尾`, "innerLen");
-        addChildHexField(fields, innerTypeOffset, 2, `inner type(shape字段) ${formatHexValue(layout.innerType, 4)}`, "innerType");
-        addChildHexField(fields, selector0Offset, 4, `selector0(shape选择字0) ${formatHexValue(layout.selector0, 8)}`, "selector");
+        addChildHexField(fields, lenOffset, 2, `总长度 ${Number(layout.len)} B（已确认）`, "len");
+        addChildHexField(fields, innerLenOffset, 2, `内层长度 ${Number(layout.innerLen || 0)} B（类型至记录尾）`, "innerLen");
+        addChildHexField(fields, innerTypeOffset, 2, `内层类型 ${formatHexValue(layout.innerType, 4)}`, "innerType");
+        addChildHexField(fields, selector0Offset, 4, `选择字0 ${formatHexValue(layout.selector0, 8)}`, "selector");
         const selector1Note = bodyLayout && bodyLayout.kind === "periodicProbeTable"
-          ? `selector1 ${formatHexValue(layout.selector1, 8)}；高16=${formatHexValue((Number(layout.selector1) >>> 16) & 0xffff, 4)}对应单调tick，低16=${Number(bodyLayout.selectorRevisionOrFlags)} revision/flags候选`
-          : `selector1(shape选择字1) ${formatHexValue(layout.selector1, 8)}`;
+          ? `选择字1 ${formatHexValue(layout.selector1, 8)} · 高16计时=${formatHexValue((Number(layout.selector1) >>> 16) & 0xffff, 4)} · 低16版本/标志=${Number(bodyLayout.selectorRevisionOrFlags)}`
+          : `选择字1 ${formatHexValue(layout.selector1, 8)}`;
         addChildHexField(fields, selector1Offset, 4, selector1Note, "selector");
         if (innerFieldOffset >= 0 && innerFieldOffset + 3 < childBytes.length) {
           const pairNote = bodyLayout && bodyLayout.kind === "periodicProbeTable"
-            ? `；u16 pair候选=${Number(bodyLayout.innerPair.left)}/${Number(bodyLayout.innerPair.right)}`
+            ? ` · 16位对=${Number(bodyLayout.innerPair.left)}/${Number(bodyLayout.innerPair.right)}`
             : "";
-          addChildHexField(fields, innerFieldOffset, 4, `inner field(shape字段) ${formatHexValue(readBe32(childBytes, innerFieldOffset), 8)}${pairNote}；它不是body[0]`, "innerField");
+          addChildHexField(fields, innerFieldOffset, 4, `内层字段 ${formatHexValue(readBe32(childBytes, innerFieldOffset), 8)}${pairNote}（非正文首字节）`, "innerField");
         }
         if (bodyLayout && bodyLayout.kind === "periodicProbeTable") {
           addChildHexField(
             fields,
             Number(bodyLayout.bodyStart),
             4,
-            `单调运行tick ${formatHexValue(bodyLayout.tick, 8)} = ${Number(bodyLayout.tick)}；旧415包中位约0.987682 tick/秒，换算约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}（仅历史参考）；selector匹配=${bodyLayout.selectorTickMatch ? "是" : "否"}`,
+            `运行计时 ${formatHexValue(bodyLayout.tick, 8)}=${Number(bodyLayout.tick)} · 历史约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}（0.988次/秒）· 选择字${bodyLayout.selectorTickMatch ? "匹配" : "不匹配"}`,
             "bodyHeader",
           );
           for (const item of bodyLayout.entries) {
             const value = item.value || {};
             const counterText = item.valueKind === "typedValue"
-              ? `BE=${Number(value.be32)} LE=${Number(value.le32)}${Number.isFinite(value.floatBe) ? ` floatBE=${Number(value.floatBe).toPrecision(7)}` : ""}`
-              : `计数候选=${Number(value.be32)}${Number.isFinite(item.roundRatio) ? `，相对全局轮次≈${Number(item.roundRatio).toFixed(3)}×` : ""}`;
+              ? `大端=${Number(value.be32)} · 小端=${Number(value.le32)}${Number.isFinite(value.floatBe) ? ` · 大端浮点=${Number(value.floatBe).toPrecision(7)}` : ""}`
+              : `计数候选=${Number(value.be32)}${Number.isFinite(item.roundRatio) ? ` · 全局轮次≈${Number(item.roundRatio).toFixed(3)}×` : ""}`;
             addChildHexField(
               fields,
               Number(item.offset),
               6,
-              `探测项[${item.index}] probe_id=${formatHexValue(item.probeId, 4)}；raw32=${value.rawHex || "-"}；${counterText}；${item.valueKindLabel}`,
+              `探测项[${item.index}] ID=${formatHexValue(item.probeId, 4)} · 原值=${value.rawHex || "-"} · ${counterText} · ${item.valueKindLabel}`,
               "probeEntry",
             );
           }
-          addChildHexAnnotation(annotations, valueStart, `body已闭合：${bodyLayout.algebra}；u32 tick + ${bodyLayout.entries.length}×(u16 probe_id + raw32 value)`);
+          addChildHexAnnotation(annotations, valueStart, `正文闭合：${bodyLayout.algebra} · 计时32位 + ${bodyLayout.entries.length}×（探测ID16位 + 原值32位）`);
         } else if (bodyLayout && ["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
           for (const word of bodyLayout.words) {
             const value = word.value || {};
-            const flags = word.allZero ? "全0" : word.allOne ? "全1/FFFF掩码" : `BE置位bit=${word.setBits.join("/") || "无"}`;
+            const flags = word.allZero ? "全0" : word.allOne ? "全1/FFFF掩码" : `大端置位=${word.setBits.join("/") || "无"}`;
             addChildHexField(
               fields,
               Number(word.offset),
               4,
-              `body word[${word.index}] raw=${value.rawHex || "-"}；BE=${formatHexValue(value.be32, 8)}(${Number(value.be32)})；LE=${formatHexValue(value.le32, 8)}；${flags}${Number.isFinite(value.floatBe) ? `；floatBE=${Number(value.floatBe).toPrecision(7)}` : ""}`,
+              `正文槽[${word.index}] 原值=${value.rawHex || "-"} · 大端=${formatHexValue(value.be32, 8)}(${Number(value.be32)}) · 小端=${formatHexValue(value.le32, 8)} · ${flags}${Number.isFinite(value.floatBe) ? ` · 大端浮点=${Number(value.floatBe).toPrecision(7)}` : ""}`,
               "bodyWord",
             );
           }
-          addChildHexAnnotation(annotations, valueStart, `body已闭合：${bodyLayout.algebra}；${bodyLayout.label}，具体字段/bit含义待证`);
+          addChildHexAnnotation(annotations, valueStart, `正文闭合：${bodyLayout.algebra} · ${bodyLayout.label}，字段/位含义待证`);
         }
       }
     }
@@ -15159,7 +15166,7 @@ function appendChildBodyLayoutPanel(wrap, bodyLayout) {
   panel.className = "child-body-layout-panel";
   const title = document.createElement("div");
   title.className = "child-body-layout-title";
-  title.textContent = `${bodyLayout.label || "Body结构"} · ${bodyLayout.confidence || "字段待证"}`;
+  title.textContent = `${bodyLayout.label || "正文结构"} · ${bodyLayout.confidence || "字段待证"}`;
   panel.appendChild(title);
   const grid = document.createElement("div");
   grid.className = "child-body-layout-grid";
@@ -15178,18 +15185,18 @@ function appendChildBodyLayoutPanel(wrap, bodyLayout) {
   if (bodyLayout.kind === "periodicProbeTable") {
     const counts = bodyLayout.cadenceCounts || {};
     const global = (bodyLayout.entries || []).find((entry) => Number(entry.probeId) === 0x8000);
-    add("运行tick", `${Number(bodyLayout.tick)}；旧样本换算约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}（仅参考）`);
+    add("运行计时", `${Number(bodyLayout.tick)} · 旧样本约${compactDurationSeconds(bodyLayout.elapsedSecondsHistoricalEstimate)}`);
     add("探测项", `${bodyLayout.entries.length} 项`);
-    add("probe_id", "稀疏枚举键；中间缺号不代表丢包");
+    add("探测ID", "稀疏编号；缺号不代表丢包");
     add("轮次关系", `每轮候选 ${Number(counts.perRound || 0)} · 隔轮候选 ${Number(counts.halfRound || 0)} · 低频/条件 ${Number(counts.sparse || 0)}`);
     add("全局轮次", global ? Number(global.value && global.value.be32) : "未见0x8000");
     add("历史基线", "旧415包：0x8000轮次中位约30.031秒；当前集合待复核");
-    add("边界校验", `selector tick ${bodyLayout.selectorTickMatch ? "匹配" : "不匹配"} · inner pair ${bodyLayout.innerPair.left}/${bodyLayout.innerPair.right}`);
+    add("边界校验", `选择字计时${bodyLayout.selectorTickMatch ? "匹配" : "不匹配"} · 内层16位对 ${bodyLayout.innerPair.left}/${bodyLayout.innerPair.right}`);
   } else {
-    add("字段槽", `${bodyLayout.words.length} × u32`);
+    add("字段槽", `${bodyLayout.words.length} × 32位`);
     add("全0槽", bodyLayout.words.filter((word) => word.allZero).length);
     add("全1槽", bodyLayout.words.filter((word) => word.allOne).length);
-    add("解释边界", "仅确认槽位/位图结构，具体字段与bit含义待证");
+    add("解释边界", "仅确认槽位/位图，字段与位含义待证");
   }
   panel.appendChild(grid);
   wrap.appendChild(panel);
@@ -15233,7 +15240,7 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 	  const title = document.createElement("div");
 	  title.className = "child-hex-title";
 	  const len = Array.isArray(childBytes) ? childBytes.length : 0;
-	  title.textContent = `${childUiTerm("hex")} 完整 child bytes / ${childUiTerm("len")} ${len}`;
+	  title.textContent = `完整字节 · ${len} B`;
 	  wrap.appendChild(title);
 	  appendChildBodyLayoutPanel(wrap, child && child.bodyLayout);
 
@@ -15289,6 +15296,7 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
     const noteParts = [isTimestamp ? "时间戳" : (row.note || "")];
     if (decoded && decoded.note) noteParts.push(decoded.note);
     note.textContent = noteParts.filter(Boolean).join("；");
+    if (note.textContent) note.title = note.textContent;
 
     const ascii = document.createElement("code");
     ascii.className = "child-hex-ascii";
@@ -19820,7 +19828,7 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-tersafe-view .child-hex-offset{display:block;grid-column:1;white-space:nowrap}
     .cs2-tersafe-view .child-hex-bytes{grid-column:2;column-gap:.6ch}
     .cs2-tersafe-view .child-hex-ascii{grid-column:3}
-    .cs2-tersafe-view .child-hex-note{grid-column:4;grid-row:1;min-width:0;padding:0;white-space:normal;overflow-wrap:anywhere;font-size:11px;line-height:1.35}
+    .cs2-tersafe-view .child-hex-note{grid-column:4;grid-row:1;min-width:0;padding:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal;font-size:11px;line-height:1.35}
     .cs2-tersafe-view .cs2-field-report{--cs2-field-tone:#a78bfa}
     .cs2-tersafe-view .cs2-field-time{--cs2-field-tone:#2dd4bf}
     .cs2-tersafe-view .cs2-field-length{--cs2-field-tone:#38bdf8}

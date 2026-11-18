@@ -130,3 +130,43 @@ def test_cs2_shared_card_renders_every_verified_inner_layer() -> None:
     assert "CRC32 通过" in layers
     assert "未展示候选明文" in layers
 
+
+def test_hex_annotations_use_short_chinese_and_stay_on_one_line() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    structure = _packet_function(source, "childHexStructure")
+    table = _packet_function(source, "appendChildFullHexTable")
+    terms = _packet_function(source, "childUiTerm")
+    styles = _packet_function(source, "ensureCS2TersafeCompactStyles")
+
+    for old in (
+        "record start(记录起点)",
+        "record version",
+        "TSS-like framing observed",
+        "record total",
+        "inner len(内部结构长度)",
+        "inner type(shape字段)",
+        "selector0(shape选择字0)",
+        "selector1(shape选择字1)",
+        "inner field(shape字段)",
+    ):
+        assert old not in structure
+    for new in (
+        "记录起点",
+        "TSS帧",
+        "记录长度",
+        "报告码",
+        "候选序号",
+        "内层长度",
+        "内层类型",
+        "选择字0",
+        "选择字1",
+        "内层字段",
+        "非正文首字节",
+    ):
+        assert new in structure
+    assert 'title.textContent = `完整字节 · ${len} B`' in table
+    assert "note.title = note.textContent" in table
+    assert 'report: "报告码"' in terms
+    assert "white-space:nowrap" in styles
+    assert "text-overflow:ellipsis" in styles
+
