@@ -2025,6 +2025,9 @@ function flowLifecycleStateText(time) {
   if (source === "runtime_restart_last_packet") {
     return "MITM 重启时按末包收口（未收到 tcp_end）";
   }
+  if (source === "runtime_restart_boundary") {
+    return "MITM 重启边界收口（未收到 tcp_end）";
+  }
   return "已收口（未收到 tcp_end）";
 }
 
@@ -13503,6 +13506,61 @@ function ensureChildCommonStyles() {
       gap: 10px;
       align-items: start;
     }
+    .child-node-navigator {
+      position: sticky;
+      top: 6px;
+      z-index: 8;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin: 6px;
+      padding: 7px 8px;
+      border: 1px solid color-mix(in srgb, #38bdf8 52%, var(--line));
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--panel) 94%, #0ea5e9 6%);
+      box-shadow: 0 5px 16px color-mix(in srgb, #000 28%, transparent);
+      backdrop-filter: blur(8px);
+    }
+    .child-node-navigator strong {
+      color: color-mix(in srgb, #7dd3fc 82%, var(--text));
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .child-node-navigator select {
+      flex: 1 1 360px;
+      min-width: min(360px, 100%);
+      height: 30px;
+      padding: 0 28px 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--dump-bg);
+      color: var(--text);
+      font: 600 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .child-node-navigator button {
+      min-width: 58px;
+      height: 30px;
+      padding: 0 9px;
+      border: 1px solid color-mix(in srgb, #38bdf8 42%, var(--line));
+      border-radius: 5px;
+      background: color-mix(in srgb, #0ea5e9 9%, var(--panel));
+      color: color-mix(in srgb, #7dd3fc 82%, var(--text));
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .child-node-navigator button:disabled {
+      cursor: default;
+      opacity: .42;
+    }
+    .child-node-nav-target {
+      scroll-margin-top: 58px;
+    }
+    .child-node-nav-flash {
+      outline: 2px solid color-mix(in srgb, #38bdf8 76%, transparent);
+      outline-offset: 2px;
+    }
     .child-pair-card {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
@@ -16342,6 +16400,83 @@ function buildEventTimestampStrip(summaryText, beforeBase64, decodedBase64) {
   return strip;
 }
 
+function childNodeNavigatorLabel(index, beforeChild, afterChild, beforeBytesAll, afterBytesAll) {
+  const child = afterChild || beforeChild || { index };
+  const nodeName = childNodeName(child);
+  const report = childReportText(child);
+  const semantic = String(child && child.semanticLabel || "").trim();
+  const beforeBytes = childBytesFromParsed(beforeBytesAll, beforeChild);
+  const afterBytes = childBytesFromParsed(afterBytesAll, afterChild);
+  const ascii = [...beforeBytes, ...afterBytes]
+    .map((byte) => Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : "\x00")
+    .join("");
+  const facts = [];
+  if (/cs:[^;\x00]{1,240},ob:/i.test(ascii) && /state:[0-9a-f]{8},r:/i.test(ascii)) facts.push("CSOB");
+  for (const name of ["config2.dat", "config3.dat", "comm.zip", "mrpcs_i.data", "mrpcs_i_l.data"]) {
+    if (ascii.toLowerCase().includes(name)) facts.push(name);
+  }
+  return [
+    `第${Number(index) + 1}项`,
+    nodeName,
+    report !== "-" ? report : "",
+    ...facts,
+    semantic,
+  ].filter(Boolean).filter((value, position, values) => values.indexOf(value) === position).join(" · ");
+}
+
+function makeChildNodeNavigator(indices, cardMap, beforeChildren, afterChildren, beforeBytes, afterBytes) {
+  const ordered = Array.isArray(indices) ? indices : [];
+  if (ordered.length <= 0) return null;
+  const nav = document.createElement("div");
+  nav.className = "child-node-navigator";
+  const title = document.createElement("strong");
+  title.textContent = `节点导航 · ${ordered.length}项全部展开`;
+  const previous = document.createElement("button");
+  previous.type = "button";
+  previous.textContent = "上一个";
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "跳转到节点");
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "下一个";
+  ordered.forEach((index, position) => {
+    const option = document.createElement("option");
+    option.value = String(position);
+    option.textContent = childNodeNavigatorLabel(
+      index,
+      beforeChildren[index] || null,
+      afterChildren[index] || null,
+      beforeBytes,
+      afterBytes,
+    );
+    select.appendChild(option);
+  });
+  let activePosition = 0;
+  const updateButtons = () => {
+    previous.disabled = activePosition <= 0;
+    next.disabled = activePosition >= ordered.length - 1;
+  };
+  const jump = (position) => {
+    activePosition = Math.max(0, Math.min(Number(position) || 0, ordered.length - 1));
+    select.value = String(activePosition);
+    updateButtons();
+    const card = cardMap.get(ordered[activePosition]);
+    if (!card) return;
+    card.scrollIntoView({behavior: "smooth", block: "start"});
+    card.classList.add("child-node-nav-flash");
+    window.setTimeout(() => card.classList.remove("child-node-nav-flash"), 900);
+  };
+  previous.addEventListener("click", () => jump(activePosition - 1));
+  next.addEventListener("click", () => jump(activePosition + 1));
+  select.addEventListener("change", () => jump(Number(select.value)));
+  updateButtons();
+  nav.appendChild(title);
+  nav.appendChild(previous);
+  nav.appendChild(select);
+  nav.appendChild(next);
+  return nav;
+}
+
 function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", panelOptions = {}) {
   const suppliedBeforeBytes = Array.isArray(panelOptions && panelOptions.beforeBytes)
     ? panelOptions.beforeBytes : null;
@@ -16392,18 +16527,7 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
   const summaryKv = parseSummaryKeyValues(summaryText);
   const timestampHintMap = parseSummaryChildTimestampHints(summaryText);
   const counts = parseChildSummaryCounts(summaryText);
-  const visibleIndices = [];
-  const addVisibleIndex = (value) => {
-    const index = Number.parseInt(value, 10);
-    if (!Number.isFinite(index) || index < 0 || index >= total) return;
-    if (!visibleIndices.includes(index)) visibleIndices.push(index);
-  };
-  if (actionMap instanceof Map) {
-    Array.from(actionMap.keys()).sort((left, right) => Number(left) - Number(right)).forEach(addVisibleIndex);
-  }
-  for (let index = 0; index < total && visibleIndices.length < 8; index += 1) {
-    addVisibleIndex(index);
-  }
+  const visibleIndices = Array.from({length: total}, (_, index) => index);
   const visible = visibleIndices.length;
   const panel = document.createElement("section");
   panel.className = "child-compare";
@@ -16434,12 +16558,12 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
   addCount("未动", counts.noop);
   addCount("清理", counts.clean);
   meta.textContent = String(panelOptions && panelOptions.meta || "").trim() || (originalOnly
-    ? `当前事件没有 before_pay，按原包/当前结构展示；显示 ${visible}/${total}`
+      ? `当前事件没有 before_pay，按原包/当前结构展示；全部展开 ${visible}/${total}`
     : currentOnly
-      ? `before_pay 存在但未解析出可对应 child；不误标新增/删除，当前结构单栏展示；显示 ${visible}/${total}`
+      ? `before_pay 存在但未解析出可对应 child；不误标新增/删除，当前结构单栏展示；全部展开 ${visible}/${total}`
       : (countBits.length > 0
-        ? `${countBits.join("，")}；显示 ${visible}/${total}`
-        : `按 before/after 对比规则适配和替换结果；显示 ${visible}/${total}`));
+        ? `${countBits.join("，")}；全部展开 ${visible}/${total}`
+        : `按 before/after 对比规则适配和替换结果；全部展开 ${visible}/${total}`));
   head.appendChild(title);
   head.appendChild(meta);
   panel.appendChild(head);
@@ -16449,8 +16573,9 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
 
   const grid = document.createElement("div");
   grid.className = "child-compare-grid";
+  const cardMap = new Map();
   for (const childIndex of visibleIndices) {
-    grid.appendChild(makeChildCard(
+    const card = makeChildCard(
       beforeChildren,
       afterChildren,
       beforeBytes,
@@ -16460,16 +16585,21 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
       summaryKv,
       timestampHintMap,
       { originalOnly, currentOnly, forceSideBySideSame },
-    ));
+    );
+    card.classList.add("child-node-nav-target");
+    cardMap.set(childIndex, card);
+    grid.appendChild(card);
   }
+  const navigator = makeChildNodeNavigator(
+    visibleIndices,
+    cardMap,
+    beforeChildren,
+    afterChildren,
+    beforeBytes,
+    afterBytes,
+  );
+  if (navigator) panel.appendChild(navigator);
   panel.appendChild(grid);
-
-  if (total > visible) {
-    const note = document.createElement("div");
-    note.className = "child-compare-note";
-    note.textContent = `还有 ${total - visible} 个节点未展开显示；当前视图优先展示前 8 个用于快速判断。`;
-    panel.appendChild(note);
-  }
 
   return panel;
 }

@@ -108,19 +108,27 @@ class TcpvRuntime:
                 runtime_started_ts_ms = int(time.time() * 1000)
                 previous_owner_pid = self.store.runtime_owner_pid()
                 cleared_runtime_keys = 0
-                if (
-                    previous_owner_pid != os.getpid()
-                    and _cleanup_previous_on_start_enabled(cleanup_previous_on_start)
-                ):
-                    # An ordinary mitmweb restart defines a new observation
-                    # window.  Explicit opt-out is reserved for recovery or
-                    # forensic preservation.
-                    cleared_runtime_keys = self.store.cleanup_instance()
+                closed_previous_flows = 0
+                if previous_owner_pid != os.getpid():
+                    if _cleanup_previous_on_start_enabled(cleanup_previous_on_start):
+                        # An ordinary mitmweb restart defines a new observation
+                        # window.  Explicit opt-out is reserved for recovery or
+                        # forensic preservation.
+                        cleared_runtime_keys = self.store.cleanup_instance()
+                    else:
+                        closed_previous_flows = self.store.close_open_flows_for_runtime_restart(
+                            runtime_started_ts_ms
+                        )
                 self.store.register_runtime_owner(os.getpid(), runtime_started_ts_ms)
                 if cleared_runtime_keys:
                     logger.info(
                         "cleared %s tcpv redis key(s) from the previous runtime",
                         cleared_runtime_keys,
+                    )
+                if closed_previous_flows:
+                    logger.info(
+                        "closed %s preserved tcpv flow(s) from the previous runtime",
+                        closed_previous_flows,
                     )
                 self._stop_event.clear()
                 self._drop_before_ts_ms = {}

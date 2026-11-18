@@ -1308,6 +1308,30 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertFalse(any(key.startswith("tcpv:lifecycle:") for key in redis_client.hashes))
         self.assertFalse(any(key.startswith("tcpv:lifecycle:") for key in redis_client.streams))
 
+    def test_preserved_runtime_restart_closes_stale_open_flows_without_deleting_history(self):
+        redis_client = FakeRedis()
+        store = TcpvEventStore(redis_client, "lifecycle", ttl_seconds=0, stream_maxlen=0, api_max_limit=10)
+
+        store.register_runtime_owner(100, 9_000)
+        store.mark_flow_start("open", "open-cid", ts_ms=10_000)
+        store.append_event("open", "open-cid", 0, b"request", ts_ms=12_500)
+        store.mark_flow_start("closed", "closed-cid", ts_ms=20_000)
+        store.append_event("closed", "closed-cid", 0, b"request", ts_ms=20_500)
+        store.mark_flow_end("closed", "closed-cid", ts_ms=21_000)
+
+        closed_count = store.close_open_flows_for_runtime_restart(30_000)
+        rows = {row["account"]: row for row in store.list_accounts()}
+
+        self.assertEqual(closed_count, 1)
+        self.assertEqual(rows["open"]["status"], "closed")
+        self.assertFalse(rows["open"]["is_open"])
+        self.assertEqual(rows["open"]["status_source"], "runtime_restart_last_packet")
+        self.assertEqual(rows["open"]["ended_ts"], 12_500)
+        self.assertEqual(rows["open"]["tcp_end_ts"], 0)
+        self.assertEqual(rows["open"]["stream_count"], 1)
+        self.assertEqual(rows["closed"]["status_source"], "tcp_end")
+        self.assertEqual(rows["closed"]["tcp_end_ts"], 21_000)
+
     def test_cleanup_all_instances_unlinks_only_tcpview_namespace(self):
         redis_client = mock.Mock()
         redis_client.scan.side_effect = [

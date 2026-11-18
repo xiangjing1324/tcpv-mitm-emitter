@@ -114,6 +114,54 @@ class TcpvEventStore:
             },
         )
 
+    def close_open_flows_for_runtime_restart(self, restarted_ts_ms: int) -> int:
+        """Close preserved flows that belonged to the previous process.
+
+        A process stop may not deliver tcp_end.  When history preservation is
+        explicitly requested, keep the packets but never display those stale
+        sockets as live in the new runtime.
+        """
+
+        accounts = [self._to_str(item) for item in self.r.smembers(self.accounts_key)]
+        if not accounts:
+            return 0
+        read_pipe = self.r.pipeline()
+        for account in accounts:
+            read_pipe.hgetall(self.meta_key(account))
+        rows = read_pipe.execute()
+
+        write_pipe = self.r.pipeline()
+        closed = 0
+        restart_ts = max(1, int(restarted_ts_ms))
+        for account, raw_meta in zip(accounts, rows):
+            meta = {
+                self._to_str(key): self._to_str(value)
+                for key, value in dict(raw_meta or {}).items()
+            }
+            status = str(meta.get("status", "")).strip().lower()
+            if (
+                status == "closed"
+                or self._to_int(meta.get("tcp_end_ts"), 0) > 0
+                or self._to_int(meta.get("ended_ts"), 0) > 0
+            ):
+                continue
+            last_packet_ts = self._to_int(meta.get("last_packet_ts"), 0)
+            last_ts = self._to_int(meta.get("last_ts"), 0)
+            ended_ts = min(restart_ts, last_packet_ts or last_ts or restart_ts)
+            source = "runtime_restart_last_packet" if last_packet_ts > 0 else "runtime_restart_boundary"
+            write_pipe.hset(
+                self.meta_key(account),
+                mapping={
+                    "status": "closed",
+                    "ended_ts": str(ended_ts),
+                    "status_source": source,
+                },
+            )
+            closed += 1
+        if closed:
+            write_pipe.execute()
+        return closed
+
     def append_event(
         self,
         account: str,

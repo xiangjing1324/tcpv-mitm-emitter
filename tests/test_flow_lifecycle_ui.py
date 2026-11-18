@@ -283,6 +283,17 @@ class FlowLifecycleUiTests(unittest.TestCase):
     def test_ended_timestamp_wins_over_contradictory_open_status(self) -> None:
         self.assertFalse(self.evaluate({"ended_ts": 2000, "status": "open", "last_packet_ts": 999_999})["open"])
 
+    def test_preserved_restart_marker_is_closed_and_explained(self) -> None:
+        result = self.evaluate({
+            "tcp_start_ts": 1000,
+            "ended_ts": 2000,
+            "status": "closed",
+            "status_source": "runtime_restart_last_packet",
+            "last_packet_ts": 2000,
+        })
+        self.assertFalse(result["open"])
+        self.assertIn("MITM 重启时按末包收口", result["stateText"])
+
 
 if __name__ == "__main__":
     unittest.main()

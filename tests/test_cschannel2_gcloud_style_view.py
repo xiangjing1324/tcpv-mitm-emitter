@@ -144,6 +144,24 @@ def test_cs2_shared_card_renders_every_verified_inner_layer() -> None:
     assert "未展示候选明文" in layers
 
 
+def test_child_compare_expands_every_node_and_has_sticky_jump_navigation() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    panel = _packet_function(source, "buildChildComparePanel")
+    navigator = _packet_function(source, "makeChildNodeNavigator")
+
+    assert "Array.from({length: total}, (_, index) => index)" in panel
+    assert "visibleIndices.length < 8" not in panel
+    assert "节点未展开显示" not in source
+    assert "当前视图优先展示前 8 个" not in source
+    assert "makeChildNodeNavigator(" in panel
+    assert "节点导航 · ${ordered.length}项全部展开" in navigator
+    assert 'card.scrollIntoView({behavior: "smooth", block: "start"})' in navigator
+    assert 'previous.textContent = "上一个"' in navigator
+    assert 'next.textContent = "下一个"' in navigator
+    assert ".child-node-navigator {" in source
+    assert "position: sticky" in source
+
+
 def test_hex_annotations_use_short_chinese_and_stay_on_one_line() -> None:
     source = APP_JS.read_text(encoding="utf-8")
     structure = _packet_function(source, "childHexStructure")
