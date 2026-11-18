@@ -14303,21 +14303,68 @@ function ensureChildCommonStyles() {
     }
     .child-hex-insights {
       border-top: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
-      padding: 5px 6px 6px;
+      padding: 6px;
       display: grid;
-      gap: 3px;
+      gap: 2px;
       font-size: 11px;
       line-height: 1.35;
+      background: color-mix(in srgb, var(--panel) 34%, var(--dump-bg));
     }
     .child-hex-insight {
       display: grid;
-      grid-template-columns: 86px minmax(0, 1fr);
+      grid-template-columns: 76px 68px minmax(0, 1fr);
       gap: 8px;
-      color: color-mix(in srgb, var(--text) 82%, var(--muted));
+      align-items: baseline;
+      min-width: 0;
+      padding: 3px 6px;
+      border-left: 2px solid color-mix(in srgb, #38bdf8 32%, transparent);
+      border-radius: 3px;
+      background: color-mix(in srgb, var(--panel) 46%, transparent);
+      color: color-mix(in srgb, var(--text) 88%, var(--muted));
     }
     .child-hex-insight strong {
-      color: var(--text);
-      font-weight: 850;
+      color: color-mix(in srgb, #7dd3fc 74%, var(--text));
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .child-hex-insight-offset {
+      min-width: 0;
+      color: color-mix(in srgb, var(--muted) 86%, var(--text));
+      font: inherit;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+    .child-hex-insight-requestFlag,
+    .child-hex-insight-marker {
+      border-left-color: color-mix(in srgb, #a78bfa 62%, transparent);
+      background: color-mix(in srgb, #8b5cf6 5%, transparent);
+    }
+    .child-hex-insight-requestFlag strong,
+    .child-hex-insight-marker strong {
+      color: color-mix(in srgb, #c4b5fd 82%, var(--text));
+    }
+    .child-hex-insight-cs,
+    .child-hex-insight-ob,
+    .child-hex-insight-incId,
+    .child-hex-insight-obfId {
+      border-left-color: color-mix(in srgb, #38bdf8 56%, transparent);
+    }
+    .child-hex-insight-account {
+      border-left-color: color-mix(in srgb, #f59e0b 62%, transparent);
+      background: color-mix(in srgb, #f59e0b 5%, transparent);
+    }
+    .child-hex-insight-account strong {
+      color: color-mix(in srgb, #fbbf24 84%, var(--text));
+    }
+    .child-hex-insight-state,
+    .child-hex-insight-r,
+    .child-hex-insight-p {
+      border-left-color: color-mix(in srgb, #22c55e 52%, transparent);
+    }
+    .child-hex-insight-state strong,
+    .child-hex-insight-r strong,
+    .child-hex-insight-p strong {
+      color: color-mix(in srgb, #86efac 76%, var(--text));
     }
     .child-hex-insight-string strong,
     .child-hex-insight-string span {
@@ -14375,7 +14422,7 @@ function ensureChildCommonStyles() {
       .child-pair-title { padding: 7px 8px; }
       .child-rail-meta-grid { gap: 3px 10px; }
       .child-preview-box { padding: 7px 8px; }
-      .child-hex-insight { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+      .child-hex-insight { grid-template-columns: 70px 62px minmax(0, 1fr); gap: 5px; }
     }
     @media (max-width: 900px) {
       .dump-grid,
@@ -14796,7 +14843,7 @@ function tssStructuredMetadataInsights(byteValues, reportCode) {
   };
 
   if (byteValues.length > 0x11 && [0x00, 0x01].includes(Number(byteValues[0x11]))) {
-    add("requestFlag", "请求标志 +0x11", 0x11, 1, formatHexValue(byteValues[0x11], 2));
+    add("requestFlag", "请求标志", 0x11, 1, formatHexValue(byteValues[0x11], 2));
   }
   for (let offset = 10; offset + 1 < byteValues.length; offset += 1) {
     const marker = ((Number(byteValues[offset]) & 0xff) << 8) | (Number(byteValues[offset + 1]) & 0xff);
@@ -14826,6 +14873,39 @@ function tssStructuredMetadataInsights(byteValues, reportCode) {
     accountMatch = accountPattern.exec(ascii);
   }
   return items.sort((left, right) => Number(left.offset) - Number(right.offset));
+}
+
+function childOverlayRunDuplicatesStructuredMetadata(run, structuredItems) {
+  const text = normalizeVisibleText(run && run.text ? run.text : "")
+    .replace(/^\x00+|\x00+$/g, "")
+    .trim();
+  if (!text) return false;
+  const items = Array.isArray(structuredItems) ? structuredItems : [];
+  const byKind = new Map(items.map((item) => [String(item && item.kind || ""), String(item && item.value || "")]));
+  if (/^\d{16,32}$/.test(text)) {
+    return byKind.get("account") === text;
+  }
+
+  const patterns = [
+    ["cs", /cs:([^;\x00]*?)(?=,ob:|;|$)/ig],
+    ["ob", /(?:^|,)ob:([^;\x00]*)/ig],
+    ["incId", /(?:^|;)inc_id:([^;\x00]*)/ig],
+    ["obfId", /(?:^|;)obf_id:([^;\x00]*)/ig],
+    ["state", /state:([^,;\x00]*)(?=,r:|;|$)/ig],
+    ["r", /(?:^|,)r:([^;\x00]*?)(?=,p:|;|$)/ig],
+    ["p", /(?:^|,)p:([^;\x00]*)/ig],
+  ];
+  let remainder = text;
+  let matched = 0;
+  for (const [kind, pattern] of patterns) {
+    pattern.lastIndex = 0;
+    remainder = remainder.replace(pattern, (whole, value) => {
+      if (byKind.get(kind) !== String(value || "")) return whole;
+      matched += 1;
+      return "";
+    });
+  }
+  return matched > 0 && remainder.replace(/[,;|\s]+/g, "") === "";
 }
 
 function childHexStructure(child, childBytes, options = {}) {
@@ -15364,12 +15444,16 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
 
   const insights = [];
   const metadataReport = detectTssReport(childBytes);
-  if (metadataReport) {
-    for (const item of tssStructuredMetadataInsights(childBytes, metadataReport.value)) {
+  const structuredInsights = metadataReport
+    ? tssStructuredMetadataInsights(childBytes, metadataReport.value)
+    : [];
+  if (structuredInsights.length > 0) {
+    for (const item of structuredInsights) {
       insights.push({
         kind: item.kind,
         label: item.label,
-        value: `${hexOffsetText(item.offset)} ${item.value}`,
+        offset: hexOffsetText(item.offset),
+        value: item.value,
       });
     }
   }
@@ -15377,20 +15461,26 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
     insights.push({
       kind: "identity",
       label: "18位标识",
-      value: `${hexOffsetText(identityDigestCandidate.identifierStart)}-${hexOffsetText(identityDigestCandidate.identifierEnd - 1)} "${identityDigestCandidate.identifier}"`,
+      offset: `${hexOffsetText(identityDigestCandidate.identifierStart)}-${hexOffsetText(identityDigestCandidate.identifierEnd - 1)}`,
+      value: identityDigestCandidate.identifier,
     });
     insights.push({
       kind: "digest",
       label: "32字符摘要",
-      value: `${hexOffsetText(identityDigestCandidate.digestStart)}-${hexOffsetText(identityDigestCandidate.digestEnd - 1)} "${identityDigestCandidate.digest}"`,
+      offset: `${hexOffsetText(identityDigestCandidate.digestStart)}-${hexOffsetText(identityDigestCandidate.digestEnd - 1)}`,
+      value: identityDigestCandidate.digest,
     });
   }
   if (model.overlay && Array.isArray(model.overlay.runs) && model.overlay.runs.length > 0) {
-    for (const run of model.overlay.runs.slice(0, 8)) {
+    const uniqueRuns = model.overlay.runs.filter((run) => (
+      !childOverlayRunDuplicatesStructuredMetadata(run, structuredInsights)
+    ));
+    for (const run of uniqueRuns.slice(0, 8)) {
       insights.push({
         kind: "string",
         label: model.overlay.label || "string",
-        value: `${hexOffsetText(run.start)}-${hexOffsetText(Math.max(Number(run.start), Number(run.end) - 1))} ${run.kind ? `${run.kind} ` : ""}"${normalizeVisibleText(run.text)}"`,
+        offset: `${hexOffsetText(run.start)}-${hexOffsetText(Math.max(Number(run.start), Number(run.end) - 1))}`,
+        value: `${run.kind ? `${run.kind} ` : ""}${normalizeVisibleText(run.text)}`,
       });
     }
   }
@@ -15409,12 +15499,16 @@ function appendChildFullHexTable(box, child, childBytes, options = {}) {
     for (const insight of insights) {
       const item = document.createElement("div");
       item.className = `child-hex-insight child-hex-insight-${insight.kind || "field"}`;
-      item.title = `${insight.label || ""} ${insight.value || ""}`.trim();
+      item.title = `${insight.label || ""} ${insight.offset || ""} ${insight.value || ""}`.trim();
       const label = document.createElement("strong");
       label.textContent = insight.label || "";
+      const offset = document.createElement("code");
+      offset.className = "child-hex-insight-offset";
+      offset.textContent = insight.offset || "";
       const value = document.createElement("span");
       value.textContent = insight.value || "";
       item.appendChild(label);
+      item.appendChild(offset);
       item.appendChild(value);
       insightBox.appendChild(item);
     }

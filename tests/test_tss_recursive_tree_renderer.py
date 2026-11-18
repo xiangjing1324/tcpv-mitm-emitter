@@ -269,3 +269,61 @@ console.log(JSON.stringify({{ ok: true, report: report.value, fields: items.leng
     assert parsed["ok"] is True
     assert parsed["report"] == 0x01112388
     assert parsed["fields"] >= 10
+
+
+def test_structured_metadata_hides_only_duplicate_ascii_summary(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if not node:
+        raise AssertionError("node is required for the focused TCPView metadata test")
+
+    source = APP_JS.read_text(encoding="utf-8")
+    assert 'add("requestFlag", "请求标志", 0x11' in source
+    assert 'offset.className = "child-hex-insight-offset";' in source
+    functions = "\n\n".join(
+        _extract_function(source, name)
+        for name in (
+            "tssStructuredMetadataInsights",
+            "childOverlayRunDuplicatesStructuredMetadata",
+        )
+    )
+    program = f"""
+function formatHexValue(value, width) {{ return '0x' + Number(value).toString(16).padStart(Number(width || 0), '0'); }}
+function normalizeVisibleText(value) {{ return String(value || '').replace(/\\s+/g, ' ').trim(); }}
+{functions}
+const bytes = new Array(280).fill(0);
+bytes.splice(0, 10, 0, 0, 0, 1, 1, 24, 1, 0x11, 0x23, 0x88);
+bytes[0x11] = 1;
+bytes[0x30] = 0x50;
+bytes[0x31] = 0x73;
+function put(offset, text) {{
+  for (let i = 0; i < text.length; i += 1) bytes[offset + i] = text.charCodeAt(i);
+}}
+put(0x35, 'cs:00000000/00000000,ob:46/dc/c4/0/5;inc_id:11;obf_id:11');
+put(0x95, '15802830196042628030');
+put(0xaf, 'state:00201135,r:0/0/0/0/0/0/0,p:14216/15032,0');
+const items = tssStructuredMetadataInsights(bytes, 0x01112388);
+const duplicateRuns = [
+  {{text: 'cs:00000000/00000000,ob:46/dc/c4/0/5;inc_id:11;obf_id:11'}},
+  {{text: '15802830196042628030'}},
+  {{text: 'state:00201135,r:0/0/0/0/0/0/0,p:14216/15032,0'}},
+];
+if (!duplicateRuns.every((run) => childOverlayRunDuplicatesStructuredMetadata(run, items))) {{
+  throw new Error('known structured ASCII was not suppressed');
+}}
+const usefulRuns = [
+  {{text: 'model:iPad14,5;ver:16.10;inc_id:11;obf_id:11'}},
+  {{text: 'config2.dat'}},
+  {{text: 'unparsed-extra-text'}},
+];
+if (usefulRuns.some((run) => childOverlayRunDuplicatesStructuredMetadata(run, items))) {{
+  throw new Error('useful unknown ASCII was suppressed');
+}}
+console.log(JSON.stringify({{ok: true, fields: items.length}}));
+"""
+    harness = tmp_path / "structured-metadata-dedupe.js"
+    harness.write_text(program, encoding="utf-8")
+    result = subprocess.run([node, str(harness)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    parsed = json.loads(result.stdout)
+    assert parsed["ok"] is True
+    assert parsed["fields"] >= 10
