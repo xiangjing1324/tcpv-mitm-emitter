@@ -86,11 +86,24 @@ def test_cs2_preview_facts_report_node_index_and_exact_resource_names() -> None:
     assert result.returncode == 0, result.stderr
     facts, negative = json.loads(result.stdout)
     assert facts == [
-        {"label": "CSOB", "value": "node[8]"},
-        {"label": "资源", "value": "config2.dat · node[8]"},
-        {"label": "资源", "value": "config3.dat · node[8]"},
+        {"label": "CSOB", "value": "第9项（node[8]）"},
+        {"label": "资源", "value": "config2.dat · 第9项（node[8]）"},
+        {"label": "资源", "value": "config3.dat · 第9项（node[8]）"},
     ]
     assert negative == []
+
+
+def test_unverified_2001_2011_word_decoders_are_not_rendered() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+
+    for retired in (
+        "fixedWordBlock",
+        "bitmapWordBlock",
+        "固定字状态探测块",
+        "位图/能力掩码探测块",
+        "正文槽[",
+    ):
+        assert retired not in source
 
 
 def test_cs2_facts_live_on_the_collapsed_summary_not_inside_expanded_preview() -> None:

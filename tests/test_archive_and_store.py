@@ -655,7 +655,7 @@ class ArchiveAndStoreTests(unittest.TestCase):
         self.assertEqual(layout["probe_id_registry"], "sparse_enum_not_sequence")
         self.assertEqual(layout["historical_reference"]["sample_count"], 415)
 
-    def test_2001_and_2011_bodies_render_as_word_layouts_not_xor_text(self):
+    def test_2001_and_2011_bodies_remain_opaque_without_invented_word_semantics(self):
         words_2001 = [0x00000001, 0x00000005, 0x00004000, 0x00000000]
         body_2001 = b"".join(value.to_bytes(4, "big") for value in words_2001)
         record_2001 = _typed_record(
@@ -667,10 +667,11 @@ class ArchiveAndStoreTests(unittest.TestCase):
             body=body_2001,
         )
         packet_2001 = analyze_payload(record_2001, direction=0)["packet"]
-        self.assertEqual(packet_2001["semantic_category"], "telemetry.binary_probe.words")
-        self.assertEqual(packet_2001["body_layout"]["kind"], "fixed_word_block")
-        self.assertEqual(packet_2001["body_layout"]["layout_algebra"], "4×u32 = 16")
-        self.assertEqual([word["value"]["be32"] for word in packet_2001["body_layout"]["words"]], words_2001)
+        self.assertEqual(packet_2001["semantic_category"], "unknown")
+        self.assertEqual(packet_2001["semantic_label_zh"], "未解析二进制数据")
+        self.assertEqual(packet_2001["body_layout"]["kind"], "opaque_typed_binary")
+        self.assertNotIn("words", packet_2001["body_layout"])
+        self.assertNotIn("layout_algebra", packet_2001["body_layout"])
 
         words_2011 = [0x223D8000, 0, 0, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF]
         body_2011 = b"".join(value.to_bytes(4, "big") for value in words_2011)
@@ -683,10 +684,11 @@ class ArchiveAndStoreTests(unittest.TestCase):
             body=body_2011,
         )
         packet_2011 = analyze_payload(record_2011, direction=0)["packet"]
-        self.assertEqual(packet_2011["semantic_category"], "telemetry.binary_probe.bitmap")
-        self.assertEqual(packet_2011["body_layout"]["kind"], "bitmap_word_block")
-        self.assertEqual(packet_2011["body_layout"]["layout_algebra"], "8×u32 = 32")
-        self.assertEqual(sum(bool(word["all_one"]) for word in packet_2011["body_layout"]["words"]), 5)
+        self.assertEqual(packet_2011["semantic_category"], "unknown")
+        self.assertEqual(packet_2011["semantic_label_zh"], "未解析二进制数据")
+        self.assertEqual(packet_2011["body_layout"]["kind"], "opaque_typed_binary")
+        self.assertNotIn("words", packet_2011["body_layout"])
+        self.assertNotIn("layout_algebra", packet_2011["body_layout"])
 
     def test_child_semantics_have_broad_categories_instead_of_family_unknown(self):
         opaque_metadata = _metadata_record(0x01122342, b"\x01\x02\x03\x04")

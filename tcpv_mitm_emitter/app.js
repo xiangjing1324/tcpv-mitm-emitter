@@ -3983,34 +3983,9 @@ function parseTypedBodyStructure(record, layout) {
     };
   }
 
-  if ([0x2001, 0x2011].includes(innerType) && bodyLen > 0 && bodyLen % 4 === 0) {
-    const words = [];
-    for (let offset = bodyStart; offset + 3 < bodyEnd; offset += 4) {
-      const value = typedRaw32Views(record, offset);
-      const setBits = [];
-      for (let bit = 0; bit < 32; bit += 1) {
-        if ((Number(value.be32) >>> bit) & 1) setBits.push(bit);
-      }
-      words.push({
-        index: words.length,
-        offset,
-        value,
-        setBits,
-        allZero: Number(value.be32) === 0,
-        allOne: Number(value.be32) === 0xffffffff,
-      });
-    }
-    const isBitmap = innerType === 0x2011;
-    return {
-      kind: isBitmap ? "bitmapWordBlock" : "fixedWordBlock",
-      label: isBitmap ? "位图/能力掩码探测块" : "固定字状态探测块",
-      confidence: "结构已确认 / 字段含义待证",
-      bodyStart,
-      bodyLen,
-      algebra: `${words.length}×u32 = ${bodyLen}`,
-      words,
-    };
-  }
+  // 0x2001/0x2011 only prove an opaque typed body.  Do not invent u32 slots,
+  // endian values, floats or bitmap semantics without protocol evidence.
+  if ([0x2001, 0x2011].includes(innerType)) return null;
   return null;
 }
 
@@ -11871,9 +11846,6 @@ function formatRecordValuePreview(byteValues, reportCode) {
     if (bodyLayout && bodyLayout.kind === "periodicProbeTable") {
       return `结构:tick=${Number(bodyLayout.tick)} entries=${bodyLayout.entries.length} ${bodyLayout.algebra}`;
     }
-    if (bodyLayout && ["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
-      return `结构:${bodyLayout.label} words=${bodyLayout.words.length} ${bodyLayout.algebra}`;
-    }
   }
   const runs = extractPrintableRuns(byteValues, 3, 4);
   const text = runs
@@ -11957,22 +11929,13 @@ function localChildSemanticProfile(record, reportCode) {
         ["body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "relative_to_probe_0x8000"],
       );
     }
-    if (bodyLayout && bodyLayout.kind === "fixedWordBlock") {
+    if ([0x2001, 0x2011].includes(Number(layout.innerType))) {
       return semanticProfileValue(
-        "fixed_probe_word_block",
-        "telemetry.binary_probe.words",
-        "固定字状态探测块（字段含义待证）",
-        "observed",
-        ["body_u32_slots", "inner_type_0x2001", "full_shape"],
-      );
-    }
-    if (bodyLayout && bodyLayout.kind === "bitmapWordBlock") {
-      return semanticProfileValue(
-        "probe_bitmap_or_capability_mask",
-        "telemetry.binary_probe.bitmap",
-        "位图/能力掩码探测块（bit 含义待证）",
-        "observed",
-        ["body_u32_slots", "zero_and_ffffffff_masks", "inner_type_0x2011", "full_shape"],
+        "opaque_typed_binary",
+        "unknown",
+        "未解析二进制数据",
+        "unknown",
+        ["full_shape", "field_meaning_unverified"],
       );
     }
     const xorLower = semanticAsciiView(xorByteValues(body, 0xb6)).toLowerCase();
@@ -13157,18 +13120,6 @@ function bodyLayoutSemanticLines(bodyLayout) {
     if (typed) lines.push(`typed_values=typed raw32 ${typed}`);
     return lines;
   }
-  if (["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
-    const words = (Array.isArray(bodyLayout.words) ? bodyLayout.words : [])
-      .map((word) => {
-        const suffix = word.allZero ? "全0" : word.allOne ? "全1" : `置位bit=${word.setBits.join("/") || "无"}`;
-        return `w${word.index}=${word.value.be32Hex || formatHexValue(word.value.be32, 8)}(${suffix})`;
-      })
-      .join("，");
-    return [
-      `body=布局 ${bodyLayout.algebra}；${bodyLayout.label} [${bodyLayout.confidence}]`,
-      `words=${words}`,
-    ];
-  }
   return [];
 }
 
@@ -13222,6 +13173,9 @@ function compactSemanticSignal(text) {
 function splitChildSemanticRows(child) {
   const primaryRows = [];
   const debugLines = [];
+  if ([0x2001, 0x2011].includes(Number(child && child.typedLayout && child.typedLayout.innerType))) {
+    return { primaryRows, debugLines };
+  }
   const xorSignal = compactSemanticSignal(child && child.xorCommonPreview ? child.xorCommonPreview : "");
   for (const line of childSemanticLines(child)) {
     if (line.startsWith("semantic=")) {
@@ -15103,19 +15057,6 @@ function childHexStructure(child, childBytes, options = {}) {
             );
           }
           addChildHexAnnotation(annotations, valueStart, `正文闭合：${bodyLayout.algebra} · 计时32位 + ${bodyLayout.entries.length}×（探测ID16位 + 原值32位）`);
-        } else if (bodyLayout && ["fixedWordBlock", "bitmapWordBlock"].includes(bodyLayout.kind)) {
-          for (const word of bodyLayout.words) {
-            const value = word.value || {};
-            const flags = word.allZero ? "全0" : word.allOne ? "全1/FFFF掩码" : `大端置位=${word.setBits.join("/") || "无"}`;
-            addChildHexField(
-              fields,
-              Number(word.offset),
-              4,
-              `正文槽[${word.index}] 原值=${value.rawHex || "-"} · 大端=${formatHexValue(value.be32, 8)}(${Number(value.be32)}) · 小端=${formatHexValue(value.le32, 8)} · ${flags}${Number.isFinite(value.floatBe) ? ` · 大端浮点=${Number(value.floatBe).toPrecision(7)}` : ""}`,
-              "bodyWord",
-            );
-          }
-          addChildHexAnnotation(annotations, valueStart, `正文闭合：${bodyLayout.algebra} · ${bodyLayout.label}，字段/位含义待证`);
         }
       }
     }
@@ -19544,7 +19485,8 @@ function cs2SharedComparableFields(item, source, bodyOffset) {
 function cs2SharedPreviewFacts(records, index) {
   const sources = Array.isArray(records) && Array.isArray(records[0]) ? records : [records];
   const facts = [];
-  const node = `node[${Number(index)}]`;
+  const zeroBasedIndex = Number(index);
+  const node = `第${zeroBasedIndex + 1}项（node[${zeroBasedIndex}]）`;
   const texts = sources.map((record) => (Array.isArray(record) ? record : [])
     .map((byte) => Number(byte) >= 32 && Number(byte) < 127 ? String.fromCharCode(Number(byte)) : "\x00")
     .join(""));

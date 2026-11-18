@@ -266,23 +266,14 @@ def _payload_semantic_profile(report_code: int, record: bytes) -> dict[str, Any]
                 "high",
                 ("body_len_4_plus_n_times_6", "u16_probe_id_raw32_value", "historical_monotonic_tick", "relative_to_probe_0x8000"),
             )
-        if body_layout and body_layout.get("kind") == "fixed_word_block":
+        if int(layout.get("inner_type") or 0) in {0x2001, 0x2011}:
             return _semantic_profile(
-                "fixed_probe_word_block",
-                "telemetry.binary_probe.words",
-                "固定字状态探测块（字段含义待证）",
-                "observed",
-                "observed",
-                ("body_u32_slots", "inner_type_0x2001", "full_shape"),
-            )
-        if body_layout and body_layout.get("kind") == "bitmap_word_block":
-            return _semantic_profile(
-                "probe_bitmap_or_capability_mask",
-                "telemetry.binary_probe.bitmap",
-                "位图/能力掩码探测块（bit 含义待证）",
-                "observed",
-                "observed",
-                ("body_u32_slots", "zero_and_ffffffff_masks", "inner_type_0x2011", "full_shape"),
+                "opaque_typed_binary",
+                "unknown",
+                "未解析二进制数据",
+                "unknown",
+                "unknown",
+                ("full_shape", "field_meaning_unverified"),
             )
 
         raw_text, xor_text = _typed_leaf_text_views(data, layout)
@@ -715,36 +706,14 @@ def _parse_typed_body_structure(record: bytes, layout: dict[str, int] | None) ->
             ],
         }
 
-    if inner_type in {0x2001, 0x2011} and len(body) > 0 and len(body) % 4 == 0:
-        words = []
-        for rel in range(0, len(body), 4):
-            views = _typed_u32_views(body[rel : rel + 4])
-            be32 = int(views.get("be32") or 0)
-            words.append(
-                {
-                    "index": len(words),
-                    "offset": start + rel,
-                    "value": views,
-                    "set_bits_be": [bit for bit in range(32) if be32 & (1 << bit)],
-                    "all_zero": be32 == 0,
-                    "all_one": be32 == 0xFFFFFFFF,
-                }
-            )
-        is_bitmap = inner_type == 0x2011
+    if inner_type in {0x2001, 0x2011}:
         return {
-            "kind": "bitmap_word_block" if is_bitmap else "fixed_word_block",
-            "label_zh": "位图/能力掩码探测块" if is_bitmap else "固定字状态探测块",
-            "confidence": "confirmed_structure",
+            "kind": "opaque_typed_binary",
+            "label_zh": "未解析二进制数据",
+            "confidence": "unknown",
             "body_offset": start,
             "body_len": len(body),
-            "layout_algebra": f"{len(words)}×u32 = {len(body)}",
-            "word_count": len(words),
-            "words": words,
-            "evidence": [
-                "body_len_multiple_of_4",
-                "fixed_shape_word_slots",
-                "all_zero_and_all_one_masks" if is_bitmap else "mixed_scalar_or_mask_words",
-            ],
+            "evidence": ["field_meaning_unverified"],
         }
 
     words: list[dict[str, Any]] = []
