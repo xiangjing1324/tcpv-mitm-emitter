@@ -57,6 +57,55 @@ def test_cs2_shared_card_keeps_the_complete_application_item_and_field_boundarie
         assert label in source
 
 
+def test_cs2_mrpc_empty_ack_is_game_agnostic_and_exposes_fixed_fields() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    detector = _packet_function(source, "cs2MrpcEmptyAckInfo")
+    samples = [
+        # DFM
+        bytes.fromhex(
+            "03 04 14 fa 5c 00 64 00 00 16 4f 02 08 b0 76 01 "
+            "c0 b9 70 b3 b5 7a 84 03 e9 00 00 6a fd 9c f8 00 "
+            "00 00 00 00 00 00 02 00 00 00 00"
+        ),
+        # DFM
+        bytes.fromhex(
+            "03 04 14 a7 be d6 a4 00 00 16 4f 02 08 c9 95 01 "
+            "c0 b9 70 b3 cd d7 b3 03 e9 00 00 6a fd 9f 78 00 "
+            "00 00 00 00 00 00 02 00 00 00 00"
+        ),
+        # UAGame: same MRPC empty-ack structure, different 20-byte association field.
+        bytes.fromhex(
+            "03 04 14 5f db 06 cd 00 00 16 4f 01 da 99 ad 01 "
+            "b1 e2 89 09 37 65 18 03 e9 00 00 6a fd ab 28 00 "
+            "00 00 00 00 00 00 02 00 00 00 00"
+        ),
+    ]
+    negative = bytearray(samples[0])
+    negative[38] = 1
+    script = (
+        detector
+        + "\nconsole.log(JSON.stringify(["
+        + ",".join(f"cs2MrpcEmptyAckInfo({json.dumps(list(sample))})" for sample in samples)
+        + f",cs2MrpcEmptyAckInfo({json.dumps(list(negative))})"
+        + "]));\n"
+    )
+    result = subprocess.run(["node"], input=script, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    first, second, third, rejected = json.loads(result.stdout)
+    assert [first["status"], second["status"], third["status"]] == [2, 2, 2]
+    assert [first["bodyLength"], second["bodyLength"], third["bodyLength"]] == [0, 0, 0]
+    assert first["associationHex"] == "0xfa5c00640000164f0208b07601c0b970b3b57a84"
+    assert third["associationHex"] == "0x5fdb06cd0000164f01da99ad01b1e28909376518"
+    assert rejected is None
+
+    fields = _packet_function(source, "cs2FieldRows")
+    adapter = _packet_function(source, "cs2SharedComparableChild")
+    assert 'label: "MRPC 关联字段"' in fields
+    assert 'label: "确认状态"' in fields
+    assert 'child.semanticLabel = "MRPC 空确认"' in adapter
+    assert 'child.semanticRole = "mrpc_empty_ack"' in adapter
+
+
 def test_csob_filter_loads_complete_payloads_before_filtering() -> None:
     source = APP_JS.read_text(encoding="utf-8")
     sync = _packet_function(source, "syncLatestEvents")
