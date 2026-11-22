@@ -29,6 +29,8 @@ def test_cs2_verified_handshake_uses_secret_free_status_labels() -> None:
     panel = _packet_function(source, "buildCSChannel2Panel")
     handshake_panel = _packet_function(source, "buildCS2HandshakePanel")
     handshake_view = _packet_function(source, "cs2HandshakePresentationView")
+    handshake_node = _packet_function(source, "cs2HandshakeNodeSection")
+    handshake_meta = _packet_function(source, "appendCS2HandshakeNodeMeta")
     summary = _packet_function(source, "buildCS2SummaryInsightStrip")
     display = _packet_function(source, "cs2SummaryDisplaySource")
 
@@ -44,9 +46,15 @@ def test_cs2_verified_handshake_uses_secret_free_status_labels() -> None:
     assert "handshake_verify=c8_" in display
     assert "buildCS2HandshakePanel" in panel
     assert "if (handshakePanel) return handshakePanel" in panel
-    assert '"Base64 严格解码结构"' in handshake_panel
-    assert 'labels.push("票据未解密")' in handshake_panel
-    assert 'return `${node.length} B · 值不展示`' in source
+    assert "makeCS2TersafeRecordCard" in handshake_panel
+    assert "appendCS2CurrentPlaintext" in handshake_panel
+    assert 'title:"node[0] 预览"' in handshake_node
+    assert "cs2FieldRows" in handshake_node
+    assert "redacted:true" in handshake_node
+    assert '["消息", role === "request" ? "握手 1" : "握手 2"' in handshake_meta
+    assert '["用途", role === "request" ? "客户端请求握手"' in handshake_meta
+    assert "cs2HandshakeFieldRow" not in source
+    assert "cs2HandshakeStructureCard" not in source
     assert 'presentation.schema !== "tcpv.cschannel2.presentation.v1"' in handshake_view
     assert 'presentation.exact_partition !== true' in handshake_view
     for forbidden in ("c8_hex", "s8_hex", "c8_value", "s8_value"):
