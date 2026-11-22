@@ -18685,7 +18685,9 @@ function cs2SummaryDisplaySource(ev) {
     return {payloadKey: "full_pay", prefixKey: "full_pfx", length: Number(ev.full_len), label: "应用明文"};
   }
   if (Number(ev.raw_len) > 0 && (ev.raw_pfx || ev.raw_pay)) {
-    const handshakeVerified = analysis?.handshake_verification?.status === "verified";
+    const handshakeVerified = analysis?.handshake_verification?.status === "verified"
+      || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
+        .test(String(ev?.summary || ""));
     return {payloadKey: "raw_pay", prefixKey: "raw_pfx", length: Number(ev.raw_len),
       label: handshakeVerified ? "握手已验证" : "线上帧"};
   }
@@ -18816,7 +18818,9 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
   const summary = String(summaryText || ev?.summary || "");
   const decoded = /(?:^|\s)status=decoded(?=\s|$)/.test(summary);
   const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
-  const handshakeVerified = analysis?.handshake_verification?.status === "verified";
+  const handshakeVerified = analysis?.handshake_verification?.status === "verified"
+    || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
+      .test(summary);
   const { counts, partial } = cs2CompactReportCounts(ev, summary);
   const rows = [...counts].sort(([a, na], [b, nb]) => (
     Number(b === "0x0102000a") - Number(a === "0x0102000a") || nb - na

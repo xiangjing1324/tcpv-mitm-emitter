@@ -38,6 +38,8 @@ def test_cs2_verified_handshake_uses_secret_free_status_labels() -> None:
     assert 'ticket 保持不透明' in panel
     assert 'handshakeVerified ? " · 已验证" : ""' in summary
     assert 'label: handshakeVerified ? "握手已验证" : "线上帧"' in display
+    assert "handshake_verify=c8_" in summary
+    assert "handshake_verify=c8_" in display
     for forbidden in ("c8_hex", "s8_hex", "c8_value", "s8_value"):
         assert forbidden not in panel
 
