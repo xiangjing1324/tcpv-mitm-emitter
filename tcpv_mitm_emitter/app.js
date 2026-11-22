@@ -18685,7 +18685,9 @@ function cs2SummaryDisplaySource(ev) {
     return {payloadKey: "full_pay", prefixKey: "full_pfx", length: Number(ev.full_len), label: "应用明文"};
   }
   if (Number(ev.raw_len) > 0 && (ev.raw_pfx || ev.raw_pay)) {
-    return {payloadKey: "raw_pay", prefixKey: "raw_pfx", length: Number(ev.raw_len), label: "线上帧"};
+    const handshakeVerified = analysis?.handshake_verification?.status === "verified";
+    return {payloadKey: "raw_pay", prefixKey: "raw_pfx", length: Number(ev.raw_len),
+      label: handshakeVerified ? "握手已验证" : "线上帧"};
   }
   return null;
 }
@@ -18813,6 +18815,8 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
   ensureCS2TersafeCompactStyles();
   const summary = String(summaryText || ev?.summary || "");
   const decoded = /(?:^|\s)status=decoded(?=\s|$)/.test(summary);
+  const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
+  const handshakeVerified = analysis?.handshake_verification?.status === "verified";
   const { counts, partial } = cs2CompactReportCounts(ev, summary);
   const rows = [...counts].sort(([a, na], [b, nb]) => (
     Number(b === "0x0102000a") - Number(a === "0x0102000a") || nb - na
@@ -18821,7 +18825,8 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
   const type = /(?:^|\s)type=([127])(?=\s|$)/.exec(summary)?.[1];
   const text = rows.length
     ? `${rows.slice(0, 2).map(row => label(row)).join(" · ")}${rows.length > 2 ? ` +${rows.length - 2}` : ""}`
-    : decoded ? "已解密" : type === "1" || type === "2" ? `握手 ${type}` : "线上帧";
+    : decoded ? "已解密" : type === "1" || type === "2"
+      ? `握手 ${type}${handshakeVerified ? " · 已验证" : ""}` : "线上帧";
   const strip = document.createElement("span");
   strip.className = "summary-insights cs2-summary-insights";
   const chip = document.createElement("span");
@@ -20029,6 +20034,8 @@ function buildCSChannel2Panel(ev) {
   const plaintext = analysis.plaintext_presentation || {};
   const after = cs2VerifiedApplicationBytes(ev);
   const verified = after.length > 0;
+  const handshakeVerification = analysis.handshake_verification || {};
+  const handshakeVerified = handshakeVerification.status === "verified";
   const unchanged = verified && analysis.mutation?.modified === false && analysis.mutation?.wire_mutated === false;
   const candidate = verified && !unchanged ? cs2BeforeApplicationBytes(ev, analysis, after) : [];
   const before = candidate.length === after.length && candidate.every((byte, i) => byte === after[i])
@@ -20054,10 +20061,16 @@ function buildCSChannel2Panel(ev) {
     afterParsed: afterComparable.parsed,
     forceCurrentOnly: beforeComparable.bytes.length === 0,
     forceSideBySideSame: beforeComparable.bytes.length > 0,
-    title: beforeComparable.bytes.length > 0 ? "叶子节点替换观察" : (verified ? "当前叶子结构" : "当前线上帧"),
+    title: beforeComparable.bytes.length > 0 ? "叶子节点替换观察"
+      : verified ? "当前叶子结构"
+      : handshakeVerified ? "握手已验证" : "当前线上帧",
     meta: beforeComparable.bytes.length > 0
       ? `修改前 ${beforeComparable.bytes.length}B · 修改后 ${afterComparable.bytes.length}B`
-      : `${afterComparable.bytes.length}B`,
+      : handshakeVerified
+        ? `${handshakeVerification.c8_rsa_exact_match === true
+          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"}${handshakeVerification.role === "response"
+          ? " · S8 字段已观察" : ""} · ticket 保持不透明 · ${afterComparable.bytes.length}B`
+        : `${afterComparable.bytes.length}B`,
   });
   if (panel) panel.classList.add("cs2-panel");
   return panel;
