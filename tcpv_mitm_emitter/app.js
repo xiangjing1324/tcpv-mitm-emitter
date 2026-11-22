@@ -19536,6 +19536,32 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
     .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
+    .cs2-handshake-panel .cs2-handshake-verification{display:flex;flex-wrap:wrap;gap:6px;padding:8px;border-bottom:1px solid var(--line);background:color-mix(in srgb,#8276c8 7%,var(--panel))}
+    .cs2-handshake-panel .cs2-handshake-verification>span{padding:2px 7px;border:1px solid color-mix(in srgb,#8276c8 42%,var(--line));border-radius:999px;color:color-mix(in srgb,#bdb4fa 82%,var(--text));background:color-mix(in srgb,#8276c8 10%,transparent);font-size:11px;font-weight:650}
+    .cs2-handshake-panel .cs2-handshake-card-note{padding:6px 9px;border-bottom:1px solid color-mix(in srgb,var(--line) 66%,transparent);color:var(--muted);font-size:11px;line-height:1.4}
+    .cs2-handshake-panel .cs2-handshake-fields{display:grid;gap:1px;padding:5px;background:color-mix(in srgb,var(--line) 30%,transparent)}
+    .cs2-handshake-panel .cs2-handshake-field{min-width:0;border-radius:4px;background:var(--panel)}
+    .cs2-handshake-panel details.cs2-handshake-field>summary{list-style:none;cursor:pointer}
+    .cs2-handshake-panel details.cs2-handshake-field>summary::-webkit-details-marker{display:none}
+    .cs2-handshake-panel details.cs2-handshake-field>.cs2-handshake-field-head::before{content:"▸";color:var(--muted);font-size:10px}
+    .cs2-handshake-panel details.cs2-handshake-field[open]>.cs2-handshake-field-head::before{content:"▾"}
+    .cs2-handshake-panel div.cs2-handshake-field>.cs2-handshake-field-head::before{content:""}
+    .cs2-handshake-panel .cs2-handshake-field-head{display:grid;grid-template-columns:11px 12.5ch minmax(13em,1fr) minmax(7em,max-content) max-content;align-items:center;gap:7px;min-height:28px;padding:4px 7px;font-size:12px}
+    .cs2-handshake-panel .cs2-handshake-field-offset{color:var(--muted);font-size:10px;white-space:nowrap}
+    .cs2-handshake-panel .cs2-handshake-field-name{min-width:0;font-weight:650;overflow-wrap:anywhere}
+    .cs2-handshake-panel .cs2-handshake-field-value{min-width:0;color:color-mix(in srgb,#64d8cb 70%,var(--text));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .cs2-handshake-panel .cs2-handshake-field-status{padding:1px 5px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;white-space:nowrap}
+    .cs2-handshake-panel .cs2-handshake-field-verified>.cs2-handshake-field-head>.cs2-handshake-field-status{color:#7ee787;border-color:#3fb95055;background:#23863618}
+    .cs2-handshake-panel .cs2-handshake-field-unparsed>.cs2-handshake-field-head>.cs2-handshake-field-status{color:#d2a8ff;border-color:#a371f755;background:#8957e518}
+    .cs2-handshake-panel .cs2-handshake-field-description{padding:0 8px 6px calc(12.5ch + 32px);color:var(--muted);font-size:11px;line-height:1.4}
+    .cs2-handshake-panel .cs2-handshake-field-hex{display:block;margin:0 8px 6px calc(12.5ch + 32px);color:#79c0ff;font-size:11px;overflow-wrap:anywhere}
+    .cs2-handshake-panel .cs2-handshake-field-children{display:grid;gap:1px;margin:0 5px 5px 20px;padding-left:5px;border-left:1px solid color-mix(in srgb,#8276c8 42%,var(--line));background:color-mix(in srgb,var(--line) 22%,transparent)}
+    @media (max-width:760px){
+      .cs2-handshake-panel .cs2-handshake-field-head{grid-template-columns:11px 10.5ch minmax(0,1fr) max-content}
+      .cs2-handshake-panel .cs2-handshake-field-value{grid-column:3/5;white-space:normal}
+      .cs2-handshake-panel .cs2-handshake-field-status{grid-column:4;grid-row:1}
+      .cs2-handshake-panel .cs2-handshake-field-description,.cs2-handshake-panel .cs2-handshake-field-hex{margin-left:12px;padding-left:12px}
+    }
   `;
   document.head.appendChild(style);
 }
@@ -20032,6 +20058,162 @@ function cs2WireFrameBytes(ev, analysis) {
   return [];
 }
 
+function cs2ValidHandshakeTree(node, coordinateSpace, length, budget = {value: 512}) {
+  if (!node || typeof node !== "object" || --budget.value < 0
+      || node.coordinate_space !== coordinateSpace
+      || !Number.isSafeInteger(node.offset) || !Number.isSafeInteger(node.end)
+      || node.offset < 0 || node.end < node.offset || node.end > length
+      || node.length !== node.end - node.offset
+      || !["container", "group", "field", "opaque"].includes(String(node.kind || "field"))
+      || !["observed", "verified", "unparsed", "invalid"].includes(String(node.status || "observed"))) return false;
+  const children = Array.isArray(node.children) ? node.children : [];
+  if (!children.length) return true;
+  let cursor = node.offset;
+  for (const child of children) {
+    if (!cs2ValidHandshakeTree(child, coordinateSpace, length, budget)
+        || child.offset !== cursor || child.end > node.end) return false;
+    cursor = child.end;
+  }
+  return cursor === node.end;
+}
+
+function cs2HandshakePresentationView(analysis, wireBytes) {
+  const presentation = analysis?.presentation;
+  if (!presentation || presentation.schema !== "tcpv.cschannel2.presentation.v1"
+      || presentation.source !== "dfm_live_wire"
+      || presentation.coordinate_space !== "wire_frame"
+      || presentation.exact_partition !== true
+      || presentation.actual_length !== wireBytes.length
+      || presentation.declared_length_matches !== true
+      || !cs2ValidHandshakeTree(presentation.root, "wire_frame", wireBytes.length)) return null;
+  let component = null;
+  const stored = presentation.handshake_component;
+  if (stored?.schema === "tcpv.cschannel2.handshake-component.v1"
+      && stored.coordinate_space === "handshake_component_decoded"
+      && stored.exact_partition === true
+      && stored.validation === "base64_strict+declared_lengths") {
+    const bytes = b64ToBytes(String(stored.plaintext_b64 || ""));
+    if (bytes.length === Number(stored.length)
+        && cs2ValidHandshakeTree(stored.root, stored.coordinate_space, bytes.length)) {
+      component = {presentation: stored, bytes};
+    }
+  }
+  return {presentation, component};
+}
+
+function cs2HandshakeFieldValue(node) {
+  if (node.value !== null && node.value !== undefined && node.value !== "") return String(node.value);
+  const encoding = String(node.encoding || "bytes");
+  if (encoding === "base64") return `${node.length} 字符`;
+  return `${node.length} B`;
+}
+
+function cs2HandshakeFieldRow(node, bytes, depth = 0) {
+  const children = Array.isArray(node.children) ? node.children : [];
+  const wrap = document.createElement(children.length ? "details" : "div");
+  wrap.className = `cs2-handshake-field cs2-handshake-field-${String(node.status || "observed")}`;
+  if (children.length) wrap.open = depth < 1;
+  const head = document.createElement(children.length ? "summary" : "div");
+  head.className = "cs2-handshake-field-head";
+  const offset = document.createElement("code");
+  offset.className = "cs2-handshake-field-offset";
+  offset.textContent = `${cs2Offset(node.offset)}–${cs2Offset(node.end)}`;
+  const name = document.createElement("span");
+  name.className = "cs2-handshake-field-name";
+  name.textContent = String(node.name || "字段");
+  const value = document.createElement("span");
+  value.className = "cs2-handshake-field-value";
+  value.textContent = cs2HandshakeFieldValue(node);
+  const status = document.createElement("span");
+  status.className = "cs2-handshake-field-status";
+  status.textContent = node.status === "verified" ? "已验证"
+    : node.status === "unparsed" ? "不透明" : node.status === "invalid" ? "无效" : "已观察";
+  head.appendChild(offset); head.appendChild(name); head.appendChild(value); head.appendChild(status);
+  wrap.appendChild(head);
+  if (node.description) {
+    const description = document.createElement("div");
+    description.className = "cs2-handshake-field-description";
+    description.textContent = String(node.description);
+    wrap.appendChild(description);
+  }
+  if (children.length) {
+    const childWrap = document.createElement("div");
+    childWrap.className = "cs2-handshake-field-children";
+    for (const child of children) childWrap.appendChild(cs2HandshakeFieldRow(child, bytes, depth + 1));
+    wrap.appendChild(childWrap);
+  } else if (node.length <= 16 && !/C8|S8|密钥交换块/.test(String(node.name || ""))) {
+    const raw = cs2NodeRange(node, bytes);
+    if (raw.length) {
+      const hex = document.createElement("code");
+      hex.className = "cs2-handshake-field-hex";
+      hex.textContent = raw.map(byte => byte.toString(16).padStart(2, "0")).join(" ");
+      wrap.appendChild(hex);
+    }
+  }
+  return wrap;
+}
+
+function cs2HandshakeStructureCard(title, root, bytes, note = "") {
+  const card = makeCS2TersafeRecordCard({title, code:""});
+  if (note) {
+    const hint = document.createElement("div");
+    hint.className = "cs2-handshake-card-note";
+    hint.textContent = note;
+    card.appendChild(hint);
+  }
+  const fields = document.createElement("div");
+  fields.className = "cs2-handshake-fields";
+  for (const node of Array.isArray(root.children) ? root.children : []) {
+    fields.appendChild(cs2HandshakeFieldRow(node, bytes));
+  }
+  card.appendChild(fields);
+  return card;
+}
+
+function buildCS2HandshakePanel(ev, analysis, wireBytes) {
+  const verification = analysis.handshake_verification || {};
+  if (verification.status !== "verified") return null;
+  const view = cs2HandshakePresentationView(analysis, wireBytes);
+  if (!view) return null;
+  ensureChildCommonStyles();
+  ensureCS2TersafeCompactStyles();
+  const role = verification.role === "response" ? "response" : "request";
+  const panel = document.createElement("section");
+  panel.className = "child-compare cs2-panel cs2-tersafe-view cs2-handshake-panel";
+  const status = document.createElement("div");
+  status.className = "cs2-handshake-verification";
+  const labels = [
+    role === "request" ? "客户端请求握手" : "服务端响应握手",
+    verification.c8_rsa_exact_match === true ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证",
+  ];
+  if (role === "response" && verification.s8_observed === true) labels.push("S8 字段已观察");
+  labels.push("票据未解密");
+  for (const label of labels) {
+    const chip = document.createElement("span");
+    chip.textContent = label;
+    status.appendChild(chip);
+  }
+  panel.appendChild(status);
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  grid.appendChild(cs2HandshakeStructureCard(
+    role === "request" ? "线上请求握手字段" : "线上响应握手字段",
+    view.presentation.root,
+    wireBytes,
+    "字段边界来自线上帧；验证状态来自 native（本机组件）恢复后的回填结果。",
+  ));
+  if (view.component) {
+    grid.appendChild(cs2HandshakeStructureCard(
+      "Base64 严格解码结构",
+      view.component.presentation.root,
+      view.component.bytes,
+      "只展示长度和结构边界；内部块与尾部语义仍保持不透明。",
+    ));
+  }
+  panel.appendChild(grid);
+  return panel;
+}
+
 function buildCSChannel2Panel(ev) {
   if (!isCSChannel2Event(ev)) return null;
   const analysis = ev.analysis;
@@ -20040,6 +20222,11 @@ function buildCSChannel2Panel(ev) {
   const verified = after.length > 0;
   const handshakeVerification = analysis.handshake_verification || {};
   const handshakeVerified = handshakeVerification.status === "verified";
+  if (handshakeVerified) {
+    const wire = cs2WireFrameBytes(ev, analysis);
+    const handshakePanel = wire.length ? buildCS2HandshakePanel(ev, analysis, wire) : null;
+    if (handshakePanel) return handshakePanel;
+  }
   const unchanged = verified && analysis.mutation?.modified === false && analysis.mutation?.wire_mutated === false;
   const candidate = verified && !unchanged ? cs2BeforeApplicationBytes(ev, analysis, after) : [];
   const before = candidate.length === after.length && candidate.every((byte, i) => byte === after[i])

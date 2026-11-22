@@ -27,6 +27,8 @@ def test_cs2_reuses_the_exact_gcloud_child_compare_component() -> None:
 def test_cs2_verified_handshake_uses_secret_free_status_labels() -> None:
     source = APP_JS.read_text(encoding="utf-8")
     panel = _packet_function(source, "buildCSChannel2Panel")
+    handshake_panel = _packet_function(source, "buildCS2HandshakePanel")
+    handshake_view = _packet_function(source, "cs2HandshakePresentationView")
     summary = _packet_function(source, "buildCS2SummaryInsightStrip")
     display = _packet_function(source, "cs2SummaryDisplaySource")
 
@@ -40,6 +42,13 @@ def test_cs2_verified_handshake_uses_secret_free_status_labels() -> None:
     assert 'label: handshakeVerified ? "握手已验证" : "线上帧"' in display
     assert "handshake_verify=c8_" in summary
     assert "handshake_verify=c8_" in display
+    assert "buildCS2HandshakePanel" in panel
+    assert "if (handshakePanel) return handshakePanel" in panel
+    assert '"Base64 严格解码结构"' in handshake_panel
+    assert 'labels.push("票据未解密")' in handshake_panel
+    assert 'presentation.schema !== "tcpv.cschannel2.presentation.v1"' in handshake_view
+    assert 'presentation.exact_partition !== true' in handshake_view
     for forbidden in ("c8_hex", "s8_hex", "c8_value", "s8_value"):
         assert forbidden not in panel
+        assert forbidden not in handshake_panel
 
