@@ -20102,6 +20102,9 @@ function cs2HandshakePresentationView(analysis, wireBytes) {
 }
 
 function cs2HandshakeFieldValue(node) {
+  const name = String(node.name || "");
+  if (/S8/.test(name)) return `${node.length} B · 值不展示`;
+  if (/C8|密钥交换块/.test(name)) return `${node.length} B`;
   if (node.value !== null && node.value !== undefined && node.value !== "") return String(node.value);
   const encoding = String(node.encoding || "bytes");
   if (encoding === "base64") return `${node.length} 字符`;

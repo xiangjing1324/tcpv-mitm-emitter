@@ -46,6 +46,7 @@ def test_cs2_verified_handshake_uses_secret_free_status_labels() -> None:
     assert "if (handshakePanel) return handshakePanel" in panel
     assert '"Base64 严格解码结构"' in handshake_panel
     assert 'labels.push("票据未解密")' in handshake_panel
+    assert 'return `${node.length} B · 值不展示`' in source
     assert 'presentation.schema !== "tcpv.cschannel2.presentation.v1"' in handshake_view
     assert 'presentation.exact_partition !== true' in handshake_view
     for forbidden in ("c8_hex", "s8_hex", "c8_value", "s8_value"):
