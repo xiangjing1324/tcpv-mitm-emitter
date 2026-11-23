@@ -26,6 +26,7 @@ const state = {
     maxLen: "",
     csobOnly: false,
     aceMode: "all",
+    cs2Report: "",
   },
   hitEventIds: [],
   hitCursor: -1,
@@ -66,6 +67,8 @@ const el = {
   filterMaxLen: document.getElementById("filterMaxLen"),
   filterCsobOnly: document.getElementById("filterCsobOnly"),
   filterAceMode: document.getElementById("filterAceMode"),
+  filterCS2Report: null,
+  filterCS2Status: null,
   filterApply: document.getElementById("filterApplyBtn"),
   filterClear: document.getElementById("filterClearBtn"),
   hideAscii: document.getElementById("hideAscii"),
@@ -111,6 +114,7 @@ const EVENTS_FETCH_LIMIT = cfgNumber("fetch_limit", 500);
 const INITIAL_DRAIN_PAGES = cfgNumber("initial_drain_pages", 4);
 const GCLOUD_INITIAL_DRAIN_PAGES = Math.max(INITIAL_DRAIN_PAGES, 16);
 const PREVIEW_OFFSET_MAX = 4096;
+const PREVIEW_BYTE_OPTIONS = [8, 16, 24, 32, 48, 64, 80, 96, 128];
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
@@ -1411,7 +1415,104 @@ function normalizeAceFilterMode(rawMode) {
   return "all";
 }
 
-function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false, rawAceMode = "all") {
+function normalizeCS2ReportFilter(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const hex = text.replace(/^0x/i, "");
+  if (!/^(?:[0-9a-f]{8}|[0-9a-f]{2}(?: +[0-9a-f]{2}){3})$/i.test(hex)) return null;
+  return "0x" + hex.replace(/ /g, "").toLowerCase();
+}
+
+function installViewerControls() {
+  const select = el.previewBytes;
+  if (select && !Array.from(select.options).some(option => option.value === "8")) {
+    const option = document.createElement("option");
+    option.value = "8";
+    option.textContent = "8 字节";
+    select.prepend(option);
+  }
+  if (select) {
+    select.setAttribute("aria-label", "预览字节数");
+    for (const option of select.options) option.textContent = `${option.value} 字节`;
+  }
+  el.expandMode?.querySelector('option[value="on"]')?.remove();
+
+  const bar = document.querySelector(".filterbar");
+  if (!bar || !el.filterDir) return;
+  const search = document.createElement("div");
+  search.className = "viewer-search-controls";
+  search.setAttribute("role", "group");
+  search.setAttribute("aria-label", "包内搜索");
+  for (const control of [el.prefix, el.searchApply, el.searchPrev, el.searchNext, el.searchHitStat]) {
+    if (control) search.appendChild(control);
+  }
+  const filters = document.createElement("div");
+  filters.className = "viewer-filter-controls";
+  filters.setAttribute("role", "group");
+  filters.setAttribute("aria-label", "包列表筛选");
+  const report = document.createElement("input");
+  report.type = "text";
+  report.id = "filterCS2Report";
+  report.placeholder = "报告码，如 010a0035";
+  report.title = "输入一个完整报告码；包内任意已解析节点命中即保留。";
+  report.autocomplete = "off";
+  report.spellcheck = false;
+  report.maxLength = 24;
+  report.setAttribute("aria-label", "CS2 报告码");
+  report.setAttribute("aria-describedby", "filterCS2Status");
+
+  const status = document.createElement("span");
+  status.id = "filterCS2Status";
+  status.className = "viewer-filter-status";
+  status.setAttribute("role", "status");
+  status.hidden = true;
+  el.filterCS2Report = report;
+  el.filterCS2Status = status;
+  for (const control of [el.filterAceMode, report, el.filterDir, el.filterMinLen, el.filterMaxLen,
+    el.filterCsobOnly?.closest("label"), el.filterApply, el.filterClear, status]) {
+    if (control) filters.appendChild(control);
+  }
+  bar.append(search, filters);
+  report.addEventListener("input", () => {
+    report.classList.remove("input-invalid");
+    report.removeAttribute("aria-invalid");
+    updateCS2ReportFilterStatus();
+    saveRules();
+  });
+  report.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyFilters();
+    }
+  });
+
+  const style = document.createElement("style");
+  style.textContent = `
+    .toolbar,.filterbar,.viewer-search-controls,.viewer-filter-controls {
+      display:flex; flex-wrap:wrap; align-items:center; gap:6px; min-width:0
+    }
+    .toolbar .headline {flex:1 1 13em; min-width:0}
+    .toolbar .preview-offset-group {
+      flex:0 1 180px; grid-template-columns:24px 24px minmax(40px,1fr) 24px 44px
+    }
+    .toolbar > :is(button,select) {max-width:100%}
+    .viewer-search-controls {flex:1 1 320px}
+    .viewer-filter-controls {flex:2 1 490px}
+    .viewer-search-controls > #prefixRule {flex:1 1 12em; width:0}
+    .viewer-filter-controls > :is(#filterMinLen,#filterMaxLen) {width:6.5em}
+    .viewer-filter-controls > #filterCS2Report {width:13em; max-width:100%}
+    .viewer-filter-controls > #filterAceMode {max-width:100%}
+    .viewer-filter-controls .filter-check {padding-inline:7px}
+    .viewer-filter-status {flex-basis:100%; color:var(--muted); font-size:11px}
+    .viewer-filter-status[hidden],.viewer-filter-controls > [hidden] {display:none}
+    :is(.viewer-search-controls,.viewer-filter-controls) :is(input,select,button):focus-visible {
+      outline:2px solid var(--accent); outline-offset:1px
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false, rawAceMode = "all", rawCS2Report = "") {
   let minLen = normalizeFilterLen(rawMinLen);
   let maxLen = normalizeFilterLen(rawMaxLen);
   if (minLen && maxLen && Number(minLen) > Number(maxLen)) {
@@ -1425,6 +1526,7 @@ function normalizeFilterState(rawDir, rawMinLen, rawMaxLen, rawCsobOnly = false,
     maxLen,
     csobOnly: rawCsobOnly === true || rawCsobOnly === "1",
     aceMode: normalizeAceFilterMode(rawAceMode),
+    cs2Report: normalizeCS2ReportFilter(rawCS2Report) || "",
   };
 }
 
@@ -1472,8 +1574,7 @@ function applyPreviewOffset(rawValue, renderNow = false) {
 }
 
 function getPreviewOffsetStep() {
-  const bytesPerRow = getBytesPerRow();
-  return Math.max(1, Math.floor(bytesPerRow / 2));
+  return Math.max(1, Math.floor(getPreviewByteCount() / 2));
 }
 
 function getExpectedPreviewWindowLen(ev, previewOffset, previewLen) {
@@ -1662,6 +1763,10 @@ function loadRules() {
   const appliedFilterMaxLen = localStorage.getItem("tcpv_applied_filter_max_len") || "";
   const appliedFilterCsobOnly = localStorage.getItem("tcpv_applied_filter_csob_only") === "1";
   const appliedFilterAceMode = normalizeAceFilterMode(localStorage.getItem("tcpv_applied_filter_ace_mode") || "all");
+  const appliedCS2Report = localStorage.getItem("tcpv_applied_filter_cs2_report") || "";
+  if (el.filterCS2Report) {
+    el.filterCS2Report.value = localStorage.getItem("tcpv_filter_cs2_report_draft") ?? appliedCS2Report;
+  }
   const previewOffset = localStorage.getItem("tcpv_preview_offset") || "0";
 
   el.prefix.value = draftSearchText !== null ? draftSearchText : appliedSearchText;
@@ -1689,8 +1794,7 @@ function loadRules() {
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
   const savedPreviewBytes = String(localStorage.getItem("tcpv_preview_bytes") || "").trim();
-  const allowedPreviewBytes = new Set(["16", "24", "32", "48", "64", "80", "96", "128"]);
-  const initialPreviewBytes = allowedPreviewBytes.has(savedPreviewBytes) ? savedPreviewBytes : "16";
+  const initialPreviewBytes = PREVIEW_BYTE_OPTIONS.includes(Number(savedPreviewBytes)) ? String(Number(savedPreviewBytes)) : "16";
   el.previewBytes.value = initialPreviewBytes;
   if (savedPreviewBytes !== initialPreviewBytes) {
     localStorage.setItem("tcpv_preview_bytes", initialPreviewBytes);
@@ -1729,6 +1833,7 @@ function loadRules() {
     appliedFilterMaxLen,
     appliedFilterCsobOnly,
     appliedFilterAceMode,
+    appliedCS2Report,
   );
   applyTheme();
   applyBodyTone();
@@ -1762,6 +1867,7 @@ function saveRules() {
     localStorage.setItem("tcpv_filter_ace_mode_draft", normalizeAceFilterMode(el.filterAceMode.value));
   }
   localStorage.setItem("tcpv_hide_ascii", el.hideAscii.value);
+  localStorage.setItem("tcpv_filter_cs2_report_draft", el.filterCS2Report?.value || "");
   localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
   localStorage.setItem("tcpv_preview_offset", String(getPreviewOffset()));
   if (el.previewSpace) {
@@ -1789,6 +1895,7 @@ function saveAppliedFilters() {
   localStorage.setItem("tcpv_applied_filter_max_len", state.filters.maxLen || "");
   localStorage.setItem("tcpv_applied_filter_csob_only", state.filters.csobOnly ? "1" : "0");
   localStorage.setItem("tcpv_applied_filter_ace_mode", state.filters.aceMode || "all");
+  localStorage.setItem("tcpv_applied_filter_cs2_report", state.filters.cs2Report || "");
 }
 
 function getExpandMode() {
@@ -2714,9 +2821,13 @@ function formatTsShort(ts) {
   }
 }
 
-function getBytesPerRow() {
+function getPreviewByteCount() {
   const raw = Number(el.previewBytes.value || "16");
-  return [16, 24, 32, 48, 64, 80, 96, 128].includes(raw) ? raw : 16;
+  return PREVIEW_BYTE_OPTIONS.includes(raw) ? raw : 16;
+}
+
+function getBytesPerRow() {
+  return Math.max(16, getPreviewByteCount());
 }
 
 function normalizeDumpAnnotationText(text) {
@@ -3428,6 +3539,7 @@ function getFilterDraftState() {
     el.filterMaxLen ? el.filterMaxLen.value : "",
     el.filterCsobOnly ? el.filterCsobOnly.checked : false,
     el.filterAceMode ? el.filterAceMode.value : "all",
+    el.filterCS2Report?.value,
   );
 }
 
@@ -3667,7 +3779,7 @@ function renderPreviewBytes(previewSpan, byteValues, highlightRanges, plainTextH
 }
 
 function getPreviewInfo(ev, needFullScan = false) {
-  const previewLen = getBytesPerRow();
+  const previewLen = getPreviewByteCount();
   const previewOffset = getPreviewOffset();
   const eventId = getEventId(ev);
   const flowId = String(state.flowId || "");
@@ -8060,7 +8172,7 @@ function syncEventModificationIndicator(wrap, summaryNode, ev, summaryText = "")
   badge.textContent = isModified
     ? `已修改${specialized && evidence.diff && evidence.diff.short ? ` · ${evidence.diff.short}` : ""}`
     : "未修改";
-  const frame = `seq=${ev && ev.seq !== undefined ? ev.seq : "-"} m${ev && ev.msg_idx >= 0 ? ev.msg_idx : "-"}/c${ev && ev.chunk_idx >= 0 ? ev.chunk_idx : "-"}`;
+  const frame = `包 #${ev?.seq ?? "-"}`;
   badge.title = `${isModified ? "该时间帧有真实修改证据" : "生产端明确未修改"} · ${frame}`
     + (specialized && evidence.diff && evidence.diff.detail ? ` · ${evidence.diff.detail}` : "")
     + (specialized ? ` · ${evidence.reasons.join(" · ")}` : "");
@@ -18679,8 +18791,8 @@ function cs2SummaryDisplaySource(ev) {
   const plaintextMapping = String(analysis?.display_mapping?.full_pay || "");
   const verified = analysis
     ? analysis.crypto?.decrypt_status === "crc_validated" && analysis.validation?.crc_match === true
-      && ["snappy_decompressed_plaintext", "modified_snappy_decompressed_plaintext"].includes(plaintextMapping)
-    : /(?:^|\s)status=decoded(?=\s|$)/.test(String(ev?.summary || ""));
+      && ["snappy_decompressed_plaintext", "modified_snappy_decompressed_plaintext", "fragment_reassembled_plaintext"].includes(plaintextMapping)
+    : cs2HasSavedPlaintext(ev);
   if (verified && Number(ev.full_len) > 0 && (ev.full_pfx || ev.full_pay)) {
     return {payloadKey: "full_pay", prefixKey: "full_pfx", length: Number(ev.full_len), label: "应用明文"};
   }
@@ -18795,7 +18907,7 @@ function cs2CompactReportCounts(ev, summaryText) {
     }
     return { counts, partial: false };
   }
-  if (!/(?:^|\s)status=decoded(?=\s|$)/.test(summary)) return { counts, partial: false };
+  if (!cs2HasSavedPlaintext(ev, summary)) return { counts, partial: false };
   // full_pfx is the saved verified application plaintext prefix. The other
   // prefixes may be ciphertext or a compression wrapper; never search them.
   const prefix = bytesFromHexPrefix(ev?.full_pfx, 2048);
@@ -18831,68 +18943,152 @@ function cs2CompactReportCounts(ev, summaryText) {
   return cursor === total ? { counts, partial: false } : invalid();
 }
 
-const cs2InnerSummaryCache = new WeakMap();
-const cs2InnerPreviewQueue = new Map();
-let cs2InnerPreviewObserver;
-let cs2InnerPreviewInFlight = 0;
+function cs2HasSavedPlaintext(ev, summaryText = "") {
+  if (isCSChannel2Event(ev)) {
+    return ev.analysis.crypto?.decrypt_status === "crc_validated"
+      && ev.analysis.validation?.crc_match === true
+      && !!ev.analysis.plaintext_presentation;
+  }
+  return /(?:^|\s)status=(?:decoded|fragment_reassembled)(?=\s|$)/
+    .test(String(summaryText || ev?.summary || ""));
+}
 
-function cs2WatchInnerPreview(chip, ev, summaryText) {
-  if (typeof IntersectionObserver !== "function" || !el.events || !state.flowId) return;
-  cs2InnerPreviewQueue.set(chip, {ev, summaryText, flow: state.flowId, ready: false});
-  if (!cs2InnerPreviewObserver) {
-    cs2InnerPreviewObserver = new IntersectionObserver(entries => {
+const cs2SavedPreviewCache = new WeakMap();
+let cs2SavedPreviewFailed = new WeakSet();
+const cs2SavedPreviewWatches = new Map();
+let cs2SavedPreviewObserver;
+const cs2PreviewInFlight = new Set();
+let cs2ReportFilterQueue = [];
+let cs2ReportFilterCursor = 0;
+let cs2ReportFilterRenderTimer = 0;
+
+function cs2GetSavedPreview(ev) {
+  if (cs2SavedPreviewCache.has(ev)) return cs2SavedPreviewCache.get(ev);
+  if (!ev.full_pay || !isCSChannel2Event(ev) || !cs2HasSavedPlaintext(ev)) return undefined;
+  const metadata = cs2SavedPreviewMetadata(ev);
+  cs2SavedPreviewCache.set(ev, metadata);
+  return metadata;
+}
+
+function cs2EventMatchesReport(ev, code, pending) {
+  if (!cs2IsModificationRow(ev)) return false;
+  const metadata = cs2GetSavedPreview(ev);
+  if (metadata) return metadata.outer.has(code) || metadata.inner.has(code);
+  if (metadata === null || !cs2HasSavedPlaintext(ev)) return false;
+  if (cs2CompactReportCounts(ev).counts.has(code)) return true;
+  if (pending) pending.push(ev);
+  return false;
+}
+
+function cs2WatchSavedPreview(chip, ev, summaryText) {
+  if (typeof IntersectionObserver !== "function" || !el.events || !state.flowId
+      || cs2SavedPreviewFailed.has(ev)) return;
+  cs2SavedPreviewWatches.set(chip, {ev, summaryText, flow: state.flowId, ready: false});
+  if (!cs2SavedPreviewObserver) {
+    cs2SavedPreviewObserver = new IntersectionObserver(entries => {
       for (const {target, isIntersecting} of entries) {
-        const item = cs2InnerPreviewQueue.get(target);
+        const item = cs2SavedPreviewWatches.get(target);
         if (item) item.ready = isIntersecting;
       }
-      cs2DrainInnerPreviews();
+      cs2DrainSavedPreviews();
     }, {root: el.events});
   }
-  cs2InnerPreviewObserver.observe(chip);
+  cs2SavedPreviewObserver.observe(chip);
 }
 
-function cs2PruneInnerPreviews() {
-  for (const [chip, item] of cs2InnerPreviewQueue) {
-    if (!chip.isConnected || item.flow !== state.flowId) {
-      cs2InnerPreviewQueue.delete(chip);
-      cs2InnerPreviewObserver.unobserve(chip);
+function cs2DropPreviewWatch(chip) {
+  cs2SavedPreviewWatches.delete(chip);
+  cs2SavedPreviewObserver.unobserve(chip);
+}
+
+function cs2PruneSavedPreviews() {
+  for (const [chip, item] of cs2SavedPreviewWatches) {
+    if (!chip.isConnected || item.flow !== state.flowId) cs2DropPreviewWatch(chip);
+  }
+}
+
+function cs2RefreshWatchedRow(chip, item) {
+  const summary = chip.closest("summary");
+  if (summary?.isConnected) syncSummaryInsightStrip(summary, item.ev, item.summaryText);
+}
+
+function cs2ScheduleReportRender() {
+  if (cs2ReportFilterRenderTimer) return;
+  cs2ReportFilterRenderTimer = window.setTimeout(() => {
+    cs2ReportFilterRenderTimer = 0;
+    if (state.filters.cs2Report) renderEvents();
+  }, 180);
+}
+
+function cs2LoadSavedPreview(ev, chip = null, item = null) {
+  const flow = state.flowId;
+  const generation = state.syncToken;
+  cs2PreviewInFlight.add(ev);
+  fetchEventPayload(flow, getEventId(ev)).then(detail => {
+    if (flow !== state.flowId || generation !== state.syncToken) return;
+    cs2SavedPreviewCache.set(ev, cs2SavedPreviewMetadata(detail));
+    if (chip) cs2RefreshWatchedRow(chip, item);
+  }).catch(() => {
+    if (flow === state.flowId && generation === state.syncToken) cs2SavedPreviewFailed.add(ev);
+  }).finally(() => {
+    cs2PreviewInFlight.delete(ev);
+    if (flow === state.flowId && generation === state.syncToken && state.filters.cs2Report) {
+      cs2ScheduleReportRender();
+    }
+    cs2DrainSavedPreviews();
+  });
+}
+
+function cs2DrainSavedPreviews() {
+  cs2PruneSavedPreviews();
+  for (const [chip, item] of cs2SavedPreviewWatches) {
+    if (!item.ready || cs2PreviewInFlight.has(item.ev)) continue;
+    if (cs2GetSavedPreview(item.ev) !== undefined || cs2SavedPreviewFailed.has(item.ev)) {
+      cs2DropPreviewWatch(chip);
+      cs2RefreshWatchedRow(chip, item);
+    } else if (cs2PreviewInFlight.size < 2) {
+      cs2DropPreviewWatch(chip);
+      cs2LoadSavedPreview(item.ev, chip, item);
     }
   }
+  while (cs2PreviewInFlight.size < 2 && cs2ReportFilterCursor < cs2ReportFilterQueue.length) {
+    const ev = cs2ReportFilterQueue[cs2ReportFilterCursor++];
+    if (cs2PreviewInFlight.has(ev) || cs2SavedPreviewCache.has(ev) || cs2SavedPreviewFailed.has(ev)) continue;
+    cs2LoadSavedPreview(ev);
+  }
 }
 
-function cs2DrainInnerPreviews() {
-  cs2PruneInnerPreviews();
-  for (const [chip, item] of cs2InnerPreviewQueue) {
-    if (cs2InnerPreviewInFlight >= 2) break;
-    if (!item.ready) continue;
-    cs2InnerPreviewQueue.delete(chip);
-    cs2InnerPreviewObserver.unobserve(chip);
-    const eventId = getEventId(item.ev);
-    cs2InnerPreviewInFlight++;
-    fetchEventPayload(item.flow, eventId).then(detail => {
-      if (state.flowId !== item.flow) return;
-      cs2InnerSummaryCache.set(item.ev, cs2DecryptedReportCounts(detail));
-      const summary = chip.closest("summary");
-      if (summary?.isConnected) syncSummaryInsightStrip(summary, item.ev, item.summaryText);
-    }).catch(() => {}).finally(() => {
-      cs2InnerPreviewInFlight--;
-      cs2DrainInnerPreviews();
-    });
+function updateCS2ReportFilterStatus(pending = 0, failed = 0) {
+  const status = el.filterCS2Status;
+  if (!status) return;
+  if (el.filterCS2Report?.getAttribute("aria-invalid") === "true") {
+    status.textContent = "请输入 4 字节报告码，例如 01 0a 00 35。";
+  } else if (pending || failed) {
+    const parts = [];
+    if (pending) parts.push(`正在核对 ${pending} 个包的已保存解析`);
+    if (failed) parts.push(`${failed} 个包详情未加载；可重新点「过滤」重试`);
+    status.textContent = parts.join("；");
+  } else {
+    status.textContent = "";
   }
+  status.hidden = !status.textContent;
 }
 
 function buildCS2SummaryInsightStrip(ev, summaryText) {
   ensureCS2TersafeCompactStyles();
   const summary = String(summaryText || ev?.summary || "");
-  const decoded = /(?:^|\s)status=decoded(?=\s|$)/.test(summary);
+  const decoded = cs2HasSavedPlaintext(ev, summary);
   const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
   const handshakeVerified = analysis?.handshake_verification?.status === "verified"
     || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
       .test(summary);
-  const { counts, partial } = cs2CompactReportCounts(ev, summary);
-  const rows = [...counts].sort(([a, na], [b, nb]) => (
-    Number(b === "0x0102000a") - Number(a === "0x0102000a") || nb - na
-  ));
+  const saved = cs2GetSavedPreview(ev);
+  const { counts, partial } = saved
+    ? {counts: saved.outer, partial: false} : cs2CompactReportCounts(ev, summary);
+  const selected = state.filters.cs2Report;
+  const byFilter = ([a], [b]) => Number(b === selected) - Number(a === selected);
+  const rows = [...counts].sort((a, b) => byFilter(a, b)
+    || Number(b[0] === "0x0102000a") - Number(a[0] === "0x0102000a") || b[1] - a[1]);
   const label = ([code, n], approximate = partial) => `${code.slice(2).match(/../g).join(" ")}${approximate ? ` ≥${n}` : n > 1 ? ` ×${n}` : ""}`;
   const type = /(?:^|\s)type=([127])(?=\s|$)/.exec(summary)?.[1];
   const text = rows.length
@@ -18906,16 +19102,25 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
   chip.textContent = text;
   chip.title = rows.length ? `外层报告：${rows.map(row => label(row)).join(" · ")}${partial ? "（只统计预览中可验证的记录）" : ""}` : text;
   strip.appendChild(chip);
-  const inner = isCSChannel2Event(ev) && ev.full_pay ? cs2DecryptedReportCounts(ev) : cs2InnerSummaryCache.get(ev);
+  const inner = saved?.inner;
   if (inner?.size) {
-    const values = [...inner].map(([code, n]) => label([code, n], false));
+    const values = [...inner].sort(byFilter).map(row => label(row, false));
     const innerChip = document.createElement("span");
     innerChip.className = "summary-insight-chip cs2-summary-inner";
     innerChip.textContent = `→ ${values.slice(0, 2).join(" · ")}${values.length > 2 ? ` +${values.length - 2}` : ""}`;
     innerChip.title = `已校验内层：${values.join(" · ")}`;
     strip.appendChild(innerChip);
-  } else if (!inner && (counts.has("0x010a0008") || counts.has("0x010a0009"))) {
-    cs2WatchInnerPreview(chip, ev, summaryText);
+  }
+  if (saved === undefined && cs2HasSavedPlaintext(ev, summary)) cs2WatchSavedPreview(chip, ev, summaryText);
+  if (saved?.files.length) {
+    for (const [index, filename] of saved.files.slice(0, 2).entries()) {
+      const fileChip = document.createElement("span");
+      fileChip.className = "summary-insight-chip summary-insight-file cs2-summary-files";
+      const more = index === 1 && saved.files.length > 2;
+      fileChip.textContent = more ? `${filename} +${saved.files.length - 2}` : filename;
+      fileChip.title = "文件：" + (more ? saved.files.slice(1).join(" · ") : filename);
+      strip.appendChild(fileChip);
+    }
   }
   const relay = cs2RelayEvidence(ev, summary);
   if (relay) {
@@ -18951,7 +19156,7 @@ function cs2Offset(value) {
 function cs2PlaintextBytes(ev, plaintext, analysis) {
   const expected = Number(plaintext && plaintext.actual_length);
   const mapping = analysis && analysis.display_mapping;
-  if (!mapping || !["snappy_decompressed_plaintext", "modified_snappy_decompressed_plaintext"].includes(mapping.full_pay)
+  if (!mapping || !["snappy_decompressed_plaintext", "modified_snappy_decompressed_plaintext", "fragment_reassembled_plaintext"].includes(mapping.full_pay)
       || !Number.isSafeInteger(expected) || expected <= 0
       || (Number(ev && ev.full_len) > 0 && Number(ev.full_len) !== expected)
       || typeof b64ToBytes !== "function") return [];
@@ -19617,13 +19822,15 @@ function ensureCS2TersafeCompactStyles() {
       .cs2-tersafe-view .child-hex-note{grid-column:2 / -1;grid-row:2}
     }
     details > summary:has(> .cs2-summary-insights) > .summary-preview{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
-    details > summary > .cs2-summary-insights{display:flex;flex:0 0 auto;min-width:0;max-width:48%;overflow:hidden}
-    .cs2-summary-insights .summary-insight-chip{min-width:0;overflow:hidden;text-overflow:ellipsis}
+    details > summary:has(> .cs2-summary-insights){flex-wrap:wrap}
+    details > summary > .cs2-summary-insights{display:flex;flex:0 1 auto;flex-wrap:wrap;min-width:0;max-width:100%}
+    .cs2-summary-insights .summary-insight-chip{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
     .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
     .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
     .cs2-summary-insights .cs2-summary-relay{flex:0 1 auto;color:#fbbf24;border-color:#f59e0b52;background:#f59e0b16}
     .cs2-summary-insights .cs2-summary-relay-confirmed{color:#4ade80;border-color:#22c55e52;background:#22c55e16}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
+    .cs2-summary-insights .cs2-summary-files{flex:0 1 auto;max-width:min(100%,30ch)}
     .cs2-handshake-panel .cs2-handshake-node-meta{display:flex;flex-wrap:wrap;gap:5px 16px;padding:7px 10px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}
     .cs2-handshake-panel .cs2-handshake-node-meta b{margin-right:5px;color:var(--text);font-weight:650}
     .cs2-handshake-panel .cs2-handshake-node-meta .cs2-handshake-verified{color:#7ee787}
@@ -20020,31 +20227,54 @@ function cs2VerifiedNestedRecord(node, outer) {
   return {nested, bytes, root};
 }
 
-function cs2DecryptedReportCounts(ev) {
-  const counts = new Map();
-  const outer = cs2VerifiedApplicationBytes(ev);
-  if (!outer.length) return counts;
-  const add = (code, length, encoded) => {
-    if (!/^0x[\da-f]{8}$/i.test(code || "") || !Number.isSafeInteger(length) || length < 14) return;
-    const bytes = b64ToBytes(String(encoded || ""));
-    if (bytes.length !== length || bytes.slice(0, 4).join(",") !== "0,0,0,1"
-        || bytes[4] * 256 + bytes[5] !== length) return;
-    const report = "0x" + bytes.slice(6, 10).map(byte => byte.toString(16).padStart(2, "0")).join("");
-    if (report === code.toLowerCase()) counts.set(report, (counts.get(report) || 0) + 1);
+function cs2SavedPreviewMetadata(ev) {
+  const bytes = cs2VerifiedApplicationBytes(ev);
+  if (!bytes.length) return null;
+  const view = ev.analysis.plaintext_presentation;
+  const {counts: outer} = cs2CompactReportCounts(ev);
+  const inner = new Map();
+  const files = new Map();
+  // Use only the viewer's saved, observed text fields; do not examine wire bytes.
+  const collectFiles = (root) => {
+    const stack = [root];
+    const filename = /\b(?:mrp|mrcp)[a-z0-9_.-]{0,100}\.(?:data|dat|cfg|zip|bin)\b|\b(?:config[23]|comm|tersafe)[a-z0-9_.-]{0,100}\.(?:data|dat|cfg|zip|bin)\b/gi;
+    for (let budget = 4096; stack.length && budget > 0; budget--) {
+      const node = stack.pop();
+      if (node.encoding === "ascii" && node.status === "observed" && typeof node.value === "string") {
+        for (const match of node.value.matchAll(filename)) {
+          const afterName = node.value.slice(match.index + match[0].length);
+          if (/^[\w.-]/.test(afterName) || afterName === "…") continue;
+          const key = match[0].toLowerCase();
+          if (!files.has(key)) files.set(key, match[0]);
+          if (files.size >= 24) return;
+        }
+      }
+      for (const child of (node.children || []).slice().reverse()) stack.push(child);
+    }
   };
-  for (const node of ev.analysis.plaintext_presentation.root.children || []) {
+  const addLayer = (code, length, layerBytes, root) => {
+    if (!/^0x[\da-f]{8}$/i.test(code || "") || !Number.isSafeInteger(length) || length < 14
+        || layerBytes.length !== length || layerBytes.slice(0, 4).join(",") !== "0,0,0,1"
+        || layerBytes[4] * 256 + layerBytes[5] !== length) return;
+    const report = "0x" + layerBytes.slice(6, 10).map(byte => byte.toString(16).padStart(2, "0")).join("");
+    if (report !== code.toLowerCase()) return;
+    inner.set(report, (inner.get(report) || 0) + 1);
+    if (files.size < 24 && cs2ValidCoordinateTree(root, length, "tersafe_inner_plaintext")) collectFiles(root);
+  };
+  collectFiles(view.root);
+  for (const node of view.root.children || []) {
     if (node.tersafe_layers?.schema === "tcpv.tersafe.layers.v1") {
       for (const layer of node.tersafe_layers.layers || []) {
-        if (layer.kind === "decrypted" && /^0x[\da-f]{8}$/i.test(layer.crc32 || "")) {
-          add(layer.report_code, layer.length, layer.plaintext_b64);
+        if (layer.kind === "structural" || (layer.kind === "decrypted" && /^0x[\da-f]{8}$/i.test(layer.crc32 || ""))) {
+          addLayer(layer.report_code, layer.length, b64ToBytes(String(layer.plaintext_b64 || "")), layer.root);
         }
       }
     } else {
-      const result = cs2VerifiedNestedRecord(node, outer);
-      if (result) add(result.nested.report_code, result.nested.length, result.nested.plaintext_b64);
+      const result = cs2VerifiedNestedRecord(node, bytes);
+      if (result) addLayer(result.nested.report_code, result.nested.length, result.bytes, result.root);
     }
   }
-  return counts;
+  return {outer, inner, files: [...files.values()]};
 }
 
 function appendCS2NestedTerSafe(card, section, outer) {
@@ -20821,6 +21051,10 @@ function collectGcloudAceStats(events = state.events) {
   return stats;
 }
 
+function cs2IsCurrentFlow() {
+  return !!state.flowId && state.events.some(ev => cs2IsModificationRow(ev));
+}
+
 function updateAceFilterUi() {
   if (!el.filterAceMode) return;
   const isGcloud = !!state.flowId && currentFlowLooksLikeGcloud65010();
@@ -20971,7 +21205,7 @@ function eventIsVerifiedRetagged0037(ev) {
     && mutations.has("antidata_root_report_verified=1");
 }
 
-function eventMatchesFilters(ev) {
+function eventMatchesFilters(ev, reportPending = null, cs2Flow = null) {
   if (!ev || typeof ev !== "object") return false;
   if (eventIsVerifiedRetagged0037(ev)) return false;
   if (eventIsTcpViewExactFilteredCommand(ev)) return false;
@@ -20991,7 +21225,8 @@ function eventMatchesFilters(ev) {
     if (aceMode === "ace_all" && !eventClass.startsWith("ace_")) return false;
     if (aceMode !== "ace_all" && eventClass !== aceMode) return false;
   }
-  return true;
+  return !state.filters.cs2Report || !(cs2Flow ?? cs2IsCurrentFlow())
+    || cs2EventMatchesReport(ev, state.filters.cs2Report, reportPending);
 }
 
 function findEventNodeById(eventId) {
@@ -21048,7 +21283,17 @@ async function applySearch(focusFirstHit = true) {
 }
 
 function applyFilters() {
+  const report = el.filterCS2Report;
+  if (report && !report.hidden && normalizeCS2ReportFilter(report.value) === null) {
+    report.classList.add("input-invalid");
+    report.setAttribute("aria-invalid", "true");
+    updateCS2ReportFilterStatus();
+    report.focus();
+    return;
+  }
+  cs2SavedPreviewFailed = new WeakSet();
   state.filters = getFilterDraftState();
+  if (report && !report.hidden) report.value = state.filters.cs2Report;
   if (el.filterDir) {
     el.filterDir.value = state.filters.dir || "all";
   }
@@ -21067,6 +21312,11 @@ function applyFilters() {
 }
 
 function clearFilters() {
+  if (el.filterCS2Report) {
+    el.filterCS2Report.value = "";
+    el.filterCS2Report.classList.remove("input-invalid");
+    el.filterCS2Report.removeAttribute("aria-invalid");
+  }
   if (el.filterDir) {
     el.filterDir.value = "all";
   }
@@ -21217,6 +21467,15 @@ function renderEvents() {
 
   el.events.innerHTML = "";
   updateAceFilterUi();
+  const cs2Flow = cs2IsCurrentFlow();
+  if (el.filterCS2Report) {
+    el.filterCS2Report.hidden = !cs2Flow;
+    el.filterCS2Report.disabled = !cs2Flow;
+  }
+  cs2ReportFilterQueue = [];
+  cs2ReportFilterCursor = 0;
+  updateCS2ReportFilterStatus();
+  cs2PruneSavedPreviews();
   const hideAscii = el.hideAscii.value === "1";
   const modeSpec = parseHighlightMode(state.search.mode || "full_contains");
   const expandMode = getExpandMode();
@@ -21257,7 +21516,11 @@ function renderEvents() {
   }
 
   const needFullScan = state.search.active && modeSpec.scope === "full";
-  const filteredEvents = state.events.filter((ev) => eventMatchesFilters(ev));
+  const reportPending = [];
+  const filteredEvents = state.events.filter(ev => eventMatchesFilters(ev, reportPending, cs2Flow));
+  cs2ReportFilterQueue = reportPending.filter(ev => !cs2SavedPreviewFailed.has(ev));
+  updateCS2ReportFilterStatus(cs2ReportFilterQueue.length, reportPending.length - cs2ReportFilterQueue.length);
+  cs2DrainSavedPreviews();
   const nextHitEventIds = [];
   if (state.search.active) {
     // Search and render all loaded filtered events. Protocol/semantic decoding
@@ -21290,7 +21553,8 @@ function renderEvents() {
     updateSearchUi();
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "No packets match current filters.";
+    empty.textContent = cs2ReportFilterQueue.length ? "正在核对已保存的报告码…"
+      : "没有符合当前筛选条件的包。";
     el.events.appendChild(empty);
     if (mrpcsVisibleCandidatesChanged) scheduleMrpcsObservationIndex();
     return;
@@ -21334,7 +21598,6 @@ function renderEvents() {
     const isReq = ev.dir === 0;
     const dirArrow = isReq ? "->" : "<-";
     const preview = getPreviewInfo(ev, needFullScan);
-    const frag = ev.msg_idx >= 0 && ev.chunk_idx >= 0 ? `m${ev.msg_idx}/c${ev.chunk_idx}` : "m-/c-";
     const seqNum = Number(ev.seq || 0);
     const seqText = Number.isFinite(seqNum) && seqNum > 0 ? `#${seqNum}` : "#-";
 
@@ -21389,12 +21652,13 @@ function renderEvents() {
 
     const previewWrap = document.createElement("span");
     previewWrap.className = "summary-preview";
-    previewWrap.title = `preview offset=${preview.previewOffset || 0} byte`;
+    previewWrap.title = `偏移 ${preview.previewOffset || 0} 字节`;
     if (preview.missingWindowBytes > 0) {
       const suffix = preview.needsWindowFetch ? " (window loading...)" : " (window incomplete)";
       previewWrap.title += suffix;
     }
-    previewWrap.appendChild(document.createTextNode(cs2Source ? `[${cs2Source.label} ` : "["));
+    if (cs2Source) previewWrap.title = `${cs2Source.label} · ${previewWrap.title}`;
+    previewWrap.appendChild(document.createTextNode("["));
     const previewSpan = document.createElement("span");
     previewSpan.className = "preview-hex";
     renderPreviewBytes(previewSpan, preview.previewBytes, previewRanges, preview.previewText || "");
@@ -21430,8 +21694,8 @@ function renderEvents() {
 
     const tailSpan = document.createElement("span");
     tailSpan.className = "summary-tail";
-    tailSpan.textContent = `${seqText} ${frag}`;
-    tailSpan.title = `seq=${ev.seq} msg_idx=${ev.msg_idx} chunk_idx=${ev.chunk_idx}`;
+    tailSpan.textContent = seqText;
+    tailSpan.title = `包序号 ${seqText}`;
     summary.appendChild(tailSpan);
     syncSummaryTimestampBadge(summary, ev);
     syncSummaryIdfvBadge(summary, ev, summaryText);
@@ -21539,7 +21803,7 @@ function renderEvents() {
     listFrag.appendChild(wrap);
   }
   el.events.appendChild(listFrag);
-  cs2PruneInnerPreviews();
+  cs2PruneSavedPreviews();
 
   state.hitEventIds = nextHitEventIds;
   if (nextHitEventIds.length <= 0) {
@@ -21865,6 +22129,7 @@ if (systemThemeQuery) {
   installFlowListBadgeStyles();
   installDumpAsciiRowStyles();
   installAceFilterControl();
+  installViewerControls();
   loadRules();
   setupSplitter();
   setupWheelRouting();
