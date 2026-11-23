@@ -19429,39 +19429,65 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-tersafe-view .child-preview-box{padding:5px 7px}
     .cs2-tersafe-view .child-preview-info{padding-bottom:2px}
     .cs2-tersafe-view .child-preview-label{margin-bottom:1px;line-height:1.3}
-    .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto}
-    .cs2-tersafe-view .cs2-paired-fields-inner{min-width:1320px}
-    .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(480px,1fr) minmax(220px,.58fr) minmax(480px,1fr)}
-    .cs2-tersafe-view .cs2-paired-field-head{position:sticky;top:0;z-index:1;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;font-weight:700}
-    .cs2-tersafe-view .cs2-paired-field-head>div{padding:5px 8px}
+    .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;background:color-mix(in srgb,var(--panel) 96%,transparent)}
+    .cs2-tersafe-view .cs2-paired-fields-inner{width:100%;min-width:1180px}
+    .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,440px) minmax(360px,1fr)}
+    .cs2-tersafe-view .cs2-paired-field-head{position:sticky;top:0;z-index:1;background:var(--panel);border-bottom:1px solid var(--line);font:600 12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif}
+    .cs2-tersafe-view .cs2-paired-field-head>div{padding:6px 10px}
     .cs2-tersafe-view .cs2-paired-field-head-middle{text-align:center;color:var(--muted);border-inline:1px solid var(--line)}
-    .cs2-tersafe-view .cs2-paired-field-head-after{color:#4ade80}
-    .cs2-tersafe-view .cs2-paired-field-head-before{color:#ffb454}
+    .cs2-tersafe-view .cs2-paired-field-head-before{color:color-mix(in srgb,#d6a85a 82%,var(--text));border-top:2px solid color-mix(in srgb,#d6a85a 70%,transparent);background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 10%,transparent),transparent 72%)}
+    .cs2-tersafe-view .cs2-paired-field-head-after{color:color-mix(in srgb,#67c58c 82%,var(--text));border-top:2px solid color-mix(in srgb,#67c58c 68%,transparent);background:linear-gradient(270deg,color-mix(in srgb,#67c58c 9%,transparent),transparent 72%)}
+    .cs2-tersafe-view .cs2-paired-field-head-kicker{display:inline-block;margin-right:7px;padding:1px 5px;border:1px solid currentColor;border-radius:999px;font-size:10px;line-height:1.25;opacity:.82}
+    .cs2-tersafe-view .cs2-paired-field-head-detail{color:var(--muted);font-weight:500}
     .cs2-tersafe-view .cs2-paired-field{border-bottom:1px solid color-mix(in srgb,var(--line) 46%,transparent)}
-    .cs2-tersafe-view .cs2-paired-side{min-width:0;padding:0 3px;background:color-mix(in srgb,var(--panel) 92%,transparent)}
+    .cs2-tersafe-view .cs2-paired-side{min-width:0;padding:0 3px;background:color-mix(in srgb,var(--panel) 97%,transparent)}
+    .cs2-tersafe-view .cs2-paired-side.child-preview-before{border-right:0;background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 4%,transparent),transparent 76%)}
+    .cs2-tersafe-view .cs2-paired-side.child-preview-after{background:linear-gradient(270deg,color-mix(in srgb,#67c58c 4%,transparent),transparent 76%)}
     .cs2-tersafe-view .cs2-paired-side-empty{display:flex;align-items:center;justify-content:center;color:var(--muted);font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     .cs2-tersafe-view .cs2-paired-side .child-hex-table{margin-top:0;border:0;border-radius:0;overflow:visible;background:transparent}
     .cs2-tersafe-view .cs2-paired-side .child-hex-body{min-width:0;padding:0}
-    .cs2-tersafe-view .cs2-paired-side .child-hex-row{grid-template-columns:7ch 41ch 16ch;min-width:64ch;padding-block:1px;line-height:1.25}
-    .cs2-tersafe-view .cs2-paired-field-note{display:grid;grid-template-columns:minmax(9em,max-content) minmax(0,1fr);align-items:center;column-gap:8px;row-gap:0;min-width:0;padding:1px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 72%,transparent);font:11px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:color-mix(in srgb,var(--panel) 84%,transparent)}
-    .cs2-tersafe-view .cs2-paired-field-name{font-weight:700;color:var(--muted);overflow-wrap:anywhere}
-    .cs2-tersafe-view .cs2-paired-field-value{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;min-width:0;overflow-wrap:anywhere;color:var(--text)}
-    .cs2-tersafe-view .cs2-paired-field-old{color:#ffb454}
-    .cs2-tersafe-view .cs2-paired-field-arrow{color:#8b949e;font-weight:800}
-    .cs2-tersafe-view .cs2-paired-field-new{color:#4ade80;font-weight:700}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-row{grid-template-columns:6.5ch 41ch 16ch;min-width:63.5ch;padding-block:1px;line-height:1.25}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-bytes{width:auto;column-gap:.65ch;justify-content:start}
+    .cs2-tersafe-view .cs2-paired-side-more{margin:0 6px 3px;border:0}
+    .cs2-tersafe-view .cs2-paired-side-more>summary{display:block;min-height:0;padding:1px 0;color:var(--muted);font:500 10px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;cursor:pointer;list-style:none}
+    .cs2-tersafe-view .cs2-paired-side-more>summary::-webkit-details-marker{display:none}
+    .cs2-tersafe-view .cs2-paired-side-more>summary::before{content:"＋ ";color:color-mix(in srgb,var(--muted) 72%,var(--text))}
+    .cs2-tersafe-view .cs2-paired-side-more[open]>summary::before{content:"－ "}
+    .cs2-tersafe-view .cs2-paired-field-note{display:grid;grid-template-columns:minmax(9em,max-content) minmax(0,1fr);align-items:center;column-gap:8px;row-gap:1px;min-width:0;padding:3px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 58%,transparent);font:12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 94%,transparent)}
+    .cs2-tersafe-view .cs2-paired-field-name{font-weight:600;color:var(--muted);overflow-wrap:anywhere}
+    .cs2-tersafe-view .cs2-paired-field-value{display:flex;flex-wrap:nowrap;align-items:baseline;gap:4px;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text)}
+    .cs2-tersafe-view .cs2-paired-field-value>span{min-width:0}
+    .cs2-tersafe-view .cs2-paired-field-value-long :is(.cs2-paired-field-old,.cs2-paired-field-new){flex:1 1 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .cs2-tersafe-view .cs2-paired-value-more{min-width:0;margin:0}
+    .cs2-tersafe-view .cs2-paired-value-more>summary{display:grid;grid-template-columns:10px minmax(0,1fr);align-items:baseline;min-width:0;list-style:none;cursor:pointer}
+    .cs2-tersafe-view .cs2-paired-value-more>summary::-webkit-details-marker{display:none}
+    .cs2-tersafe-view .cs2-paired-value-more>summary::before{content:"▸";color:var(--muted);font-size:10px}
+    .cs2-tersafe-view .cs2-paired-value-more[open]>summary::before{content:"▾"}
+    .cs2-tersafe-view .cs2-paired-value-full{margin:3px 0 1px 10px;padding:3px 6px;border-left:2px solid color-mix(in srgb,var(--muted) 36%,transparent);color:color-mix(in srgb,var(--text) 86%,var(--muted));background:color-mix(in srgb,var(--muted) 6%,transparent);font-size:11px;line-height:1.35;overflow-wrap:anywhere}
+    .cs2-tersafe-view :is(.cs2-paired-field-old,.cs2-paired-field-new){display:inline-flex;align-items:baseline;gap:4px;min-width:0}
+    .cs2-tersafe-view .cs2-paired-field-old::before,.cs2-tersafe-view .cs2-paired-field-new::before{flex:0 0 auto;padding:0 3px;border:1px solid currentColor;border-radius:3px;font-size:9px;line-height:1.35;opacity:.75}
+    .cs2-tersafe-view .cs2-paired-field-old::before{content:"旧"}
+    .cs2-tersafe-view .cs2-paired-field-new::before{content:"新"}
+    .cs2-tersafe-view .cs2-paired-field-old{color:color-mix(in srgb,#d6a85a 78%,var(--text));font-weight:550}
+    .cs2-tersafe-view .cs2-paired-field-arrow{color:#8b949e;font-weight:600}
+    .cs2-tersafe-view .cs2-paired-field-new{color:color-mix(in srgb,#67c58c 82%,var(--text));font-weight:600}
     .cs2-tersafe-view .cs2-paired-field-state{grid-column:2;color:var(--muted);font-size:10px}
+    .cs2-tersafe-view .cs2-paired-field-diff{grid-column:1/-1;margin-top:2px;padding:2px 6px;border-left:2px solid color-mix(in srgb,#d6a85a 48%,transparent);border-radius:2px;color:color-mix(in srgb,#d6b56d 72%,var(--text));background:color-mix(in srgb,#d6b56d 7%,transparent);font:500 11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
     .cs2-tersafe-view .cs2-paired-field-length .cs2-paired-field-name{color:#38bdf8}
     .cs2-tersafe-view .cs2-paired-field-time .cs2-paired-field-name{color:#2dd4bf}
     .cs2-tersafe-view .cs2-paired-field-report .cs2-paired-field-name{color:#a78bfa}
     .cs2-tersafe-view .cs2-paired-field-type .cs2-paired-field-name{color:#fb923c}
-    .cs2-tersafe-view .child-preview-before :is(.child-hex-byte-cell-changed,.child-hex-ascii-cell-changed){color:#ffb454;background:color-mix(in srgb,#ffb454 20%,transparent);box-shadow:0 0 0 1px color-mix(in srgb,#ffb454 30%,transparent)}
-    .cs2-tersafe-view .child-preview-after :is(.child-hex-byte-cell-changed,.child-hex-ascii-cell-changed){color:#4ade80;background:color-mix(in srgb,#22c55e 18%,transparent);box-shadow:0 0 0 1px color-mix(in srgb,#22c55e 28%,transparent)}
+    .cs2-tersafe-view .child-preview-before .child-hex-byte-cell-changed{color:color-mix(in srgb,#d6a85a 82%,var(--text));background:color-mix(in srgb,#d6a85a 10%,transparent);box-shadow:inset 0 -1px color-mix(in srgb,#d6a85a 38%,transparent);font-weight:650;border-radius:2px}
+    .cs2-tersafe-view .child-preview-after .child-hex-byte-cell-changed{color:color-mix(in srgb,#67c58c 84%,var(--text));background:color-mix(in srgb,#67c58c 8%,transparent);box-shadow:inset 0 -1px color-mix(in srgb,#67c58c 34%,transparent);font-weight:650;border-radius:2px}
+    .cs2-tersafe-view .child-preview-before .child-hex-ascii-cell-changed{color:color-mix(in srgb,#d6a85a 78%,var(--text));background:transparent;box-shadow:inset 0 -1px color-mix(in srgb,#d6a85a 32%,transparent);font-weight:600;border-radius:0}
+    .cs2-tersafe-view .child-preview-after .child-hex-ascii-cell-changed{color:color-mix(in srgb,#67c58c 80%,var(--text));background:transparent;box-shadow:inset 0 -1px color-mix(in srgb,#67c58c 30%,transparent);font-weight:600;border-radius:0}
     .cs2-tersafe-view .child-hex-table{overflow-x:auto}
-    .cs2-tersafe-view .child-hex-body{font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;min-width:calc(64ch + 28px);padding:2px 0}
+    .cs2-tersafe-view .child-hex-body{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;min-width:calc(64ch + 28px);padding:2px 0;font-variant-numeric:tabular-nums}
     .cs2-tersafe-view .child-hex-row{grid-template-columns:7ch 41ch 16ch minmax(0,1fr);column-gap:4px;row-gap:0;padding:1px 6px;border-left:2px solid transparent;font:inherit}
     .cs2-tersafe-view .child-hex-row-string{border-left-color:color-mix(in srgb,#22c55e 42%,transparent)}
     .cs2-tersafe-view .cs2-field-xor{border-left-color:color-mix(in srgb,#2dd4bf 64%,transparent)}
     .cs2-tersafe-view .cs2-field-xor .child-hex-note{color:color-mix(in srgb,#2dd4bf 75%,var(--text))}
+    .cs2-tersafe-view .cs2-field-redacted{color:var(--muted);background:color-mix(in srgb,var(--muted) 8%,transparent);border-radius:2px}
     .cs2-tersafe-view .child-hex-offset,.cs2-tersafe-view .child-hex-bytes,.cs2-tersafe-view .child-hex-ascii{grid-row:1;margin:0;font:inherit;overflow:visible}
     .cs2-tersafe-view .child-hex-offset{display:block;grid-column:1;white-space:nowrap}
     .cs2-tersafe-view .child-hex-bytes{grid-column:2;column-gap:.6ch}
@@ -19488,6 +19514,9 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-summary-insights .cs2-summary-relay{flex:0 1 auto;color:#fbbf24;border-color:#f59e0b52;background:#f59e0b16}
     .cs2-summary-insights .cs2-summary-relay-confirmed{color:#4ade80;border-color:#22c55e52;background:#22c55e16}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
+    .cs2-handshake-panel .cs2-handshake-node-meta{display:flex;flex-wrap:wrap;gap:5px 16px;padding:7px 10px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}
+    .cs2-handshake-panel .cs2-handshake-node-meta b{margin-right:5px;color:var(--text);font-weight:650}
+    .cs2-handshake-panel .cs2-handshake-node-meta .cs2-handshake-verified{color:#7ee787}
   `;
   document.head.appendChild(style);
 }
