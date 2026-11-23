@@ -18685,9 +18685,7 @@ function cs2SummaryDisplaySource(ev) {
     return {payloadKey: "full_pay", prefixKey: "full_pfx", length: Number(ev.full_len), label: "应用明文"};
   }
   if (Number(ev.raw_len) > 0 && (ev.raw_pfx || ev.raw_pay)) {
-    const handshakeVerified = analysis?.handshake_verification?.status === "verified"
-      || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
-        .test(String(ev?.summary || ""));
+    const handshakeVerified = analysis?.handshake_verification?.status === "verified";
     return {payloadKey: "raw_pay", prefixKey: "raw_pfx", length: Number(ev.raw_len),
       label: handshakeVerified ? "握手已验证" : "线上帧"};
   }
@@ -18710,6 +18708,34 @@ function cs2ModificationEvidence(ev, summaryText) {
     reasons: [changed ? "CSChannel2 记录了修改" : "CSChannel2 仅解密展示，未记录修改"],
     diff: { short: "", detail: "" },
   };
+}
+
+function cs2RelayEvidence(ev, summaryText) {
+  const summary = String(summaryText || ev?.summary || "");
+  const detail = isCSChannel2Event(ev) ? ev.analysis?.port_relay : null;
+  const route = String(detail?.route || /(?:^|\s)relay_route=([^\s]+)/.exec(summary)?.[1] || "");
+  if (route !== "8092->8091") return null;
+  const status = String(detail?.status || /(?:^|\s)relay_status=([^\s]+)/.exec(summary)?.[1] || "unknown");
+  const confirmed = detail?.confirmed_delivery === true
+    || /(?:^|\s)relay_confirmed=1(?=\s|$)/.test(summary);
+  const sourceForwarded = detail && typeof detail.source_forwarded_to_client === "boolean"
+    ? detail.source_forwarded_to_client : !confirmed && status !== "claimed_timeout_drop_source";
+  return {
+    route,
+    status,
+    confirmed,
+    sourceForwarded,
+    reportCode: String(detail?.report_code
+      || /(?:^|\s)relay_report=(0x[0-9a-f]{8})(?=\s|$)/i.exec(summary)?.[1] || ""),
+    eventId: String(detail?.event_id
+      || /(?:^|\s)relay_event=([^\s]+)/.exec(summary)?.[1] || ""),
+  };
+}
+
+function cs2RelayLabel(relay) {
+  if (relay?.confirmed) return "已转交 8091";
+  if (relay && !relay.sourceForwarded) return "8091 已领取 · 待确认";
+  return "转交 8091 未成功";
 }
 
 function cs2CompactReportCounts(ev, summaryText) {
@@ -18818,9 +18844,7 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
   const summary = String(summaryText || ev?.summary || "");
   const decoded = /(?:^|\s)status=decoded(?=\s|$)/.test(summary);
   const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
-  const handshakeVerified = analysis?.handshake_verification?.status === "verified"
-    || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
-      .test(summary);
+  const handshakeVerified = analysis?.handshake_verification?.status === "verified";
   const { counts, partial } = cs2CompactReportCounts(ev, summary);
   const rows = [...counts].sort(([a, na], [b, nb]) => (
     Number(b === "0x0102000a") - Number(a === "0x0102000a") || nb - na
@@ -18848,6 +18872,16 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
     strip.appendChild(innerChip);
   } else if (!inner && (counts.has("0x010a0008") || counts.has("0x010a0009"))) {
     cs2WatchInnerPreview(chip, ev, summaryText);
+  }
+  const relay = cs2RelayEvidence(ev, summary);
+  if (relay) {
+    const relayChip = document.createElement("span");
+    relayChip.className = `summary-insight-chip cs2-summary-relay${relay.confirmed ? " cs2-summary-relay-confirmed" : ""}`;
+    relayChip.textContent = cs2RelayLabel(relay);
+    relayChip.title = relay.confirmed
+      ? `8092 原包已交给 8091，并由 8091 会话重加密发送 · event ${relay.eventId || "-"}`
+      : `${cs2RelayLabel(relay)} · status ${relay.status}`;
+    strip.appendChild(relayChip);
   }
   if (decoded || rows.length) {
     const prefix = bytesFromHexPrefix(ev?.full_pfx, 2048);
@@ -19267,77 +19301,6 @@ function cs2RecordSections(root, nodeCount, bytes) {
   }));
 }
 
-function cs2SharedPayloadNode(itemNode) {
-  if (!itemNode || typeof itemNode !== "object") return null;
-  const children = Array.isArray(itemNode.children) ? itemNode.children : [];
-  const directRecord = children.find((node) => /^TSS-like 报告\s+/i.test(String(node && node.name || "")));
-  if (directRecord) return directRecord;
-  const applicationBody = children.find((node) => /^应用正文/.test(String(node && node.name || "")));
-  return applicationBody || itemNode;
-}
-
-function cs2SharedDeepestVerifiedBytes(rawBytes) {
-  let current = Array.isArray(rawBytes) ? rawBytes.slice() : [];
-  for (let depth = 0; depth < 6 && current.length >= 10; depth += 1) {
-    const encrypted = decryptDisplayableTssEnvelope(current);
-    if (!encrypted || !encrypted.supported || !encrypted.crcMatch
-        || !Array.isArray(encrypted.plain) || encrypted.plain.length < 10) break;
-    const inner = detectTssReport(encrypted.plain);
-    if (!inner || !isLikelyTssReportCode(inner.value)) break;
-    current = encrypted.plain.slice();
-  }
-  return current;
-}
-
-function cs2SharedComparableChild(rawBytes, index, recordStart) {
-  const record = Array.isArray(rawBytes) ? rawBytes : [];
-  const report = detectTssReport(record);
-  const reportCode = report && isLikelyTssReportCode(report.value) ? Number(report.value) : null;
-  const identity = report ? tssRecordIdentity(record, report) : { idValue: null, idText: "" };
-  const className = classifyRecordBytes(record, reportCode);
-  const child = {
-    index,
-    nodeLabel: `node[${index}]`,
-    offset: recordStart,
-    recordStart,
-    recordEnd: recordStart + record.length,
-    len: record.length,
-    lengthEndian: "",
-    reportCode,
-    reportOffset: report ? report.offset : -1,
-    idValue: identity.idValue,
-    idText: identity.idText,
-    className,
-    valuePreview: formatRecordValuePreview(record, reportCode),
-    timestampCandidates: extractTimestampCandidatesFromRecord(record),
-    hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
-    xorCommonPreview: className === "binary-like-leaf" || Number(reportCode) === 0x0102000a
-      ? summarizeCommonFixedXor(record, reportCode) : "",
-  };
-  return attachLocalChildSemantic(child, record);
-}
-
-function cs2SharedComparablePayload(presentation, applicationBytes) {
-  const source = Array.isArray(applicationBytes) ? applicationBytes : [];
-  const root = presentation && presentation.root;
-  const declaredCount = Number(presentation && presentation.node_count || 0);
-  const items = declaredCount > 0 && Array.isArray(root && root.children)
-    ? root.children.filter((node) => /^node\[\d+\]$/.test(String(node && node.name || "")))
-    : root ? [root] : [];
-  const bytes = [];
-  const children = [];
-  for (const [index, item] of items.entries()) {
-    const payloadNode = cs2SharedPayloadNode(item);
-    const raw = cs2NodeRange(payloadNode, source);
-    if (!raw.length) continue;
-    const displayed = cs2SharedDeepestVerifiedBytes(raw);
-    const start = bytes.length;
-    bytes.push(...displayed);
-    children.push(cs2SharedComparableChild(displayed, index, start));
-  }
-  return { bytes, parsed: { root: null, children } };
-}
-
 const cs2BeijingClock = new Intl.DateTimeFormat("sv-SE", {
   timeZone: "Asia/Shanghai",
   year: "numeric", month: "2-digit", day: "2-digit",
@@ -19376,7 +19339,6 @@ function cs2TersafeHexRows(section, plaintextBytes) {
     } else if (/^(?:u8|be16|be32|be64|hex)$/.test(encoding) && /^(?:0x[0-9a-f]+|\d+)$/i.test(value)) {
       note = `${note}：${value}`;
     }
-    if (field.redacted === true) note = `${field.label} · ${bytes.length} B · 值不展示`;
     // Keep the parsed boundary even if it falls in the middle of a 16-byte row.
     // Only long fields need continuation rows; never merge across fields.
     for (let i = 0; i < bytes.length; i += rowLimit) {
@@ -19385,7 +19347,6 @@ function cs2TersafeHexRows(section, plaintextBytes) {
         bytes: bytes.slice(i, i + rowLimit),
         note: i === 0 ? note : "",
         encoding,
-        redacted: field.redacted === true,
         tone,
         tooltip: i === 0 ? tooltip : "",
       });
@@ -19415,12 +19376,12 @@ function appendCS2TersafeHexTable(box, section, plaintextBytes, changed = null, 
       const value = Number(rawValue) & 0xff;
       const differs = changed?.has(row.offset + index);
       const byte = document.createElement("span");
-      byte.className = `child-hex-byte-cell${row.encoding === "ascii" ? " child-hex-byte-cell-string" : ""}${row.redacted ? " cs2-field-redacted" : ""}${differs ? " child-hex-byte-cell-changed" : ""}`;
-      byte.textContent = row.redacted ? "••" : value.toString(16).padStart(2, "0");
+      byte.className = `child-hex-byte-cell${row.encoding === "ascii" ? " child-hex-byte-cell-string" : ""}${differs ? " child-hex-byte-cell-changed" : ""}`;
+      byte.textContent = value.toString(16).padStart(2, "0");
       bytes.appendChild(byte);
       const char = document.createElement("span");
       char.className = `child-hex-ascii-cell${row.encoding === "ascii" ? " child-hex-ascii-cell-string" : ""}${differs ? " child-hex-ascii-cell-changed" : ""}`;
-      char.textContent = row.redacted ? "·" : value >= 32 && value < 127 ? String.fromCharCode(value) : ".";
+      char.textContent = value >= 32 && value < 127 ? String.fromCharCode(value) : ".";
       ascii.appendChild(char);
     }
     line.appendChild(offset); line.appendChild(bytes); line.appendChild(ascii);
@@ -19449,6 +19410,11 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-tersafe-view .child-preview-row>.child-preview-before{border-right:1px solid var(--line);border-bottom:0}
     .cs2-tersafe-view .child-preview-label small{color:var(--muted);font-weight:400;margin-left:7px}
     .cs2-tersafe-view .child-preview-empty{padding:5px 0}
+    .cs2-tersafe-view .cs2-relay-status{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:5px 7px;padding:6px 8px;border:1px solid color-mix(in srgb,#f59e0b 42%,var(--line));border-radius:6px;background:color-mix(in srgb,#f59e0b 9%,var(--panel));font-size:11px}
+    .cs2-tersafe-view .cs2-relay-status strong{color:#fbbf24}
+    .cs2-tersafe-view .cs2-relay-status small{color:var(--muted);overflow-wrap:anywhere}
+    .cs2-tersafe-view .cs2-relay-status-confirmed{border-color:color-mix(in srgb,#22c55e 48%,var(--line));background:color-mix(in srgb,#22c55e 9%,var(--panel))}
+    .cs2-tersafe-view .cs2-relay-status-confirmed strong{color:#4ade80}
     .cs2-tersafe-view .cs2-wire-reference>summary{min-height:0;padding:3px 5px;color:var(--muted)}
     .cs2-tersafe-view .cs2-observed-kv{display:flex;flex-wrap:wrap;gap:3px 12px;margin-top:4px;color:var(--muted);font-size:11px}
     .cs2-tersafe-view .cs2-observed-kv code{min-width:0;overflow-wrap:anywhere;color:color-mix(in srgb,#4ade80 80%,var(--text))}
@@ -19456,65 +19422,39 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-tersafe-view .child-preview-box{padding:5px 7px}
     .cs2-tersafe-view .child-preview-info{padding-bottom:2px}
     .cs2-tersafe-view .child-preview-label{margin-bottom:1px;line-height:1.3}
-    .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;background:color-mix(in srgb,var(--panel) 96%,transparent)}
-    .cs2-tersafe-view .cs2-paired-fields-inner{width:100%;min-width:1180px}
-    .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,440px) minmax(360px,1fr)}
-    .cs2-tersafe-view .cs2-paired-field-head{position:sticky;top:0;z-index:1;background:var(--panel);border-bottom:1px solid var(--line);font:600 12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif}
-    .cs2-tersafe-view .cs2-paired-field-head>div{padding:6px 10px}
+    .cs2-tersafe-view .cs2-paired-fields{overflow-x:auto}
+    .cs2-tersafe-view .cs2-paired-fields-inner{min-width:1320px}
+    .cs2-tersafe-view :is(.cs2-paired-field-head,.cs2-paired-field){display:grid;grid-template-columns:minmax(480px,1fr) minmax(220px,.58fr) minmax(480px,1fr)}
+    .cs2-tersafe-view .cs2-paired-field-head{position:sticky;top:0;z-index:1;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;font-weight:700}
+    .cs2-tersafe-view .cs2-paired-field-head>div{padding:5px 8px}
     .cs2-tersafe-view .cs2-paired-field-head-middle{text-align:center;color:var(--muted);border-inline:1px solid var(--line)}
-    .cs2-tersafe-view .cs2-paired-field-head-before{color:color-mix(in srgb,#d6a85a 82%,var(--text));border-top:2px solid color-mix(in srgb,#d6a85a 70%,transparent);background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 10%,transparent),transparent 72%)}
-    .cs2-tersafe-view .cs2-paired-field-head-after{color:color-mix(in srgb,#67c58c 82%,var(--text));border-top:2px solid color-mix(in srgb,#67c58c 68%,transparent);background:linear-gradient(270deg,color-mix(in srgb,#67c58c 9%,transparent),transparent 72%)}
-    .cs2-tersafe-view .cs2-paired-field-head-kicker{display:inline-block;margin-right:7px;padding:1px 5px;border:1px solid currentColor;border-radius:999px;font-size:10px;line-height:1.25;opacity:.82}
-    .cs2-tersafe-view .cs2-paired-field-head-detail{color:var(--muted);font-weight:500}
+    .cs2-tersafe-view .cs2-paired-field-head-after{color:#4ade80}
+    .cs2-tersafe-view .cs2-paired-field-head-before{color:#ffb454}
     .cs2-tersafe-view .cs2-paired-field{border-bottom:1px solid color-mix(in srgb,var(--line) 46%,transparent)}
-    .cs2-tersafe-view .cs2-paired-side{min-width:0;padding:0 3px;background:color-mix(in srgb,var(--panel) 97%,transparent)}
-    .cs2-tersafe-view .cs2-paired-side.child-preview-before{border-right:0;background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 4%,transparent),transparent 76%)}
-    .cs2-tersafe-view .cs2-paired-side.child-preview-after{background:linear-gradient(270deg,color-mix(in srgb,#67c58c 4%,transparent),transparent 76%)}
+    .cs2-tersafe-view .cs2-paired-side{min-width:0;padding:0 3px;background:color-mix(in srgb,var(--panel) 92%,transparent)}
     .cs2-tersafe-view .cs2-paired-side-empty{display:flex;align-items:center;justify-content:center;color:var(--muted);font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
     .cs2-tersafe-view .cs2-paired-side .child-hex-table{margin-top:0;border:0;border-radius:0;overflow:visible;background:transparent}
     .cs2-tersafe-view .cs2-paired-side .child-hex-body{min-width:0;padding:0}
-    .cs2-tersafe-view .cs2-paired-side .child-hex-row{grid-template-columns:6.5ch 41ch 16ch;min-width:63.5ch;padding-block:1px;line-height:1.25}
-    .cs2-tersafe-view .cs2-paired-side .child-hex-bytes{width:auto;column-gap:.65ch;justify-content:start}
-    .cs2-tersafe-view .cs2-paired-side-more{margin:0 6px 3px;border:0}
-    .cs2-tersafe-view .cs2-paired-side-more>summary{display:block;min-height:0;padding:1px 0;color:var(--muted);font:500 10px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;cursor:pointer;list-style:none}
-    .cs2-tersafe-view .cs2-paired-side-more>summary::-webkit-details-marker{display:none}
-    .cs2-tersafe-view .cs2-paired-side-more>summary::before{content:"＋ ";color:color-mix(in srgb,var(--muted) 72%,var(--text))}
-    .cs2-tersafe-view .cs2-paired-side-more[open]>summary::before{content:"－ "}
-    .cs2-tersafe-view .cs2-paired-field-note{display:grid;grid-template-columns:minmax(9em,max-content) minmax(0,1fr);align-items:center;column-gap:8px;row-gap:1px;min-width:0;padding:3px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 58%,transparent);font:12px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 94%,transparent)}
-    .cs2-tersafe-view .cs2-paired-field-name{font-weight:600;color:var(--muted);overflow-wrap:anywhere}
-    .cs2-tersafe-view .cs2-paired-field-value{display:flex;flex-wrap:nowrap;align-items:baseline;gap:4px;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text)}
-    .cs2-tersafe-view .cs2-paired-field-value>span{min-width:0}
-    .cs2-tersafe-view .cs2-paired-field-value-long :is(.cs2-paired-field-old,.cs2-paired-field-new){flex:1 1 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .cs2-tersafe-view .cs2-paired-value-more{min-width:0;margin:0}
-    .cs2-tersafe-view .cs2-paired-value-more>summary{display:grid;grid-template-columns:10px minmax(0,1fr);align-items:baseline;min-width:0;list-style:none;cursor:pointer}
-    .cs2-tersafe-view .cs2-paired-value-more>summary::-webkit-details-marker{display:none}
-    .cs2-tersafe-view .cs2-paired-value-more>summary::before{content:"▸";color:var(--muted);font-size:10px}
-    .cs2-tersafe-view .cs2-paired-value-more[open]>summary::before{content:"▾"}
-    .cs2-tersafe-view .cs2-paired-value-full{margin:3px 0 1px 10px;padding:3px 6px;border-left:2px solid color-mix(in srgb,var(--muted) 36%,transparent);color:color-mix(in srgb,var(--text) 86%,var(--muted));background:color-mix(in srgb,var(--muted) 6%,transparent);font-size:11px;line-height:1.35;overflow-wrap:anywhere}
-    .cs2-tersafe-view :is(.cs2-paired-field-old,.cs2-paired-field-new){display:inline-flex;align-items:baseline;gap:4px;min-width:0}
-    .cs2-tersafe-view .cs2-paired-field-old::before,.cs2-tersafe-view .cs2-paired-field-new::before{flex:0 0 auto;padding:0 3px;border:1px solid currentColor;border-radius:3px;font-size:9px;line-height:1.35;opacity:.75}
-    .cs2-tersafe-view .cs2-paired-field-old::before{content:"旧"}
-    .cs2-tersafe-view .cs2-paired-field-new::before{content:"新"}
-    .cs2-tersafe-view .cs2-paired-field-old{color:color-mix(in srgb,#d6a85a 78%,var(--text));font-weight:550}
-    .cs2-tersafe-view .cs2-paired-field-arrow{color:#8b949e;font-weight:600}
-    .cs2-tersafe-view .cs2-paired-field-new{color:color-mix(in srgb,#67c58c 82%,var(--text));font-weight:600}
+    .cs2-tersafe-view .cs2-paired-side .child-hex-row{grid-template-columns:7ch 41ch 16ch;min-width:64ch;padding-block:1px;line-height:1.25}
+    .cs2-tersafe-view .cs2-paired-field-note{display:grid;grid-template-columns:minmax(9em,max-content) minmax(0,1fr);align-items:center;column-gap:8px;row-gap:0;min-width:0;padding:1px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 72%,transparent);font:11px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:color-mix(in srgb,var(--panel) 84%,transparent)}
+    .cs2-tersafe-view .cs2-paired-field-name{font-weight:700;color:var(--muted);overflow-wrap:anywhere}
+    .cs2-tersafe-view .cs2-paired-field-value{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+    .cs2-tersafe-view .cs2-paired-field-old{color:#ffb454}
+    .cs2-tersafe-view .cs2-paired-field-arrow{color:#8b949e;font-weight:800}
+    .cs2-tersafe-view .cs2-paired-field-new{color:#4ade80;font-weight:700}
     .cs2-tersafe-view .cs2-paired-field-state{grid-column:2;color:var(--muted);font-size:10px}
-    .cs2-tersafe-view .cs2-paired-field-diff{grid-column:1/-1;margin-top:2px;padding:2px 6px;border-left:2px solid color-mix(in srgb,#d6a85a 48%,transparent);border-radius:2px;color:color-mix(in srgb,#d6b56d 72%,var(--text));background:color-mix(in srgb,#d6b56d 7%,transparent);font:500 11px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
     .cs2-tersafe-view .cs2-paired-field-length .cs2-paired-field-name{color:#38bdf8}
     .cs2-tersafe-view .cs2-paired-field-time .cs2-paired-field-name{color:#2dd4bf}
     .cs2-tersafe-view .cs2-paired-field-report .cs2-paired-field-name{color:#a78bfa}
     .cs2-tersafe-view .cs2-paired-field-type .cs2-paired-field-name{color:#fb923c}
-    .cs2-tersafe-view .child-preview-before .child-hex-byte-cell-changed{color:color-mix(in srgb,#d6a85a 82%,var(--text));background:color-mix(in srgb,#d6a85a 10%,transparent);box-shadow:inset 0 -1px color-mix(in srgb,#d6a85a 38%,transparent);font-weight:650;border-radius:2px}
-    .cs2-tersafe-view .child-preview-after .child-hex-byte-cell-changed{color:color-mix(in srgb,#67c58c 84%,var(--text));background:color-mix(in srgb,#67c58c 8%,transparent);box-shadow:inset 0 -1px color-mix(in srgb,#67c58c 34%,transparent);font-weight:650;border-radius:2px}
-    .cs2-tersafe-view .child-preview-before .child-hex-ascii-cell-changed{color:color-mix(in srgb,#d6a85a 78%,var(--text));background:transparent;box-shadow:inset 0 -1px color-mix(in srgb,#d6a85a 32%,transparent);font-weight:600;border-radius:0}
-    .cs2-tersafe-view .child-preview-after .child-hex-ascii-cell-changed{color:color-mix(in srgb,#67c58c 80%,var(--text));background:transparent;box-shadow:inset 0 -1px color-mix(in srgb,#67c58c 30%,transparent);font-weight:600;border-radius:0}
+    .cs2-tersafe-view .child-preview-before :is(.child-hex-byte-cell-changed,.child-hex-ascii-cell-changed){color:#ffb454;background:color-mix(in srgb,#ffb454 20%,transparent);box-shadow:0 0 0 1px color-mix(in srgb,#ffb454 30%,transparent)}
+    .cs2-tersafe-view .child-preview-after :is(.child-hex-byte-cell-changed,.child-hex-ascii-cell-changed){color:#4ade80;background:color-mix(in srgb,#22c55e 18%,transparent);box-shadow:0 0 0 1px color-mix(in srgb,#22c55e 28%,transparent)}
     .cs2-tersafe-view .child-hex-table{overflow-x:auto}
-    .cs2-tersafe-view .child-hex-body{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;min-width:calc(64ch + 28px);padding:2px 0;font-variant-numeric:tabular-nums}
+    .cs2-tersafe-view .child-hex-body{font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;min-width:calc(64ch + 28px);padding:2px 0}
     .cs2-tersafe-view .child-hex-row{grid-template-columns:7ch 41ch 16ch minmax(0,1fr);column-gap:4px;row-gap:0;padding:1px 6px;border-left:2px solid transparent;font:inherit}
     .cs2-tersafe-view .child-hex-row-string{border-left-color:color-mix(in srgb,#22c55e 42%,transparent)}
     .cs2-tersafe-view .cs2-field-xor{border-left-color:color-mix(in srgb,#2dd4bf 64%,transparent)}
     .cs2-tersafe-view .cs2-field-xor .child-hex-note{color:color-mix(in srgb,#2dd4bf 75%,var(--text))}
-    .cs2-tersafe-view .cs2-field-redacted{color:var(--muted);background:color-mix(in srgb,var(--muted) 8%,transparent);border-radius:2px}
     .cs2-tersafe-view .child-hex-offset,.cs2-tersafe-view .child-hex-bytes,.cs2-tersafe-view .child-hex-ascii{grid-row:1;margin:0;font:inherit;overflow:visible}
     .cs2-tersafe-view .child-hex-offset{display:block;grid-column:1;white-space:nowrap}
     .cs2-tersafe-view .child-hex-bytes{grid-column:2;column-gap:.6ch}
@@ -19538,10 +19478,9 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-summary-insights .summary-insight-chip{min-width:0;overflow:hidden;text-overflow:ellipsis}
     .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
     .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
+    .cs2-summary-insights .cs2-summary-relay{flex:0 1 auto;color:#fbbf24;border-color:#f59e0b52;background:#f59e0b16}
+    .cs2-summary-insights .cs2-summary-relay-confirmed{color:#4ade80;border-color:#22c55e52;background:#22c55e16}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
-    .cs2-handshake-panel .cs2-handshake-node-meta{display:flex;flex-wrap:wrap;gap:5px 16px;padding:7px 10px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}
-    .cs2-handshake-panel .cs2-handshake-node-meta b{margin-right:5px;color:var(--text);font-weight:650}
-    .cs2-handshake-panel .cs2-handshake-node-meta .cs2-handshake-verified{color:#7ee787}
   `;
   document.head.appendChild(style);
 }
@@ -19680,28 +19619,8 @@ function makeCS2PairedSide(section, field, bytes, side, changed) {
     cell.textContent = "—";
     return cell;
   }
-  appendCS2PairedFieldPreview(cell, section, field, bytes, changed);
+  appendCS2TersafeHexTable(cell, {node: section.node, rows: [field]}, bytes, changed, false);
   return cell;
-}
-
-function appendCS2PairedFieldPreview(cell, section, field, bytes, changed) {
-  const length = Math.max(0, Number(field.end) - Number(field.offset));
-  const visibleLength = Math.min(16, length);
-  const visible = {...field, end: Number(field.offset) + visibleLength, length: visibleLength};
-  appendCS2TersafeHexTable(cell, {node: section.node, rows: [visible]}, bytes, changed, false);
-  if (length <= visibleLength) return;
-  const more = document.createElement("details");
-  more.className = "cs2-paired-side-more";
-  const summary = document.createElement("summary");
-  summary.textContent = `展开剩余 ${length - visibleLength} B`;
-  more.appendChild(summary);
-  const remainder = {
-    ...field,
-    offset: Number(field.offset) + visibleLength,
-    length: length - visibleLength,
-  };
-  appendCS2TersafeHexTable(more, {node: section.node, rows: [remainder]}, bytes, changed, false);
-  cell.appendChild(more);
 }
 
 function makeCS2PairedFieldNote(beforeField, beforeBytes, afterField, afterBytes) {
@@ -19719,43 +19638,22 @@ function makeCS2PairedFieldNote(beforeField, beforeBytes, afterField, afterBytes
   value.className = "cs2-paired-field-value";
   const beforeValue = beforeField ? cs2SharedFieldValue(beforeField, beforeRaw) : "";
   const afterValue = afterField ? cs2SharedFieldValue(afterField, afterRaw) : "";
-  let valueText = afterValue;
   if (!beforeField || !afterField || changed) {
-    const oldText = beforeField ? beforeValue : "—";
-    const newText = afterField
-      ? `${afterValue}${beforeField && beforeValue === afterValue ? "（内容变化）" : ""}` : "—";
-    valueText = `${oldText} → ${newText}`;
     const oldValue = document.createElement("span");
     oldValue.className = "cs2-paired-field-old";
-    oldValue.textContent = oldText;
+    oldValue.textContent = beforeField ? beforeValue : "—";
     const arrow = document.createElement("span");
     arrow.className = "cs2-paired-field-arrow";
     arrow.textContent = "→";
     const newValue = document.createElement("span");
     newValue.className = "cs2-paired-field-new";
-    newValue.textContent = newText;
+    newValue.textContent = afterField
+      ? `${afterValue}${beforeField && beforeValue === afterValue ? "（内容变化）" : ""}` : "—";
     value.appendChild(oldValue); value.appendChild(arrow); value.appendChild(newValue);
   } else {
     value.textContent = afterValue;
   }
-  note.appendChild(name);
-  valueText = String(valueText || "");
-  if (valueText.length > 44) {
-    value.className += " cs2-paired-field-value-long";
-    const more = document.createElement("details");
-    more.className = "cs2-paired-value-more";
-    const summary = document.createElement("summary");
-    summary.title = "点击展开完整解析值";
-    summary.appendChild(value);
-    const full = document.createElement("div");
-    full.className = "cs2-paired-value-full";
-    full.textContent = valueText;
-    more.appendChild(summary);
-    more.appendChild(full);
-    note.appendChild(more);
-  } else {
-    note.appendChild(value);
-  }
+  note.appendChild(name); note.appendChild(value);
   if (!beforeField || !afterField) {
     const state = document.createElement("span");
     state.className = "cs2-paired-field-state";
@@ -19776,21 +19674,14 @@ function appendCS2PairedFieldTable(card, beforeSection, beforeBytes, afterSectio
   inner.className = "cs2-paired-fields-inner";
   const head = document.createElement("div");
   head.className = "cs2-paired-field-head";
-  for (const [className, kicker, text] of [
-    ["cs2-paired-field-head-before", "原始", `修改前明文 · ${beforeSection.node.length} B`],
-    ["cs2-paired-field-head-middle", "对照", "字段变化（旧 → 新）"],
-    ["cs2-paired-field-head-after", "发送", `修改后明文 · ${afterSection.node.length} B`],
+  for (const [className, text] of [
+    ["cs2-paired-field-head-before", `修改前明文 · ${beforeSection.node.length} B`],
+    ["cs2-paired-field-head-middle", "字段与解析值"],
+    ["cs2-paired-field-head-after", `修改后明文 · ${afterSection.node.length} B`],
   ]) {
     const label = document.createElement("div");
     label.className = className;
-    const badge = document.createElement("span");
-    badge.className = "cs2-paired-field-head-kicker";
-    badge.textContent = kicker;
-    const detail = document.createElement("span");
-    detail.className = "cs2-paired-field-head-detail";
-    detail.textContent = text;
-    label.appendChild(badge);
-    label.appendChild(detail);
+    label.textContent = text;
     head.appendChild(label);
   }
   inner.appendChild(head);
@@ -19918,11 +19809,19 @@ function appendTerSafeLayers(card, report, annotateReportText = false) {
   for (const layer of layers) {
     const bytes = b64ToBytes(String(layer.plaintext_b64 || ""));
     const node = layer.root;
-    if (!node || node.coordinate_space !== "tersafe_inner_plaintext" || node.offset !== 0
-        || bytes.length !== layer.length || node.end !== bytes.length
+    const coordinate = String(layer.coordinate_space || "tersafe_inner_plaintext");
+    if (!node || bytes.length !== layer.length
+        || !cs2ValidCoordinateTree(node, bytes.length, coordinate)
         || (layer.kind === "decrypted" && !/^0x[\da-f]{8}$/i.test(layer.crc32 || ""))
-        || !["structural", "decrypted"].includes(layer.kind)) continue;
-    const kind = layer.kind === "decrypted" ? `CRC32 通过 ${layer.crc32}` : "结构子记录 · 未额外解密";
+        || (layer.kind === "mrpcs_xor_decoded"
+          && (!/^0x[\da-f]{2}$/i.test(layer.xor_key || "")
+            || !/^0x[\da-f]{8}$/i.test(layer.archive_crc32 || "")
+            || !/^0x[\da-f]{8}$/i.test(layer.entry_crc32 || "")))
+        || !["structural", "decrypted", "mrpcs_xor_decoded"].includes(layer.kind)) continue;
+    const kind = layer.kind === "decrypted" ? `CRC32 通过 ${layer.crc32}`
+      : layer.kind === "mrpcs_xor_decoded"
+        ? `ZIP/entry CRC32 通过 · 解压 · XOR ${layer.xor_key}`
+        : "结构子记录 · 未额外解密";
     const prefix = layer.synthetic_prefix_bytes ? ` · 补 ${layer.synthetic_prefix_bytes} B 头用于解析` : "";
     const child = {
       node, title: `内层 ${layer.depth} · ${layer.path} · ${kind}${prefix}`,
@@ -19935,6 +19834,7 @@ function appendTerSafeLayers(card, report, annotateReportText = false) {
   const reasons = {
     invalid_length: "长度不符", crc_mismatch: "CRC32 不符", codec_unavailable: "暂不支持解密",
     unverified_structure: "结构待确认", depth_limit: "达到展示深度上限", output_limit: "达到展示容量上限",
+    mrpcs_xor_unverified: "MRPCS 单字节 XOR 候选未通过唯一结构校验",
   };
   for (const stop of Array.isArray(report.stops) ? report.stops : []) {
     const note = document.createElement("div");
@@ -20027,6 +19927,35 @@ function appendCS2NestedTerSafe(card, section, outer) {
   card.appendChild(childCard);
 }
 
+function appendCS2TersafeRecords(panel, sections, after, before, beforePresentation = null) {
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  const aligned = before.length > 0 && before.length === after.length;
+  const beforeSections = beforePresentation && cs2ValidPlaintextPresentation(beforePresentation, before)
+    ? cs2RecordSections(beforePresentation.root, Number(beforePresentation.node_count), before) : [];
+  const structuredPair = beforeSections.length === sections.length && beforeSections.length > 0;
+  if (before.length && !structuredPair) {
+    appendCS2LengthMismatchOverview(panel, before, after);
+  }
+  for (const [index, section] of sections.entries()) {
+    const card = makeCS2TersafeRecordCard(section);
+    if (structuredPair) {
+      const beforeSection = beforeSections[index];
+      const {beforeChanged, afterChanged} = cs2StructuredDiffOffsets(beforeSection, before, section, after);
+      const pair = appendCS2PairedFieldTable(
+        card, beforeSection, before, section, after, beforeChanged, afterChanged);
+      if (pair) {
+        pair.className += ` cs2-plaintext-pair${aligned ? "" : " cs2-length-mismatch-pair"}`;
+      }
+    } else {
+      appendCS2CurrentPlaintext(card, section, after, before.length ? "修改后明文" : "当前明文");
+    }
+    appendCS2NestedTerSafe(card, section, after);
+    grid.appendChild(card);
+  }
+  panel.appendChild(grid);
+}
+
 function cs2WireFrameBytes(ev, analysis) {
   for (const key of ["raw_pay", "full_pay"]) {
     const kind = analysis.display_mapping?.[key];
@@ -20038,85 +19967,51 @@ function cs2WireFrameBytes(ev, analysis) {
   return [];
 }
 
-function cs2ValidHandshakeTree(node, coordinateSpace, length, budget = {value: 512}) {
-  if (!node || typeof node !== "object" || --budget.value < 0
-      || node.coordinate_space !== coordinateSpace
-      || !Number.isSafeInteger(node.offset) || !Number.isSafeInteger(node.end)
-      || node.offset < 0 || node.end < node.offset || node.end > length
-      || node.length !== node.end - node.offset
-      || !["container", "group", "field", "opaque"].includes(String(node.kind || "field"))
-      || !["observed", "verified", "unparsed", "invalid"].includes(String(node.status || "observed"))) return false;
-  const children = Array.isArray(node.children) ? node.children : [];
-  if (!children.length) return true;
-  let cursor = node.offset;
-  for (const child of children) {
-    if (!cs2ValidHandshakeTree(child, coordinateSpace, length, budget)
-        || child.offset !== cursor || child.end > node.end) return false;
-    cursor = child.end;
-  }
-  return cursor === node.end;
+function cs2ValidCoordinateTree(root, length, coordinate) {
+  if (!root || root.offset !== 0 || root.end !== length || root.length !== length
+      || root.coordinate_space !== coordinate) return false;
+  let budget = 4096;
+  const visit = (node) => {
+    if (!node || typeof node !== "object" || --budget < 0
+        || node.coordinate_space !== coordinate
+        || !Number.isSafeInteger(node.offset) || !Number.isSafeInteger(node.end)
+        || node.offset < 0 || node.end < node.offset || node.end > length
+        || node.length !== node.end - node.offset
+        || !["container", "group", "field", "opaque"].includes(String(node.kind || "field"))
+        || !["observed", "unparsed", "invalid"].includes(String(node.status || "observed"))) return false;
+    const children = Array.isArray(node.children) ? node.children : [];
+    if (!children.length) return true;
+    let cursor = node.offset;
+    for (const child of children) {
+      if (!visit(child) || child.offset !== cursor || child.end > node.end) return false;
+      cursor = child.end;
+    }
+    return cursor === node.end;
+  };
+  return visit(root);
 }
 
-function cs2HandshakePresentationView(analysis, wireBytes) {
-  const presentation = analysis?.presentation;
-  if (!presentation || presentation.schema !== "tcpv.cschannel2.presentation.v1"
-      || presentation.source !== "dfm_live_wire"
-      || presentation.coordinate_space !== "wire_frame"
-      || presentation.exact_partition !== true
-      || presentation.actual_length !== wireBytes.length
-      || presentation.declared_length_matches !== true
-      || !cs2ValidHandshakeTree(presentation.root, "wire_frame", wireBytes.length)) return null;
-  return {presentation};
+function cs2WirePresentation(analysis, wire) {
+  const view = analysis?.presentation;
+  if (!view || view.schema !== "tcpv.cschannel2.presentation.v1"
+      || view.source !== "dfm_live_wire" || view.coordinate_space !== "wire_frame"
+      || view.exact_partition !== true || view.declared_length_matches !== true
+      || view.actual_length !== wire.length
+      || !cs2ValidCoordinateTree(view.root, wire.length, "wire_frame")) return null;
+  return view;
 }
 
-function cs2HandshakeNodeSection(root, bytes) {
-  const rows = cs2FieldRows(root, bytes).map((row) => (
-    /S8/.test(String(row.label || "")) ? {...row, redacted:true} : row
-  ));
-  return {node:root, title:"node[0] 预览", code:"", rows};
-}
-
-function appendCS2HandshakeNodeMeta(card, verification, length) {
-  const role = verification.role === "response" ? "response" : "request";
-  const values = [
-    ["序号", "0", ""],
-    ["消息", role === "request" ? "握手 1" : "握手 2", ""],
-    ["用途", role === "request" ? "客户端请求握手" : "服务端响应握手", ""],
-    ["ID", verification.c8_rsa_exact_match === true ? "C8 RSA 精确匹配" : "C8 CRC 验证", "cs2-handshake-verified"],
-    ["长度", String(length), ""],
-  ];
-  const meta = document.createElement("div");
-  meta.className = "cs2-handshake-node-meta";
-  for (const [label, value, className] of values) {
-    const item = document.createElement("span");
-    if (className) item.className = className;
-    const key = document.createElement("b");
-    key.textContent = label;
-    item.appendChild(key);
-    item.appendChild(document.createTextNode(value));
-    meta.appendChild(item);
-  }
-  card.appendChild(meta);
-}
-
-function buildCS2HandshakePanel(ev, analysis, wireBytes) {
-  const verification = analysis.handshake_verification || {};
-  if (verification.status !== "verified") return null;
-  const view = cs2HandshakePresentationView(analysis, wireBytes);
-  if (!view) return null;
-  ensureChildCommonStyles();
-  ensureCS2TersafeCompactStyles();
-  const panel = document.createElement("section");
-  panel.className = "child-compare cs2-panel cs2-tersafe-view cs2-handshake-panel";
-  const grid = document.createElement("div");
-  grid.className = "child-compare-grid";
-  const section = cs2HandshakeNodeSection(view.presentation.root, wireBytes);
-  const card = makeCS2TersafeRecordCard(section);
-  appendCS2HandshakeNodeMeta(card, verification, wireBytes.length);
-  appendCS2CurrentPlaintext(card, section, wireBytes, "当前结构");
-  grid.appendChild(card);
-  panel.appendChild(grid);
-  return panel;
+function cs2HandshakeComponent(analysis) {
+  const component = analysis?.presentation?.handshake_component;
+  if (!component || component.schema !== "tcpv.cschannel2.handshake-component.v1"
+      || component.coordinate_space !== "handshake_component_decoded"
+      || component.exact_partition !== true
+      || component.validation !== "base64_strict+declared_lengths"
+      || !Number.isSafeInteger(component.length) || component.length <= 0) return null;
+  const bytes = b64ToBytes(String(component.plaintext_b64 || ""));
+  if (bytes.length !== component.length
+      || !cs2ValidCoordinateTree(component.root, bytes.length, component.coordinate_space)) return null;
+  return {component, bytes};
 }
 
 function buildCSChannel2Panel(ev) {
@@ -20127,48 +20022,97 @@ function buildCSChannel2Panel(ev) {
   const verified = after.length > 0;
   const handshakeVerification = analysis.handshake_verification || {};
   const handshakeVerified = handshakeVerification.status === "verified";
-  if (handshakeVerified) {
-    const wire = cs2WireFrameBytes(ev, analysis);
-    const handshakePanel = wire.length ? buildCS2HandshakePanel(ev, analysis, wire) : null;
-    if (handshakePanel) return handshakePanel;
-  }
   const unchanged = verified && analysis.mutation?.modified === false && analysis.mutation?.wire_mutated === false;
   const candidate = verified && !unchanged ? cs2BeforeApplicationBytes(ev, analysis, after) : [];
   const before = candidate.length === after.length && candidate.every((byte, i) => byte === after[i])
     ? [] : candidate;
-  const afterComparable = verified
-    ? cs2SharedComparablePayload(plaintext, after)
-    : (() => {
-      const wire = cs2WireFrameBytes(ev, analysis);
-      return {
-        bytes: wire,
-        parsed: { root: null, children: wire.length ? [cs2SharedComparableChild(wire, 0, 0)] : [] },
-      };
-    })();
-  if (!afterComparable.bytes.length) return null;
-  const beforePresentation = verified && before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
-  const beforeComparable = beforePresentation
-    ? cs2SharedComparablePayload(beforePresentation, before)
-    : { bytes: [], parsed: { root: null, children: [] } };
-  const panel = buildChildComparePanel("", "", "", {
-    beforeBytes: beforeComparable.bytes,
-    afterBytes: afterComparable.bytes,
-    beforeParsed: beforeComparable.parsed,
-    afterParsed: afterComparable.parsed,
-    forceCurrentOnly: beforeComparable.bytes.length === 0,
-    forceSideBySideSame: beforeComparable.bytes.length > 0,
-    title: beforeComparable.bytes.length > 0 ? "叶子节点替换观察"
-      : verified ? "当前叶子结构"
-      : handshakeVerified ? "握手已验证" : "当前线上帧",
-    meta: beforeComparable.bytes.length > 0
-      ? `修改前 ${beforeComparable.bytes.length}B · 修改后 ${afterComparable.bytes.length}B`
-      : handshakeVerified
+  const panel = document.createElement("section");
+  panel.className = "child-compare cs2-panel cs2-tersafe-view";
+  ensureChildCommonStyles();
+  ensureCS2TersafeCompactStyles();
+  const head = document.createElement("div");
+  head.className = "child-compare-head";
+  const title = document.createElement("span");
+  title.textContent = verified ? (before.length ? "CSChannel2 明文对比" : "CSChannel2 明文")
+    : handshakeVerified ? "CSChannel2 握手已验证" : "CSChannel2 线上帧";
+  const status = document.createElement("small");
+  status.textContent = unchanged ? "未修改"
+    : before.length ? (before.length === after.length ? ""
+      : `长度不同 · 共同前缀 ${cs2CommonPrefixLength(before, after)} B · 按字段对齐高亮`)
+    : verified ? "只验证了当前明文"
+    : handshakeVerified
+      ? (handshakeVerification.role === "response"
         ? `${handshakeVerification.c8_rsa_exact_match === true
-          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"}${handshakeVerification.role === "response"
-          ? " · S8 字段已观察" : ""} · ticket 保持不透明 · ${afterComparable.bytes.length}B`
-        : `${afterComparable.bytes.length}B`,
-  });
-  if (panel) panel.classList.add("cs2-panel");
+          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"} · S8 字段已观察 · ticket 保持不透明`
+        : `${handshakeVerification.c8_rsa_exact_match === true
+          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"} · ticket 保持不透明`)
+      : "无已校验明文";
+  head.appendChild(title);
+  if (status.textContent) head.appendChild(status);
+  panel.appendChild(head);
+  const relay = cs2RelayEvidence(ev);
+  if (relay) {
+    const relayStatus = document.createElement("div");
+    relayStatus.className = `cs2-relay-status${relay.confirmed ? " cs2-relay-status-confirmed" : ""}`;
+    const relayTitle = document.createElement("strong");
+    relayTitle.textContent = cs2RelayLabel(relay);
+    const relayMeta = document.createElement("small");
+    const sourceState = relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
+    relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${sourceState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
+    relayStatus.appendChild(relayTitle);
+    relayStatus.appendChild(relayMeta);
+    panel.appendChild(relayStatus);
+  }
+  if (verified) {
+    const sections = cs2RecordSections(plaintext.root, Number(plaintext.node_count), after);
+    const beforePresentation = before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
+    appendCS2TersafeRecords(panel, sections, after, before, beforePresentation);
+    const wire = cs2WireFrameBytes(ev, analysis);
+    if (wire.length) {
+      const details = document.createElement("details");
+      details.className = "child-preview-box cs2-wire-reference";
+      const label = document.createElement("summary");
+      label.textContent = `${analysis.display_mapping?.raw_pay === "rebuilt_complete_wire_frame" ? "重封装" : "原始"}线上帧 · ${wire.length} B`;
+      details.appendChild(label);
+      details.addEventListener("toggle", () => {
+        if (details.open && !details.querySelector(".child-hex-table")) {
+          appendCS2TersafeHexTable(details, cs2WholeSection(wire), wire);
+        }
+      });
+      panel.appendChild(details);
+    }
+  } else {
+    const wire = cs2WireFrameBytes(ev, analysis);
+    const view = wire.length ? cs2WirePresentation(analysis, wire) : null;
+    if (view) {
+      const section = {
+        node: view.root, title: "线上帧结构", code: "",
+        rows: cs2FieldRows(view.root, wire, false),
+      };
+      const card = makeCS2TersafeRecordCard(section);
+      appendCS2CurrentPlaintext(card, section, wire, "收到的完整帧");
+      panel.appendChild(card);
+      const decoded = cs2HandshakeComponent(analysis);
+      if (decoded) {
+        const componentSection = {
+          node: decoded.component.root, title: "握手 Base64 解码层", code: "",
+          rows: cs2FieldRows(decoded.component.root, decoded.bytes, false),
+        };
+        const componentCard = makeCS2TersafeRecordCard(componentSection);
+        appendCS2CurrentPlaintext(componentCard, componentSection, decoded.bytes, "已校验解码内容");
+        panel.appendChild(componentCard);
+      }
+    } else {
+      const body = document.createElement("div");
+      body.className = "child-preview-box";
+      if (wire.length) appendCS2TersafeHexTable(body, cs2WholeSection(wire), wire);
+      else {
+      body.className += " child-preview-empty";
+      body.textContent = "当前记录没有可显示的帧字节";
+      }
+      panel.appendChild(body);
+    }
+  }
   return panel;
 }
 /* CSChannel2 read-only frame tree end */
