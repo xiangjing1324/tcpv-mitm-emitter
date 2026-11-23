@@ -18715,6 +18715,8 @@ function cs2RelayEvidence(ev, summaryText) {
   const detail = isCSChannel2Event(ev) ? ev.analysis?.port_relay : null;
   const route = String(detail?.route || /(?:^|\s)relay_route=([^\s]+)/.exec(summary)?.[1] || "");
   if (route !== "8092->8091") return null;
+  const role = String(detail?.role
+    || /(?:^|\s)relay_role=([^\s]+)/.exec(summary)?.[1] || "source_handoff");
   const status = String(detail?.status || /(?:^|\s)relay_status=([^\s]+)/.exec(summary)?.[1] || "unknown");
   const confirmed = detail?.confirmed_delivery === true
     || /(?:^|\s)relay_confirmed=1(?=\s|$)/.test(summary);
@@ -18722,8 +18724,10 @@ function cs2RelayEvidence(ev, summaryText) {
     ? detail.source_forwarded_to_client : !confirmed && status !== "claimed_timeout_drop_source";
   return {
     route,
+    role,
     status,
     confirmed,
+    targetReceived: detail?.target_received === true || role === "target_receive",
     sourceForwarded,
     reportCode: String(detail?.report_code
       || /(?:^|\s)relay_report=(0x[0-9a-f]{8})(?=\s|$)/i.exec(summary)?.[1] || ""),
@@ -18733,6 +18737,7 @@ function cs2RelayEvidence(ev, summaryText) {
 }
 
 function cs2RelayLabel(relay) {
+  if (relay?.targetReceived) return "接收自 8092";
   if (relay?.confirmed) return "已转交 8091";
   if (relay && !relay.sourceForwarded) return "8091 已领取 · 待确认";
   return "转交 8091 未成功";
@@ -18878,7 +18883,9 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
     const relayChip = document.createElement("span");
     relayChip.className = `summary-insight-chip cs2-summary-relay${relay.confirmed ? " cs2-summary-relay-confirmed" : ""}`;
     relayChip.textContent = cs2RelayLabel(relay);
-    relayChip.title = relay.confirmed
+    relayChip.title = relay.targetReceived
+      ? `8091 已接收 8092 原包，并按 8091 会话重加密注入 · event ${relay.eventId || "-"}`
+      : relay.confirmed
       ? `8092 原包已交给 8091，并由 8091 会话重加密发送 · event ${relay.eventId || "-"}`
       : `${cs2RelayLabel(relay)} · status ${relay.status}`;
     strip.appendChild(relayChip);
@@ -20057,8 +20064,10 @@ function buildCSChannel2Panel(ev) {
     const relayTitle = document.createElement("strong");
     relayTitle.textContent = cs2RelayLabel(relay);
     const relayMeta = document.createElement("small");
-    const sourceState = relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
-    relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${sourceState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
+    const routeState = relay.targetReceived
+      ? "接收端 8091 · 已注入目标客户端流"
+      : relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
+    relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
     relayStatus.appendChild(relayTitle);
     relayStatus.appendChild(relayMeta);
     panel.appendChild(relayStatus);
