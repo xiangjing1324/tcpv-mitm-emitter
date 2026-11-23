@@ -18722,6 +18722,8 @@ function cs2RelayEvidence(ev, summaryText) {
     || /(?:^|\s)relay_confirmed=1(?=\s|$)/.test(summary);
   const sourceForwarded = detail && typeof detail.source_forwarded_to_client === "boolean"
     ? detail.source_forwarded_to_client : !confirmed && status !== "claimed_timeout_drop_source";
+  const frameLength = Number(detail?.source_frame_length
+    || /(?:^|\s)relay_frame_len=(\d+)(?=\s|$)/.exec(summary)?.[1] || 0);
   return {
     route,
     role,
@@ -18729,6 +18731,7 @@ function cs2RelayEvidence(ev, summaryText) {
     confirmed,
     targetReceived: detail?.target_received === true || role === "target_receive",
     sourceForwarded,
+    frameLength: Number.isSafeInteger(frameLength) && frameLength > 0 ? frameLength : 0,
     reportCode: String(detail?.report_code
       || /(?:^|\s)relay_report=(0x[0-9a-f]{8})(?=\s|$)/i.exec(summary)?.[1] || ""),
     eventId: String(detail?.event_id
@@ -18884,9 +18887,9 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
     relayChip.className = `summary-insight-chip cs2-summary-relay${relay.confirmed ? " cs2-summary-relay-confirmed" : ""}`;
     relayChip.textContent = cs2RelayLabel(relay);
     relayChip.title = relay.targetReceived
-      ? `8091 已接收 8092 原包，并按 8091 会话重加密注入 · event ${relay.eventId || "-"}`
+      ? `8091 已接收 8092 原包，并按 8091 会话重加密注入${relay.frameLength ? ` · ${relay.frameLength} B` : ""} · event ${relay.eventId || "-"}`
       : relay.confirmed
-      ? `8092 原包已交给 8091，并由 8091 会话重加密发送 · event ${relay.eventId || "-"}`
+      ? `8092 原包已交给 8091，并由 8091 会话重加密发送${relay.frameLength ? ` · ${relay.frameLength} B` : ""} · event ${relay.eventId || "-"}`
       : `${cs2RelayLabel(relay)} · status ${relay.status}`;
     strip.appendChild(relayChip);
   }
@@ -20096,7 +20099,7 @@ function buildCSChannel2Panel(ev) {
     const routeState = relay.targetReceived
       ? "接收端 8091 · 已注入目标客户端流"
       : relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
-    relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
+    relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.frameLength ? ` · ${relay.frameLength} B（>120 B）` : ""}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
     relayStatus.appendChild(relayTitle);
     relayStatus.appendChild(relayMeta);
     panel.appendChild(relayStatus);
