@@ -18685,7 +18685,9 @@ function cs2SummaryDisplaySource(ev) {
     return {payloadKey: "full_pay", prefixKey: "full_pfx", length: Number(ev.full_len), label: "应用明文"};
   }
   if (Number(ev.raw_len) > 0 && (ev.raw_pfx || ev.raw_pay)) {
-    const handshakeVerified = analysis?.handshake_verification?.status === "verified";
+    const handshakeVerified = analysis?.handshake_verification?.status === "verified"
+      || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
+        .test(String(ev?.summary || ""));
     return {payloadKey: "raw_pay", prefixKey: "raw_pfx", length: Number(ev.raw_len),
       label: handshakeVerified ? "握手已验证" : "线上帧"};
   }
@@ -18744,6 +18746,38 @@ function cs2RelayLabel(relay) {
   if (relay?.confirmed) return "已转交 8091";
   if (relay && !relay.sourceForwarded) return "8091 已领取 · 待确认";
   return "转交 8091 未成功";
+}
+
+function ensureCS2RelayStyles() {
+  if (document.getElementById && document.getElementById("tcpv-cs2-relay-styles")) return;
+  const style = document.createElement("style");
+  style.id = "tcpv-cs2-relay-styles";
+  style.textContent = `
+    .cs2-panel .cs2-relay-status{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:5px 7px;padding:6px 8px;border:1px solid color-mix(in srgb,#f59e0b 42%,var(--line));border-radius:6px;background:color-mix(in srgb,#f59e0b 9%,var(--panel));font-size:11px}
+    .cs2-panel .cs2-relay-status strong{color:#fbbf24}
+    .cs2-panel .cs2-relay-status small{color:var(--muted);overflow-wrap:anywhere}
+    .cs2-panel .cs2-relay-status-confirmed{border-color:color-mix(in srgb,#22c55e 48%,var(--line));background:color-mix(in srgb,#22c55e 9%,var(--panel))}
+    .cs2-panel .cs2-relay-status-confirmed strong{color:#4ade80}
+  `;
+  document.head.appendChild(style);
+}
+
+function appendCS2RelayStatus(panel, relay) {
+  if (!panel || !relay) return;
+  ensureCS2RelayStyles();
+  const relayStatus = document.createElement("div");
+  relayStatus.className = `cs2-relay-status${relay.confirmed ? " cs2-relay-status-confirmed" : ""}`;
+  const relayTitle = document.createElement("strong");
+  relayTitle.textContent = cs2RelayLabel(relay);
+  const relayMeta = document.createElement("small");
+  const routeState = relay.targetReceived
+    ? "接收端 8091 · 已注入目标客户端流"
+    : relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
+  relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.frameLength ? ` · ${relay.frameLength} B（>120 B）` : ""}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
+  relayStatus.appendChild(relayTitle);
+  relayStatus.appendChild(relayMeta);
+  const head = panel.querySelector(".child-compare-head");
+  panel.insertBefore(relayStatus, head?.nextSibling || panel.firstChild || null);
 }
 
 function cs2CompactReportCounts(ev, summaryText) {
@@ -18852,7 +18886,9 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
   const summary = String(summaryText || ev?.summary || "");
   const decoded = /(?:^|\s)status=decoded(?=\s|$)/.test(summary);
   const analysis = isCSChannel2Event(ev) ? ev.analysis : null;
-  const handshakeVerified = analysis?.handshake_verification?.status === "verified";
+  const handshakeVerified = analysis?.handshake_verification?.status === "verified"
+    || /(?:^|\s)handshake_verify=c8_(?:rsa_exact_match|business_crc)(?:\+s8_observed)?(?=\s|$)/
+      .test(summary);
   const { counts, partial } = cs2CompactReportCounts(ev, summary);
   const rows = [...counts].sort(([a, na], [b, nb]) => (
     Number(b === "0x0102000a") - Number(a === "0x0102000a") || nb - na
@@ -19309,6 +19345,77 @@ function cs2RecordSections(root, nodeCount, bytes) {
     code: cs2ReportCode(node),
     rows: cs2FieldRows(node, bytes, true),
   }));
+}
+
+function cs2SharedPayloadNode(itemNode) {
+  if (!itemNode || typeof itemNode !== "object") return null;
+  const children = Array.isArray(itemNode.children) ? itemNode.children : [];
+  const directRecord = children.find((node) => /^TSS-like 报告\s+/i.test(String(node && node.name || "")));
+  if (directRecord) return directRecord;
+  const applicationBody = children.find((node) => /^应用正文/.test(String(node && node.name || "")));
+  return applicationBody || itemNode;
+}
+
+function cs2SharedDeepestVerifiedBytes(rawBytes) {
+  let current = Array.isArray(rawBytes) ? rawBytes.slice() : [];
+  for (let depth = 0; depth < 6 && current.length >= 10; depth += 1) {
+    const encrypted = decryptDisplayableTssEnvelope(current);
+    if (!encrypted || !encrypted.supported || !encrypted.crcMatch
+        || !Array.isArray(encrypted.plain) || encrypted.plain.length < 10) break;
+    const inner = detectTssReport(encrypted.plain);
+    if (!inner || !isLikelyTssReportCode(inner.value)) break;
+    current = encrypted.plain.slice();
+  }
+  return current;
+}
+
+function cs2SharedComparableChild(rawBytes, index, recordStart) {
+  const record = Array.isArray(rawBytes) ? rawBytes : [];
+  const report = detectTssReport(record);
+  const reportCode = report && isLikelyTssReportCode(report.value) ? Number(report.value) : null;
+  const identity = report ? tssRecordIdentity(record, report) : { idValue: null, idText: "" };
+  const className = classifyRecordBytes(record, reportCode);
+  const child = {
+    index,
+    nodeLabel: `node[${index}]`,
+    offset: recordStart,
+    recordStart,
+    recordEnd: recordStart + record.length,
+    len: record.length,
+    lengthEndian: "",
+    reportCode,
+    reportOffset: report ? report.offset : -1,
+    idValue: identity.idValue,
+    idText: identity.idText,
+    className,
+    valuePreview: formatRecordValuePreview(record, reportCode),
+    timestampCandidates: extractTimestampCandidatesFromRecord(record),
+    hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
+    xorCommonPreview: className === "binary-like-leaf" || Number(reportCode) === 0x0102000a
+      ? summarizeCommonFixedXor(record, reportCode) : "",
+  };
+  return attachLocalChildSemantic(child, record);
+}
+
+function cs2SharedComparablePayload(presentation, applicationBytes) {
+  const source = Array.isArray(applicationBytes) ? applicationBytes : [];
+  const root = presentation && presentation.root;
+  const declaredCount = Number(presentation && presentation.node_count || 0);
+  const items = declaredCount > 0 && Array.isArray(root && root.children)
+    ? root.children.filter((node) => /^node\[\d+\]$/.test(String(node && node.name || "")))
+    : root ? [root] : [];
+  const bytes = [];
+  const children = [];
+  for (const [index, item] of items.entries()) {
+    const payloadNode = cs2SharedPayloadNode(item);
+    const raw = cs2NodeRange(payloadNode, source);
+    if (!raw.length) continue;
+    const displayed = cs2SharedDeepestVerifiedBytes(raw);
+    const start = bytes.length;
+    bytes.push(...displayed);
+    children.push(cs2SharedComparableChild(displayed, index, start));
+  }
+  return { bytes, parsed: { root: null, children } };
 }
 
 const cs2BeijingClock = new Intl.DateTimeFormat("sv-SE", {
@@ -20006,6 +20113,87 @@ function cs2WireFrameBytes(ev, analysis) {
   return [];
 }
 
+function cs2ValidHandshakeTree(node, coordinateSpace, length, budget = {value: 512}) {
+  if (!node || typeof node !== "object" || --budget.value < 0
+      || node.coordinate_space !== coordinateSpace
+      || !Number.isSafeInteger(node.offset) || !Number.isSafeInteger(node.end)
+      || node.offset < 0 || node.end < node.offset || node.end > length
+      || node.length !== node.end - node.offset
+      || !["container", "group", "field", "opaque"].includes(String(node.kind || "field"))
+      || !["observed", "verified", "unparsed", "invalid"].includes(String(node.status || "observed"))) return false;
+  const children = Array.isArray(node.children) ? node.children : [];
+  if (!children.length) return true;
+  let cursor = node.offset;
+  for (const child of children) {
+    if (!cs2ValidHandshakeTree(child, coordinateSpace, length, budget)
+        || child.offset !== cursor || child.end > node.end) return false;
+    cursor = child.end;
+  }
+  return cursor === node.end;
+}
+
+function cs2HandshakePresentationView(analysis, wireBytes) {
+  const presentation = analysis?.presentation;
+  if (!presentation || presentation.schema !== "tcpv.cschannel2.presentation.v1"
+      || presentation.source !== "dfm_live_wire"
+      || presentation.coordinate_space !== "wire_frame"
+      || presentation.exact_partition !== true
+      || presentation.actual_length !== wireBytes.length
+      || presentation.declared_length_matches !== true
+      || !cs2ValidHandshakeTree(presentation.root, "wire_frame", wireBytes.length)) return null;
+  return {presentation};
+}
+
+function cs2HandshakeNodeSection(root, bytes) {
+  const rows = cs2FieldRows(root, bytes).map((row) => (
+    /S8/.test(String(row.label || "")) ? {...row, redacted:true} : row
+  ));
+  return {node:root, title:"node[0] 预览", code:"", rows};
+}
+
+function appendCS2HandshakeNodeMeta(card, verification, length) {
+  const role = verification.role === "response" ? "response" : "request";
+  const values = [
+    ["序号", "0", ""],
+    ["消息", role === "request" ? "握手 1" : "握手 2", ""],
+    ["用途", role === "request" ? "客户端请求握手" : "服务端响应握手", ""],
+    ["ID", verification.c8_rsa_exact_match === true ? "C8 RSA 精确匹配" : "C8 CRC 验证", "cs2-handshake-verified"],
+    ["长度", String(length), ""],
+  ];
+  const meta = document.createElement("div");
+  meta.className = "cs2-handshake-node-meta";
+  for (const [label, value, className] of values) {
+    const item = document.createElement("span");
+    if (className) item.className = className;
+    const key = document.createElement("b");
+    key.textContent = label;
+    item.appendChild(key);
+    item.appendChild(document.createTextNode(value));
+    meta.appendChild(item);
+  }
+  card.appendChild(meta);
+}
+
+function buildCS2HandshakePanel(ev, analysis, wireBytes) {
+  const verification = analysis.handshake_verification || {};
+  if (verification.status !== "verified") return null;
+  const view = cs2HandshakePresentationView(analysis, wireBytes);
+  if (!view) return null;
+  ensureChildCommonStyles();
+  ensureCS2TersafeCompactStyles();
+  const panel = document.createElement("section");
+  panel.className = "child-compare cs2-panel cs2-tersafe-view cs2-handshake-panel";
+  const grid = document.createElement("div");
+  grid.className = "child-compare-grid";
+  const section = cs2HandshakeNodeSection(view.presentation.root, wireBytes);
+  const card = makeCS2TersafeRecordCard(section);
+  appendCS2HandshakeNodeMeta(card, verification, wireBytes.length);
+  appendCS2CurrentPlaintext(card, section, wireBytes, "当前结构");
+  grid.appendChild(card);
+  panel.appendChild(grid);
+  return panel;
+}
+
 function cs2ValidCoordinateTree(root, length, coordinate) {
   if (!root || root.offset !== 0 || root.end !== length || root.length !== length
       || root.coordinate_space !== coordinate) return false;
@@ -20061,99 +20249,50 @@ function buildCSChannel2Panel(ev) {
   const verified = after.length > 0;
   const handshakeVerification = analysis.handshake_verification || {};
   const handshakeVerified = handshakeVerification.status === "verified";
+  if (handshakeVerified) {
+    const wire = cs2WireFrameBytes(ev, analysis);
+    const handshakePanel = wire.length ? buildCS2HandshakePanel(ev, analysis, wire) : null;
+    if (handshakePanel) return handshakePanel;
+  }
   const unchanged = verified && analysis.mutation?.modified === false && analysis.mutation?.wire_mutated === false;
   const candidate = verified && !unchanged ? cs2BeforeApplicationBytes(ev, analysis, after) : [];
   const before = candidate.length === after.length && candidate.every((byte, i) => byte === after[i])
     ? [] : candidate;
-  const panel = document.createElement("section");
-  panel.className = "child-compare cs2-panel cs2-tersafe-view";
-  ensureChildCommonStyles();
-  ensureCS2TersafeCompactStyles();
-  const head = document.createElement("div");
-  head.className = "child-compare-head";
-  const title = document.createElement("span");
-  title.textContent = verified ? (before.length ? "CSChannel2 明文对比" : "CSChannel2 明文")
-    : handshakeVerified ? "CSChannel2 握手已验证" : "CSChannel2 线上帧";
-  const status = document.createElement("small");
-  status.textContent = unchanged ? "未修改"
-    : before.length ? (before.length === after.length ? ""
-      : `长度不同 · 共同前缀 ${cs2CommonPrefixLength(before, after)} B · 按字段对齐高亮`)
-    : verified ? "只验证了当前明文"
-    : handshakeVerified
-      ? (handshakeVerification.role === "response"
-        ? `${handshakeVerification.c8_rsa_exact_match === true
-          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"} · S8 字段已观察 · ticket 保持不透明`
-        : `${handshakeVerification.c8_rsa_exact_match === true
-          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"} · ticket 保持不透明`)
-      : "无已校验明文";
-  head.appendChild(title);
-  if (status.textContent) head.appendChild(status);
-  panel.appendChild(head);
-  const relay = cs2RelayEvidence(ev);
-  if (relay) {
-    const relayStatus = document.createElement("div");
-    relayStatus.className = `cs2-relay-status${relay.confirmed ? " cs2-relay-status-confirmed" : ""}`;
-    const relayTitle = document.createElement("strong");
-    relayTitle.textContent = cs2RelayLabel(relay);
-    const relayMeta = document.createElement("small");
-    const routeState = relay.targetReceived
-      ? "接收端 8091 · 已注入目标客户端流"
-      : relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
-    relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.frameLength ? ` · ${relay.frameLength} B（>120 B）` : ""}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
-    relayStatus.appendChild(relayTitle);
-    relayStatus.appendChild(relayMeta);
-    panel.appendChild(relayStatus);
-  }
-  if (verified) {
-    const sections = cs2RecordSections(plaintext.root, Number(plaintext.node_count), after);
-    const beforePresentation = before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
-    appendCS2TersafeRecords(panel, sections, after, before, beforePresentation);
-    const wire = cs2WireFrameBytes(ev, analysis);
-    if (wire.length) {
-      const details = document.createElement("details");
-      details.className = "child-preview-box cs2-wire-reference";
-      const label = document.createElement("summary");
-      label.textContent = `${analysis.display_mapping?.raw_pay === "rebuilt_complete_wire_frame" ? "重封装" : "原始"}线上帧 · ${wire.length} B`;
-      details.appendChild(label);
-      details.addEventListener("toggle", () => {
-        if (details.open && !details.querySelector(".child-hex-table")) {
-          appendCS2TersafeHexTable(details, cs2WholeSection(wire), wire);
-        }
-      });
-      panel.appendChild(details);
-    }
-  } else {
-    const wire = cs2WireFrameBytes(ev, analysis);
-    const view = wire.length ? cs2WirePresentation(analysis, wire) : null;
-    if (view) {
-      const section = {
-        node: view.root, title: "线上帧结构", code: "",
-        rows: cs2FieldRows(view.root, wire, false),
+  const afterComparable = verified
+    ? cs2SharedComparablePayload(plaintext, after)
+    : (() => {
+      const wire = cs2WireFrameBytes(ev, analysis);
+      return {
+        bytes: wire,
+        parsed: { root: null, children: wire.length ? [cs2SharedComparableChild(wire, 0, 0)] : [] },
       };
-      const card = makeCS2TersafeRecordCard(section);
-      appendCS2CurrentPlaintext(card, section, wire, "收到的完整帧");
-      panel.appendChild(card);
-      const decoded = cs2HandshakeComponent(analysis);
-      if (decoded) {
-        const componentSection = {
-          node: decoded.component.root, title: "握手 Base64 解码层", code: "",
-          rows: cs2FieldRows(decoded.component.root, decoded.bytes, false),
-        };
-        const componentCard = makeCS2TersafeRecordCard(componentSection);
-        appendCS2CurrentPlaintext(componentCard, componentSection, decoded.bytes, "已校验解码内容");
-        panel.appendChild(componentCard);
-      }
-    } else {
-      const body = document.createElement("div");
-      body.className = "child-preview-box";
-      if (wire.length) appendCS2TersafeHexTable(body, cs2WholeSection(wire), wire);
-      else {
-      body.className += " child-preview-empty";
-      body.textContent = "当前记录没有可显示的帧字节";
-      }
-      panel.appendChild(body);
-    }
-  }
+    })();
+  if (!afterComparable.bytes.length) return null;
+  const beforePresentation = verified && before.length ? cs2BeforePlaintextPresentation(analysis, before) : null;
+  const beforeComparable = beforePresentation
+    ? cs2SharedComparablePayload(beforePresentation, before)
+    : { bytes: [], parsed: { root: null, children: [] } };
+  const panel = buildChildComparePanel("", "", "", {
+    beforeBytes: beforeComparable.bytes,
+    afterBytes: afterComparable.bytes,
+    beforeParsed: beforeComparable.parsed,
+    afterParsed: afterComparable.parsed,
+    forceCurrentOnly: beforeComparable.bytes.length === 0,
+    forceSideBySideSame: beforeComparable.bytes.length > 0,
+    title: beforeComparable.bytes.length > 0 ? "叶子节点替换观察"
+      : verified ? "当前叶子结构"
+      : handshakeVerified ? "握手已验证" : "当前线上帧",
+    meta: beforeComparable.bytes.length > 0
+      ? `修改前 ${beforeComparable.bytes.length}B · 修改后 ${afterComparable.bytes.length}B`
+      : handshakeVerified
+        ? `${handshakeVerification.c8_rsa_exact_match === true
+          ? "C8 RSA 块精确匹配" : "C8 业务 CRC 验证"}${handshakeVerification.role === "response"
+          ? " · S8 字段已观察" : ""} · ticket 保持不透明 · ${afterComparable.bytes.length}B`
+        : `${afterComparable.bytes.length}B`,
+  });
+  if (!panel) return null;
+  panel.classList.add("cs2-panel");
+  appendCS2RelayStatus(panel, cs2RelayEvidence(ev));
   return panel;
 }
 /* CSChannel2 read-only frame tree end */
