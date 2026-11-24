@@ -234,13 +234,17 @@ class FlowLifecycleUiTests(unittest.TestCase):
         result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True, timeout=5)
         return json.loads(result.stdout)
 
-    def test_idle_open_socket_stays_blue_and_duration_keeps_running(self) -> None:
+    def test_stale_open_record_is_unconfirmed_and_duration_stops_at_last_packet(self) -> None:
         row = {"tcp_start_ts": 1000, "tcp_end_ts": 0, "is_open": True, "status": "open", "status_source": "tcp_start", "last_packet_ts": 800_000}
         first = self.evaluate(row)
         later = self.evaluate(row, 1_300_000)
         self.assertTrue(first["open"])
         self.assertTrue(later["open"])
-        self.assertEqual(later["durationMs"] - first["durationMs"], 300_000)
+        self.assertEqual(first["displayState"], "unconfirmed")
+        self.assertEqual(later["displayState"], "unconfirmed")
+        self.assertEqual(first["durationMs"], 799_000)
+        self.assertEqual(later["durationMs"], first["durationMs"])
+        self.assertIn("状态未确认", first["stateText"])
         self.assertEqual(first["statusSource"], "tcp_start")
 
     def test_end_with_late_fresh_packet_never_reopens(self) -> None:
@@ -258,7 +262,18 @@ class FlowLifecycleUiTests(unittest.TestCase):
     def test_start_without_packets_is_open(self) -> None:
         result = self.evaluate({"tcp_start_ts": 1000})
         self.assertTrue(result["open"])
-        self.assertEqual(result["durationMs"], 999_000)
+        self.assertEqual(result["displayState"], "unconfirmed")
+        recent = self.evaluate({"tcp_start_ts": 970_000})
+        self.assertTrue(recent["open"])
+        self.assertEqual(recent["displayState"], "recent")
+        self.assertEqual(recent["durationMs"], 30_000)
+
+    def test_late_traffic_refreshes_activity_without_changing_lifecycle(self) -> None:
+        row = {"tcp_start_ts": 1000, "last_packet_ts": 910_000, "is_open": True}
+        self.assertEqual(self.evaluate(row)["displayState"], "recent")
+        self.assertEqual(self.evaluate(row, 1_000_001)["displayState"], "unconfirmed")
+        row["last_packet_ts"] = 1_000_001
+        self.assertEqual(self.evaluate(row, 1_000_001)["displayState"], "recent")
 
     def test_status_only_open_does_not_expire(self) -> None:
         result = self.evaluate({"status": " OPEN ", "last_packet_ts": 1000})

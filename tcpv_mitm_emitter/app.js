@@ -115,6 +115,8 @@ const INITIAL_DRAIN_PAGES = cfgNumber("initial_drain_pages", 4);
 const GCLOUD_INITIAL_DRAIN_PAGES = Math.max(INITIAL_DRAIN_PAGES, 16);
 const PREVIEW_OFFSET_MAX = 4096;
 const PREVIEW_BYTE_OPTIONS = [8, 16, 24, 32, 48, 64, 80, 96, 128];
+const DEFAULT_PREVIEW_BYTES = 8;
+const PREVIEW_DEFAULT_VERSION_KEY = "tcpv_preview_default_v2";
 const PAYLOAD_PREFETCH_DELAY_MS = 220;
 const PAYLOAD_CACHE_MAX_ENTRIES = 24;
 const PAYLOAD_CACHE_MAX_BYTES = 6 * 1024 * 1024;
@@ -1793,12 +1795,14 @@ function loadRules() {
     );
   }
   el.hideAscii.value = localStorage.getItem("tcpv_hide_ascii") || "0";
-  const savedPreviewBytes = String(localStorage.getItem("tcpv_preview_bytes") || "").trim();
-  const initialPreviewBytes = PREVIEW_BYTE_OPTIONS.includes(Number(savedPreviewBytes)) ? String(Number(savedPreviewBytes)) : "16";
-  el.previewBytes.value = initialPreviewBytes;
-  if (savedPreviewBytes !== initialPreviewBytes) {
-    localStorage.setItem("tcpv_preview_bytes", initialPreviewBytes);
-  }
+  const savedPreviewBytes = parsePreviewByteCount(localStorage.getItem("tcpv_preview_bytes"));
+  const firstLoadWithNewDefault = localStorage.getItem(PREVIEW_DEFAULT_VERSION_KEY) !== "1";
+  // The old default was written even if the viewer never changed it.
+  const previewBytes = firstLoadWithNewDefault && savedPreviewBytes === 16
+    ? DEFAULT_PREVIEW_BYTES : savedPreviewBytes;
+  el.previewBytes.value = String(previewBytes);
+  localStorage.setItem("tcpv_preview_bytes", el.previewBytes.value);
+  localStorage.setItem(PREVIEW_DEFAULT_VERSION_KEY, "1");
   setPreviewOffsetControls(previewOffset);
   if (el.previewOffsetRange) {
     el.previewOffsetRange.max = String(PREVIEW_OFFSET_MAX);
@@ -2090,7 +2094,11 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
     firstTs,
     open ? (lastPacketTs || lastTs) : (tcpEndTs || endedTs || lastTs),
   );
-  const displayEndTs = open ? Math.max(firstTs, Number(nowMs) || recordedEndTs) : recordedEndTs;
+  const recentlyObserved = lastPacketTs > 0 ? activity.fresh
+    : firstTs > 0 && Math.abs(Number(nowMs) - firstTs) <= FLOW_ACTIVITY_FRESH_MS;
+  // Preserve the stored lifecycle; an old open marker is not presence evidence.
+  const displayState = !open ? "closed" : recentlyObserved ? "recent" : "unconfirmed";
+  const displayEndTs = displayState === "recent" ? Math.max(firstTs, Number(nowMs) || recordedEndTs) : recordedEndTs;
   const durationRaw = Number(item && item.duration_ms);
   const hasAuthoritativeDuration = Number.isFinite(durationRaw) && durationRaw >= 0;
   const fallbackDuration = hasAuthoritativeDuration ? durationRaw : 0;
@@ -2113,6 +2121,7 @@ function getFlowTimeInfo(item, nowMs = Date.now()) {
     displayEndTs,
     durationMs,
     open,
+    displayState,
     tcpStartTs,
     tcpEndTs,
     firstPacketTs,
@@ -2127,12 +2136,20 @@ function flowLifecycleStateText(time) {
   if (source === "legacy_activity_inferred") {
     return time && time.open ? "缺少连接状态，按最近包推测活跃" : "缺少连接状态，最近没有观察到包";
   }
-  if (time && time.open) return "连接进行中（包是否活跃另行显示）";
+  if (time?.displayState === "unconfirmed") return "状态未确认：没有近期活动，也没有断开记录";
+  if (time?.displayState === "recent") return time.lastPacketTs > 0
+    ? "近90秒有包，不代表账号在线" : "刚建立连接，尚未观察到包";
   if (source === "tcp_end") return "tcp_end 已确认";
   if (source === "runtime_restart_last_packet") {
     return "MITM 重启时按末包收口（未收到 tcp_end）";
   }
   return "已收口（未收到 tcp_end）";
+}
+
+function flowLifecycleEndText(time) {
+  if (time.displayState === "unconfirmed") return "未确认";
+  if (time.displayState === "recent") return "尚无结束记录";
+  return formatFlowTimestamp(time.recordedEndTs);
 }
 
 function getFlowPairKind(item) {
@@ -2182,11 +2199,13 @@ function buildPairedFlowTimeIndex(rows, nowMs = Date.now()) {
       const durationMs = overlapDurationMs > 0
         ? overlapDurationMs
         : Math.min(gcloud.time.durationMs, tersafe.time.durationMs);
-      const open = gcloud.time.open && tersafe.time.open;
+      const displayState = [gcloud.time.displayState, tersafe.time.displayState].includes("unconfirmed")
+        ? "unconfirmed" : gcloud.time.displayState === "recent" && tersafe.time.displayState === "recent"
+          ? "recent" : "closed";
       result.set(gcloud.flowId, {
         accountInfo,
         durationMs,
-        open,
+        displayState,
         socketDurationMs: gcloud.time.durationMs,
         partnerFlowId: tersafe.flowId,
         startGapMs,
@@ -2194,7 +2213,7 @@ function buildPairedFlowTimeIndex(rows, nowMs = Date.now()) {
       result.set(tersafe.flowId, {
         accountInfo,
         durationMs,
-        open,
+        displayState,
         socketDurationMs: tersafe.time.durationMs,
         partnerFlowId: gcloud.flowId,
         startGapMs,
@@ -2356,27 +2375,23 @@ function renderFlowList() {
     const duration = document.createElement("div");
     const socketTime = getFlowTimeInfo(item, nowMs);
     const pairTime = pairedFlowTime.get(flowId);
-    // The flow row represents this TCP socket, so its primary duration and
-    // open/closed state must come from this socket's tcp_start/tcp_end.  A
-    // paired GCloud/Tersafe overlap is correlation evidence only and remains
-    // available in the tooltip below.
-    const durationMs = socketTime.durationMs;
-    const open = socketTime.open;
-    duration.className = `flow-time ${open ? "flow-time-open" : "flow-time-closed"}`;
-    duration.textContent = formatDuration(durationMs);
+    const recent = socketTime.displayState === "recent";
+    const unconfirmed = socketTime.displayState === "unconfirmed";
+    duration.className = `flow-time ${recent ? "flow-time-open" : "flow-time-closed"}`;
+    duration.textContent = unconfirmed ? "状态未确认" : formatDuration(socketTime.durationMs);
     const socketState = flowLifecycleStateText(socketTime);
     const socketTimeTitle = [
       `开始 ${formatFlowTimestamp(socketTime.firstTs)}`,
-      `结束 ${socketTime.open ? "进行中" : formatFlowTimestamp(socketTime.recordedEndTs)}`,
-      `时长 ${formatDuration(socketTime.durationMs)}`,
+      `结束 ${flowLifecycleEndText(socketTime)}`,
+      `${unconfirmed ? "已观察时长" : "时长"} ${formatDuration(socketTime.durationMs)}`,
       socketState,
       `source=${socketTime.statusSource}`,
       socketTime.firstPacketTs > 0 ? `首包 ${formatFlowTimestamp(socketTime.firstPacketTs)}` : "",
       socketTime.lastPacketTs > 0 ? `末包 ${formatFlowTimestamp(socketTime.lastPacketTs)}` : "",
-      socketTime.lastPacketTs > 0 ? `最近观察活动：${socketTime.idleMs <= FLOW_ACTIVITY_FRESH_MS ? "90秒内有包" : "超过90秒无包，不代表断开"}` : "",
     ].filter(Boolean).join("；");
     if (pairTime) {
-      const stateText = open ? "进行中" : "已结束";
+      const stateText = pairTime.displayState === "recent" ? "近期有活动"
+        : pairTime.displayState === "unconfirmed" ? "状态未确认" : "已结束";
       duration.title = `${socketTimeTitle}；配套 GCloud/Tersafe ${stateText}（开始相差 ${Math.round(pairTime.startGapMs / 1000)}s，重叠 ${formatDuration(pairTime.durationMs)}）`;
     } else {
       duration.title = socketTimeTitle;
@@ -2493,13 +2508,13 @@ function renderSelectedTitle() {
   const proxyUsername = getProxyUsername(item && item.proxy_username);
   const proxyText = proxyUsername ? `[kp:${proxyUsername}]` : "";
   const text = [proxyText, cid].filter(Boolean).join(" ");
-  const time = getFlowTimeInfo(item);
+  const time = getFlowTimeInfo(item, Date.now() + Number(state.serverClockOffsetMs || 0));
   const dateTs = Number(time.firstTs || 0);
   const dateText = dateTs > 0 ? `[${formatDateOnly(dateTs)}]` : "";
   const lifecycleText = [
     `开始 ${formatFlowTimestamp(time.firstTs)}`,
-    `结束 ${time.open ? "进行中" : formatFlowTimestamp(time.recordedEndTs)}`,
-    `时长 ${formatDuration(time.durationMs)}`,
+    `结束 ${flowLifecycleEndText(time)}`,
+    `${time.displayState === "unconfirmed" ? "已观察时长" : "时长"} ${formatDuration(time.durationMs)}`,
     flowLifecycleStateText(time),
   ].join("  |  ");
   if (currentFlowLooksLikeGcloud65010(null, rawCid)) {
@@ -2821,9 +2836,13 @@ function formatTsShort(ts) {
   }
 }
 
+function parsePreviewByteCount(value) {
+  const bytes = Number(value);
+  return PREVIEW_BYTE_OPTIONS.includes(bytes) ? bytes : DEFAULT_PREVIEW_BYTES;
+}
+
 function getPreviewByteCount() {
-  const raw = Number(el.previewBytes.value || "16");
-  return PREVIEW_BYTE_OPTIONS.includes(raw) ? raw : 16;
+  return parsePreviewByteCount(el.previewBytes.value);
 }
 
 function getBytesPerRow() {
