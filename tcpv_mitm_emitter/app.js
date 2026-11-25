@@ -18879,6 +18879,41 @@ function cs2RelayLabel(relay) {
   return "转交 8091 未成功";
 }
 
+function cs2ConstructorEvidence(ev, summaryText) {
+  const summary = String(summaryText || ev?.summary || "");
+  const detail = isCSChannel2Event(ev) ? ev.analysis?.response_constructor : null;
+  const role = String(detail?.role
+    || /(?:^|\s)constructor_role=([^\s]+)/.exec(summary)?.[1] || "");
+  if (role !== "manual_injection") return null;
+  const profile = String(detail?.profile
+    || /(?:^|\s)constructor_profile=([^\s]+)/.exec(summary)?.[1] || "");
+  if (!profile) return null;
+  const frameLength = Number(detail?.frame_length || 0);
+  return {
+    profile,
+    status: String(detail?.status
+      || /(?:^|\s)constructor_status=([^\s]+)/.exec(summary)?.[1] || "unknown"),
+    reportCode: String(detail?.report_code
+      || /(?:^|\s)constructor_report=(0x[0-9a-f]{8})(?=\s|$)/i.exec(summary)?.[1] || ""),
+    resourceName: detail?.resource_name
+      ? String(detail.resource_name)
+      : String(/(?:^|\s)constructor_resource=([^\s]+)/.exec(summary)?.[1] || "").replaceAll("+", " + "),
+    archiveCrc32: detail?.archive_crc32
+      ? String(detail.archive_crc32)
+      : String(/(?:^|\s)constructor_crc32=([^\s]+)/.exec(summary)?.[1] || "").replaceAll("+", " + "),
+    requestId: String(detail?.request_id
+      || /(?:^|\s)constructor_request=([^\s]+)/.exec(summary)?.[1] || ""),
+    frameLength: Number.isSafeInteger(frameLength) && frameLength > 0 ? frameLength : 0,
+  };
+}
+
+function cs2ConstructorLabel(constructor) {
+  if (constructor?.profile === "v_tl") return "构造 v_tl";
+  if (constructor?.profile === "vv") return "构造 vv";
+  if (constructor?.profile === "v_tl_vv_no_account") return "构造 v_tl+vv";
+  return "构造响应";
+}
+
 function ensureCS2RelayStyles() {
   if (document.getElementById && document.getElementById("tcpv-cs2-relay-styles")) return;
   const style = document.createElement("style");
@@ -18904,7 +18939,7 @@ function appendCS2RelayStatus(panel, relay) {
   const routeState = relay.targetReceived
     ? "接收端 8091 · 已注入目标客户端流"
     : relay.sourceForwarded ? "8092 原路保留" : "8092 未再发给原客户端";
-  relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.frameLength ? ` · ${relay.frameLength} B（>120 B）` : ""}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
+  relayMeta.textContent = `${relay.route.replace("->", " → ")}${relay.frameLength ? ` · 实际 ${relay.frameLength} B · 转发门槛：大于 120 B` : ""}${relay.reportCode ? ` · ${relay.reportCode}` : ""} · event ${relay.eventId || "-"} · ${routeState} · 原包未修改${relay.confirmed ? " · 8091 会话重加密已确认" : ""}`;
   relayStatus.appendChild(relayTitle);
   relayStatus.appendChild(relayMeta);
   const head = panel.querySelector(".child-compare-head");
@@ -19140,6 +19175,21 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
       fileChip.title = "文件：" + (more ? saved.files.slice(1).join(" · ") : filename);
       strip.appendChild(fileChip);
     }
+  }
+  const constructor = cs2ConstructorEvidence(ev, summary);
+  if (constructor) {
+    const constructorChip = document.createElement("span");
+    constructorChip.className = "summary-insight-chip cs2-summary-constructor";
+    constructorChip.textContent = cs2ConstructorLabel(constructor);
+    constructorChip.title = [
+      "OK123 手动构造并注入 8091",
+      constructor.reportCode,
+      constructor.resourceName,
+      constructor.archiveCrc32 ? `CRC ${constructor.archiveCrc32}` : "",
+      constructor.frameLength ? `线上帧 ${constructor.frameLength} B` : "",
+      constructor.requestId ? `request ${constructor.requestId}` : "",
+    ].filter(Boolean).join(" · ");
+    strip.appendChild(constructorChip);
   }
   const relay = cs2RelayEvidence(ev, summary);
   if (relay) {
@@ -19846,6 +19896,7 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-summary-insights .summary-insight-chip{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
     .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
     .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
+    .cs2-summary-insights .cs2-summary-constructor{flex:0 1 auto;color:#67e8f9;border-color:#06b6d452;background:#06b6d416}
     .cs2-summary-insights .cs2-summary-relay{flex:0 1 auto;color:#fbbf24;border-color:#f59e0b52;background:#f59e0b16}
     .cs2-summary-insights .cs2-summary-relay-confirmed{color:#4ade80;border-color:#22c55e52;background:#22c55e16}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
