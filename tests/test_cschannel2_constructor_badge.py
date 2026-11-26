@@ -24,23 +24,38 @@ const structured = {
       report_code:'0x010a0057',
       resource_name:'mrpcs_i_v_tl.data + mrpcs_i_vv.data',
       archive_crc32:'0x79f81d31 + 0x9a31f0c7',
-      request_id:'request-123', frame_length:183,
+      request_id:'request-123', frame_length:183, completion_delay_seconds:5,
     },
   },
 };
 const evidence = cs2ConstructorEvidence(structured);
-assert.equal(cs2ConstructorLabel(evidence), '构造 v_tl+vv');
+assert.equal(cs2ConstructorLabel(evidence), '构造 v_tl+vv · 5s后完成');
 assert.equal(evidence.reportCode, '0x010a0057');
 assert.equal(evidence.frameLength, 183);
 assert.equal(evidence.resourceName, 'mrpcs_i_v_tl.data + mrpcs_i_vv.data');
 
-const compact = {summary:'protocol=cschannel2 constructor_role=manual_injection constructor_profile=vv constructor_status=injected constructor_report=0x010a0035 constructor_resource=mrpcs_i_vv.data constructor_crc32=0x9a31f0c7 constructor_request=abc123'};
+const compact = {summary:'protocol=cschannel2 constructor_role=manual_injection constructor_profile=vv constructor_status=injected constructor_report=0x010a0035 constructor_resource=mrpcs_i_vv.data constructor_crc32=0x9a31f0c7 constructor_request=abc123 constructor_delay_seconds=5'};
 const compactEvidence = cs2ConstructorEvidence(compact);
-assert.equal(cs2ConstructorLabel(compactEvidence), '构造 vv');
+assert.equal(cs2ConstructorLabel(compactEvidence), '构造 vv · 5s后完成');
 assert.equal(compactEvidence.resourceName, 'mrpcs_i_vv.data');
 const compactPair = {summary:'protocol=cschannel2 constructor_role=manual_injection constructor_profile=v_tl_vv_no_account constructor_resource=mrpcs_i_v_tl.data+mrpcs_i_vv.data constructor_crc32=0x79f81d31+0x9a31f0c7'};
 assert.equal(cs2ConstructorEvidence(compactPair).resourceName, 'mrpcs_i_v_tl.data + mrpcs_i_vv.data');
 assert.equal(cs2ConstructorLabel({profile:'v_tl'}), '构造 v_tl');
+assert.equal(cs2ConstructorLabel({profile:'i_j', role:'manual_injection', delaySeconds:5}), '构造 i_j · 5s后完成');
+const completion = {
+  summary:'protocol=cschannel2',
+  analysis:{
+    schema:'tcpv.cschannel2.analysis.v1',
+    response_constructor:{
+      role:'delayed_completion', profile:'v_tl_vv_no_account', status:'injected',
+      report_code:'0x0112232e', resource_name:'mrpcs_i_v_tl.data + mrpcs_i_vv.data',
+      completion_delay_seconds:5, completion_record_count:2,
+    },
+  },
+};
+const completionEvidence = cs2ConstructorEvidence(completion);
+assert.equal(cs2ConstructorLabel(completionEvidence), '完成 v_tl+vv · 延迟5s');
+assert.equal(completionEvidence.recordCount, 2);
 assert.equal(cs2ConstructorEvidence({summary:'protocol=cschannel2'}), null);
 """
     result = subprocess.run(["node"], input=script, text=True, capture_output=True, timeout=5)

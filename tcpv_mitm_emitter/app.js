@@ -18884,12 +18884,17 @@ function cs2ConstructorEvidence(ev, summaryText) {
   const detail = isCSChannel2Event(ev) ? ev.analysis?.response_constructor : null;
   const role = String(detail?.role
     || /(?:^|\s)constructor_role=([^\s]+)/.exec(summary)?.[1] || "");
-  if (role !== "manual_injection") return null;
+  if (role !== "manual_injection" && role !== "delayed_completion") return null;
   const profile = String(detail?.profile
     || /(?:^|\s)constructor_profile=([^\s]+)/.exec(summary)?.[1] || "");
   if (!profile) return null;
   const frameLength = Number(detail?.frame_length || 0);
+  const delaySeconds = Number(detail?.completion_delay_seconds
+    ?? /(?:^|\s)constructor_delay_seconds=([0-9]+(?:\.[0-9]+)?)/.exec(summary)?.[1]);
+  const recordCount = Number(detail?.completion_record_count
+    ?? /(?:^|\s)constructor_record_count=([0-9]+)/.exec(summary)?.[1]);
   return {
+    role,
     profile,
     status: String(detail?.status
       || /(?:^|\s)constructor_status=([^\s]+)/.exec(summary)?.[1] || "unknown"),
@@ -18904,14 +18909,25 @@ function cs2ConstructorEvidence(ev, summaryText) {
     requestId: String(detail?.request_id
       || /(?:^|\s)constructor_request=([^\s]+)/.exec(summary)?.[1] || ""),
     frameLength: Number.isSafeInteger(frameLength) && frameLength > 0 ? frameLength : 0,
+    delaySeconds: Number.isFinite(delaySeconds) && delaySeconds >= 0 ? delaySeconds : null,
+    recordCount: Number.isSafeInteger(recordCount) && recordCount > 0 ? recordCount : 0,
   };
 }
 
 function cs2ConstructorLabel(constructor) {
-  if (constructor?.profile === "v_tl") return "构造 v_tl";
-  if (constructor?.profile === "vv") return "构造 vv";
-  if (constructor?.profile === "v_tl_vv_no_account") return "构造 v_tl+vv";
-  return "构造响应";
+  let subject = "响应";
+  if (constructor?.profile === "v_tl") subject = "v_tl";
+  else if (constructor?.profile === "vv") subject = "vv";
+  else if (constructor?.profile === "i_j") subject = "i_j";
+  else if (constructor?.profile === "v_tl_vv_no_account") subject = "v_tl+vv";
+  const delay = Number(constructor?.delaySeconds);
+  const delayLabel = Number.isFinite(delay) && delay >= 0
+    ? `${Number.isInteger(delay) ? delay : Math.round(delay * 100) / 100}s`
+    : "";
+  if (constructor?.role === "delayed_completion") {
+    return `完成 ${subject}${delayLabel ? ` · 延迟${delayLabel}` : ""}`;
+  }
+  return `构造 ${subject}${delayLabel ? ` · ${delayLabel}后完成` : ""}`;
 }
 
 function ensureCS2RelayStyles() {
@@ -19187,6 +19203,12 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
       constructor.resourceName,
       constructor.archiveCrc32 ? `CRC ${constructor.archiveCrc32}` : "",
       constructor.frameLength ? `线上帧 ${constructor.frameLength} B` : "",
+      constructor.delaySeconds !== null
+        ? (constructor.role === "delayed_completion"
+          ? `完成包实际按计划延迟 ${constructor.delaySeconds}s 注入`
+          : `计划 ${constructor.delaySeconds}s 后注入完成包`)
+        : "",
+      constructor.recordCount ? `完成记录 ${constructor.recordCount} 条` : "",
       constructor.requestId ? `request ${constructor.requestId}` : "",
     ].filter(Boolean).join(" · ");
     strip.appendChild(constructorChip);
