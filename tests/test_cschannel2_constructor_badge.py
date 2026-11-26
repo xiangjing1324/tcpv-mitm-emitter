@@ -9,7 +9,7 @@ from test_uagame_display_recovery import APP_JS
 def test_constructor_badge_uses_verified_producer_metadata_and_summary_fallback() -> None:
     source = APP_JS.read_text(encoding="utf-8")
     functions = "\n".join(_packet_function(source, name) for name in (
-        "cs2ConstructorEvidence", "cs2ConstructorLabel",
+        "cs2ConstructorEvidence", "cs2ConstructorLabel", "cs2NativeCompletionEvidence",
     ))
     script = r"""
 const assert = require('node:assert/strict');
@@ -29,19 +29,19 @@ const structured = {
   },
 };
 const evidence = cs2ConstructorEvidence(structured);
-assert.equal(cs2ConstructorLabel(evidence), '构造 v_tl+vv · 5s后完成');
+assert.equal(cs2ConstructorLabel(evidence), '代理构造发送 · v_tl+vv · 5s后完成');
 assert.equal(evidence.reportCode, '0x010a0057');
 assert.equal(evidence.frameLength, 183);
 assert.equal(evidence.resourceName, 'mrpcs_i_v_tl.data + mrpcs_i_vv.data');
 
 const compact = {summary:'protocol=cschannel2 constructor_role=manual_injection constructor_profile=vv constructor_status=injected constructor_report=0x010a0035 constructor_resource=mrpcs_i_vv.data constructor_crc32=0x9a31f0c7 constructor_request=abc123 constructor_delay_seconds=5'};
 const compactEvidence = cs2ConstructorEvidence(compact);
-assert.equal(cs2ConstructorLabel(compactEvidence), '构造 vv · 5s后完成');
+assert.equal(cs2ConstructorLabel(compactEvidence), '代理构造发送 · vv · 5s后完成');
 assert.equal(compactEvidence.resourceName, 'mrpcs_i_vv.data');
 const compactPair = {summary:'protocol=cschannel2 constructor_role=manual_injection constructor_profile=v_tl_vv_no_account constructor_resource=mrpcs_i_v_tl.data+mrpcs_i_vv.data constructor_crc32=0x79f81d31+0x9a31f0c7'};
 assert.equal(cs2ConstructorEvidence(compactPair).resourceName, 'mrpcs_i_v_tl.data + mrpcs_i_vv.data');
-assert.equal(cs2ConstructorLabel({profile:'v_tl'}), '构造 v_tl');
-assert.equal(cs2ConstructorLabel({profile:'i_j', role:'manual_injection', delaySeconds:5}), '构造 i_j · 5s后完成');
+assert.equal(cs2ConstructorLabel({profile:'v_tl'}), '代理构造发送 · v_tl');
+assert.equal(cs2ConstructorLabel({profile:'i_j', role:'manual_injection', delaySeconds:5}), '代理构造发送 · i_j · 5s后完成');
 const completion = {
   summary:'protocol=cschannel2',
   analysis:{
@@ -54,9 +54,17 @@ const completion = {
   },
 };
 const completionEvidence = cs2ConstructorEvidence(completion);
-assert.equal(cs2ConstructorLabel(completionEvidence), '完成 v_tl+vv · 延迟5s');
+assert.equal(cs2ConstructorLabel(completionEvidence), '代理构造发送 · v_tl+vv 完成 · 延迟5s');
 assert.equal(completionEvidence.recordCount, 2);
 assert.equal(cs2ConstructorEvidence({summary:'protocol=cschannel2'}), null);
+const native = cs2NativeCompletionEvidence(
+  {dir:0}, new Map([['0x0112232e', 1]]), null,
+);
+assert.equal(native.label, '客户端原生发送');
+assert.match(native.title, /没有 response_constructor 构造元数据/);
+assert.equal(cs2NativeCompletionEvidence({dir:1}, new Map([['0x0112232e', 1]]), null), null);
+assert.equal(cs2NativeCompletionEvidence({dir:0}, new Map([['0x0112232e', 1]]), completionEvidence), null);
+assert.equal(cs2NativeCompletionEvidence({dir:0}, new Map([['0x010a0035', 1]]), null), null);
 """
     result = subprocess.run(["node"], input=script, text=True, capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr
@@ -68,7 +76,10 @@ def test_preview_strip_renders_constructor_chip_and_clear_relay_threshold_text()
     relay = _packet_function(source, "appendCS2RelayStatus")
     assert "cs2-summary-constructor" in strip
     assert "cs2ConstructorEvidence" in strip
-    assert "OK123 手动构造并注入 8091" in strip
+    assert "cs2-summary-native" in strip
+    assert "cs2NativeCompletionEvidence" in strip
+    assert "代理构造并经 8091 上行注入服务器" in strip
+    assert "代理构造并向 8091 客户端注入" in strip
     assert ".cs2-summary-constructor" in source
     assert "实际 ${relay.frameLength} B · 转发门槛：大于 120 B" in relay
     assert "${relay.frameLength} B（>120 B）" not in relay

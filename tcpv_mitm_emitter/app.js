@@ -18925,9 +18925,17 @@ function cs2ConstructorLabel(constructor) {
     ? `${Number.isInteger(delay) ? delay : Math.round(delay * 100) / 100}s`
     : "";
   if (constructor?.role === "delayed_completion") {
-    return `完成 ${subject}${delayLabel ? ` · 延迟${delayLabel}` : ""}`;
+    return `代理构造发送 · ${subject} 完成${delayLabel ? ` · 延迟${delayLabel}` : ""}`;
   }
-  return `构造 ${subject}${delayLabel ? ` · ${delayLabel}后完成` : ""}`;
+  return `代理构造发送 · ${subject}${delayLabel ? ` · ${delayLabel}后完成` : ""}`;
+}
+
+function cs2NativeCompletionEvidence(ev, reportCounts, constructor) {
+  if (constructor || Number(ev?.dir) !== 0 || !reportCounts?.has("0x0112232e")) return null;
+  return {
+    label: "客户端原生发送",
+    title: "客户端→服务端真实上行 · 本事件没有 response_constructor 构造元数据",
+  };
 }
 
 function ensureCS2RelayStyles() {
@@ -19198,7 +19206,9 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
     constructorChip.className = "summary-insight-chip cs2-summary-constructor";
     constructorChip.textContent = cs2ConstructorLabel(constructor);
     constructorChip.title = [
-      "OK123 手动构造并注入 8091",
+      constructor.role === "delayed_completion"
+        ? "代理构造并经 8091 上行注入服务器"
+        : "代理构造并向 8091 客户端注入",
       constructor.reportCode,
       constructor.resourceName,
       constructor.archiveCrc32 ? `CRC ${constructor.archiveCrc32}` : "",
@@ -19212,6 +19222,14 @@ function buildCS2SummaryInsightStrip(ev, summaryText) {
       constructor.requestId ? `request ${constructor.requestId}` : "",
     ].filter(Boolean).join(" · ");
     strip.appendChild(constructorChip);
+  }
+  const nativeCompletion = cs2NativeCompletionEvidence(ev, counts, constructor);
+  if (nativeCompletion) {
+    const nativeChip = document.createElement("span");
+    nativeChip.className = "summary-insight-chip cs2-summary-native";
+    nativeChip.textContent = nativeCompletion.label;
+    nativeChip.title = nativeCompletion.title;
+    strip.appendChild(nativeChip);
   }
   const relay = cs2RelayEvidence(ev, summary);
   if (relay) {
@@ -19919,6 +19937,7 @@ function ensureCS2TersafeCompactStyles() {
     .cs2-summary-insights .cs2-summary-chip{flex:0 1 auto;color:#bdb4fa;border-color:#8276c85c;background:#8276c81a}
     .cs2-summary-insights .cs2-summary-inner{flex:0 1 auto;color:#64d8cb;border-color:#2dd4bf52;background:#2dd4bf16}
     .cs2-summary-insights .cs2-summary-constructor{flex:0 1 auto;color:#67e8f9;border-color:#06b6d452;background:#06b6d416}
+    .cs2-summary-insights .cs2-summary-native{flex:0 1 auto;color:#86efac;border-color:#22c55e52;background:#22c55e16}
     .cs2-summary-insights .cs2-summary-relay{flex:0 1 auto;color:#fbbf24;border-color:#f59e0b52;background:#f59e0b16}
     .cs2-summary-insights .cs2-summary-relay-confirmed{color:#4ade80;border-color:#22c55e52;background:#22c55e16}
     .cs2-summary-insights .cs2-summary-device{flex:0 1 auto;max-width:17ch}
