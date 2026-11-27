@@ -550,6 +550,24 @@ console.log(JSON.stringify({
         self.assertIn("修改后明文", result["headings"][0])
         self.assertTrue(all("业务正文 +0x" in label for label in result["bodyLabels"]))
 
+    def test_three_column_structure_has_narrow_width_overflow_guards(self) -> None:
+        event = _event(
+            _typed_rpc("on_recv_client_data", bytes(range(32))),
+            before=_typed_rpc("on_recv_client_data", bytes(range(32))),
+        )
+        result = self.run_dom_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+pubgm17500RpcStructurePanel(events[0], info);
+const style = installed.find(item => item.id === 'tcpv-pubgm-17500-structure-style');
+console.log(JSON.stringify({css: style ? style.textContent : ''}));
+""")
+        css = result["css"]
+        self.assertIn("container-type:inline-size", css)
+        self.assertIn(".pubgm-rpc-side{", css)
+        self.assertIn("overflow:hidden", css)
+        self.assertIn("@container (max-width:1500px)", css)
+        self.assertIn(".pubgm-rpc-ascii{display:none}", css)
+
 
 if __name__ == "__main__":
     unittest.main()
