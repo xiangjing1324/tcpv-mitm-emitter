@@ -33,7 +33,9 @@ def js_runtime() -> str:
         "hasMrpcsCompactResourceHint", "isMrpcsGcloudResourceCandidate",
         "isMrpcsObservationCandidate",
     }
-    selected = [name for name in names if name in core or "Uagame" in name or name.startswith("uagame") or re.match(r"(?:gcloud|analyzeGcloud|analyzeUagame|parseGcloud|readGcloud|isUagame|isGcloud|normalizeGcloud|getGcloud|detectGcloud)", name)]
+    selected = [name for name in names if name in core or "Uagame" in name or name.startswith("uagame")
+                or name.startswith("pubgm17500")
+                or re.match(r"(?:gcloud|analyzeGcloud|analyzeUagame|parseGcloud|readGcloud|isUagame|isGcloud|normalizeGcloud|getGcloud|detectGcloud)", name)]
     def extract(name: str) -> str:
         # Top-level function braces in this source close at column zero. This
         # avoids mistaking quoted regex/comment text for JavaScript braces.

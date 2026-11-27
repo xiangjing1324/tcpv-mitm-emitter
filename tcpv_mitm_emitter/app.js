@@ -5655,6 +5655,14 @@ function parseGcloud65010Summary(summaryText = "", ev = null) {
     gcloudInferredType: readSummaryValue(raw, "gcloud_inferred_type"),
     gcloudFocus: readSummaryValue(raw, "gcloud_focus"),
     gcloudProto: readSummaryValue(raw, "gcloud_proto") || String(shape.gcloud_proto || ""),
+    tgcpRpcName: readSummaryValue(raw, "tgcp_rpc_name"),
+    tgcpRpcLabel: decodeSummaryToken(readSummaryValue(raw, "tgcp_rpc_label")),
+    tgcpRpcDetail: decodeSummaryToken(readSummaryValue(raw, "tgcp_rpc_detail")),
+    tgcpRpcBasis: readSummaryValue(raw, "tgcp_rpc_basis"),
+    tgcpRpcEncoding: readSummaryValue(raw, "tgcp_rpc_encoding"),
+    tgcpRpcBodyOffset: parseFlexibleInt(readSummaryValue(raw, "tgcp_rpc_body_offset")),
+    tgcpRpcBodyLength: parseFlexibleInt(readSummaryValue(raw, "tgcp_rpc_body_length")),
+    tgcpRpcDecodedLength: parseFlexibleInt(readSummaryValue(raw, "tgcp_rpc_decoded_length")),
   };
   if (envelope) {
     meta.gcloudSchema = "uagame_binary_v1";
@@ -8494,6 +8502,109 @@ const GCLOUD_17500_NUMERIC_COMMANDS = new Map([
   [0x0ddf75, { commandName: "GCloudNetworkStatusRes", focus: "network_status_res", confidence: "correlated" }],
 ]);
 
+// PUBGM 17500 uses a verified typed-RPC envelope, not the 65010 CS protobuf
+// command envelope.  Keep the parser separate while adapting its proven
+// fields into the same readable table component used by GCloud.
+function parsePubgm17500TypedRpc(byteValues, meta = null) {
+  const source = Array.isArray(byteValues) ? byteValues.slice() : [];
+  if (source.length < 3) return null;
+  let decoded = source;
+  let carrier = "normalized";
+  if (source[0] === 0x78) {
+    carrier = "literal";
+    decoded = source.slice(1);
+  } else if (source[0] === 0x7a) {
+    carrier = "lz4";
+    try {
+      const lz4 = decodeGcloudLz4Block(source.slice(1));
+      decoded = lz4 && Array.isArray(lz4.bytes) ? lz4.bytes : [];
+    } catch (_error) {
+      return null;
+    }
+  }
+  if (decoded.length < 3 || decoded[0] !== 0x03) return null;
+  const nameLength = Number(decoded[1]);
+  const nameStart = 2;
+  const nameEnd = nameStart + nameLength;
+  if (!Number.isFinite(nameLength) || nameLength < 1 || nameLength > 128 || nameEnd > decoded.length) return null;
+  const name = decoded.slice(nameStart, nameEnd).map((value) => String.fromCharCode(value)).join("");
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null;
+  const body = decoded.slice(nameEnd);
+  const summaryEncoding = String(meta && meta.tgcpRpcEncoding || "");
+  return {
+    ok: true,
+    schema: "pubgm_17500_typed_rpc_v1",
+    name,
+    label: String(meta && meta.tgcpRpcLabel || ""),
+    detail: String(meta && meta.tgcpRpcDetail || ""),
+    basis: String(meta && meta.tgcpRpcBasis || "command_length_boundary"),
+    carrier,
+    encoding: summaryEncoding || (carrier === "lz4" ? "lz4" : carrier === "literal" ? "literal" : "normalized"),
+    decoded,
+    source,
+    nameOffset: nameStart,
+    nameLength,
+    bodyOffset: nameEnd,
+    bodyLength: body.length,
+    body,
+    sourceComplete: true,
+  };
+}
+
+function pubgm17500RpcDisplayName(rpc, meta = null) {
+  const label = String(rpc && rpc.label || meta && meta.tgcpRpcLabel || "").trim();
+  const name = String(rpc && rpc.name || meta && meta.tgcpRpcName || "").trim();
+  if (label && name && label !== name) return `${label}（${name}）`;
+  return label || gcloudCommandDisplay(name) || name || "业务命令未确认";
+}
+
+function pubgm17500CompactSummaryInfo(summaryText = "", ev = null) {
+  const meta = parseGcloud65010Summary(summaryText || (ev && ev.summary), ev);
+  const command = Number(meta && meta.command);
+  if (String(meta && meta.targetPort) !== "17500" || command !== 0x4013
+      || String(meta && meta.crypto).toLowerCase() !== "decrypted") return null;
+  const name = String(meta && meta.tgcpRpcName || "").trim();
+  if (!name) return null;
+  const label = String(meta && meta.tgcpRpcLabel || "").trim();
+  return {
+    text: [label || gcloudCommandDisplay(name) || name, label ? name : "", "已解密"].filter(Boolean).join(" · "),
+    title: String(meta && meta.tgcpRpcDetail || "命令名和正文边界已由长度字段验证；正文内部字段未确认。"),
+  };
+}
+
+function pubgm17500RpcFieldRows(rpc) {
+  if (!rpc || rpc.ok !== true) return [];
+  const encodingText = rpc.encoding === "lz4" ? "LZ4 压缩（已解压）"
+    : rpc.encoding === "literal" ? "明文封套"
+      : "后端已规范化明文";
+  return [
+    packetFieldItem("rpc.marker", "应用层标记", "0x03", [0x03], "u8", "RPC.标记"),
+    packetFieldItem("rpc.name_length", "命令名称长度", `${rpc.nameLength} 字节`, [rpc.nameLength], "u8", "RPC.命令长度"),
+    packetFieldItem("rpc.name", "命令名称", pubgm17500RpcDisplayName(rpc), rpc.decoded.slice(rpc.nameOffset, rpc.nameOffset + rpc.nameLength), "ASCII 标识符", "RPC.命令名称"),
+    packetFieldItem("rpc.encoding", "承载编码", encodingText, null, "编码", "RPC.承载编码"),
+    packetFieldItem("rpc.body_length", "业务正文长度", `${rpc.bodyLength} 字节`, null, "长度", "RPC.业务正文.长度"),
+    packetFieldItem("rpc.body", "业务正文", rpc.bodyLength > 0 ? gcloudHexBytes(rpc.body, rpc.body.length) : "（空正文）", rpc.body, "原始字节（字段含义待确认）", "RPC.业务正文.原始字节"),
+  ];
+}
+
+function pubgm17500RpcCompareRows(ev, info) {
+  const current = info && info.typedRpc;
+  if (!current) return null;
+  const beforeBytes = b64ToBytes(String(ev && ev.before_pay || ""));
+  const before = beforeBytes.length > 0 ? parsePubgm17500TypedRpc(beforeBytes, info.meta) : null;
+  const canCompare = Boolean(before && before.ok && current.ok && before.name === current.name);
+  return packetCompareFieldRows(
+    pubgm17500RpcFieldRows(before),
+    pubgm17500RpcFieldRows(current),
+    canCompare,
+    canCompare
+      ? "按已验证的 PUBGM 17500 RPC 边界对齐；业务正文字段未确认时保留原始字节"
+      : beforeBytes.length > 0
+        ? "修改前内容不是同一条已验证 RPC 命令，仅展示当前结构"
+        : "未记录修改前内容，仅展示当前 RPC 结构",
+  );
+}
+
 function gcloudNumericEnvelopeFromProto(proto) {
   const nodes = proto && Array.isArray(proto.nodes) ? proto.nodes : [];
   for (const node of nodes) {
@@ -8524,11 +8635,13 @@ function gcloudNumericCommandInfo(ev, proto = null, summaryText = "") {
   const summaryMessageId = parseFlexibleInt(meta.gcloudMessageId);
   const summaryMessageSeq = parseFlexibleInt(meta.gcloudMessageSeq);
   const envelope = Number.isFinite(summaryMessageId) ? null : gcloudNumericEnvelopeFromProto(proto);
-  const messageId = Number.isFinite(summaryMessageId) ? summaryMessageId : Number(envelope && envelope.messageId);
+  const envelopeMessageId = envelope ? Number(envelope.messageId) : Number.NaN;
+  const messageId = Number.isFinite(summaryMessageId) ? summaryMessageId : envelopeMessageId;
   if (!Number.isFinite(messageId)) return null;
+  const envelopeMessageSeq = envelope ? Number(envelope.messageSeq) : Number.NaN;
   const messageSeq = Number.isFinite(summaryMessageSeq)
     ? summaryMessageSeq
-    : Number.isFinite(Number(envelope && envelope.messageSeq)) ? Number(envelope.messageSeq) : null;
+    : Number.isFinite(envelopeMessageSeq) ? envelopeMessageSeq : null;
   const mapped = GCLOUD_17500_NUMERIC_COMMANDS.get(messageId) || null;
   return {
     messageId,
@@ -8984,14 +9097,18 @@ function analyzeGcloudEvent(ev, summaryText = "") {
         nodeRows: [],
       };
     }
-    const proto = getGcloudBusinessProtoCached(ev, bytes, preview.complete);
+    const typedRpc = String(meta.targetPort || "") === "17500"
+      ? parsePubgm17500TypedRpc(bytes, meta)
+      : null;
+    const proto = typedRpc ? null : getGcloudBusinessProtoCached(ev, bytes, preview.complete);
     if (proto && isUagameGcloudMeta(meta)) {
       proto.uagameBody = true;
       // Command/header aliases belong to the 65010 CS envelope, not to the
       // already-extracted UAGame business body.
       if (!meta.gcloudType) proto.commandDisplay = "";
     }
-    const protoBytes = proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
+    const protoBytes = typedRpc ? typedRpc.body
+      : proto && Array.isArray(proto.viewBytes) ? proto.viewBytes : bytes;
     const uagameProbe = isUagameGcloudMeta(meta) && preview.complete
       ? analyzeUagameDecodedBodyProbe(protoBytes, meta)
       : null;
@@ -9000,6 +9117,7 @@ function analyzeGcloudEvent(ev, summaryText = "") {
     const uagameOpcode = gcloudUagameOpcodeInfo(meta);
     const effectiveCommandName = String(
       (!isUagameGcloudMeta(meta) && proto && (proto.commandName || proto.commandDisplay))
+      || (typedRpc && typedRpc.name)
       || gcloudReadableTypeName(meta.gcloudType)
       || (numeric && numeric.commandName)
       || (uagameOpcode && uagameOpcode.name)
@@ -9007,7 +9125,8 @@ function analyzeGcloudEvent(ev, summaryText = "") {
       || ""
     );
     const effectiveCommandDisplay = String(
-      (isUagameGcloudMeta(meta) && gcloudUagameOpcodeDisplay(meta))
+      (typedRpc && pubgm17500RpcDisplayName(typedRpc, meta))
+      || (isUagameGcloudMeta(meta) && gcloudUagameOpcodeDisplay(meta))
       || gcloudCommandDisplay(effectiveCommandName)
       || ""
     );
@@ -9135,6 +9254,37 @@ function analyzeGcloudEvent(ev, summaryText = "") {
           { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
         ],
         nodeRows: gcloudProtoNodeRows(proto),
+      };
+    }
+    if (typedRpc) {
+      return {
+        kind: "pubgm_rpc",
+        meta,
+        bytes,
+        protoBytes,
+        proto: null,
+        typedRpc,
+        title: `PUBGM 17500 · ${pubgm17500RpcDisplayName(typedRpc, meta)}`,
+        chips: [
+          "17500 typed RPC",
+          pubgm17500RpcDisplayName(typedRpc, meta),
+          normalizeGcloudDirection(ev, meta),
+          typedRpc.encoding === "lz4" ? "LZ4 已解压" : "明文",
+        ].filter(Boolean),
+        rows: [
+          { label: "协议结构", value: "TGCP 4013 → PUBGM typed RPC → 业务正文" },
+          { label: "命令", value: pubgm17500RpcDisplayName(typedRpc, meta) },
+          { label: "承载编码", value: typedRpc.encoding === "lz4" ? "LZ4 压缩，当前展示解压后明文" : "长度校验后的明文命令封套" },
+          { label: "业务正文", value: `${typedRpc.bodyLength} 字节 · offset=${formatHexValue(typedRpc.bodyOffset)}` },
+          ...(typedRpc.detail ? [{ label: "中文说明", value: typedRpc.detail }] : []),
+          { label: "解析边界", value: "命令名称与正文边界已验证；正文内部字段未取得描述符证据时只展示原始字节，不套用 65010 字段语义。" },
+          { label: "4013", value: `plain_len=${meta.plainLen || bytes.length || "-"} padding=${meta.padding || "-"}` },
+        ],
+        nodeRows: pubgm17500RpcFieldRows(typedRpc).map((row) => ({
+          path: row.pathText,
+          rawPath: row.key,
+          value: row.value,
+        })),
       };
     }
     return {
@@ -9308,6 +9458,20 @@ function buildGcloudSummaryInsights(ev, summaryText = "") {
         title: `当前窗口匹配到另一半 index=${pair.index}`,
       });
     }
+    return out;
+  }
+  if (info.kind === "pubgm_rpc" && info.typedRpc) {
+    const rpc = info.typedRpc;
+    out.push({
+      kind: "gcloud",
+      text: pubgm17500RpcDisplayName(rpc, info.meta),
+      title: rpc.detail || "PUBGM 17500 typed-RPC 命令名和正文边界已验证。",
+    });
+    out.push({
+      kind: "carrier",
+      text: rpc.encoding === "lz4" ? "LZ4 已解压" : rpc.encoding === "literal" ? "明文封套" : "已规范化明文",
+      title: `RPC marker=0x03 · name=${rpc.name} · body=${rpc.bodyLength}B`,
+    });
     return out;
   }
   if (info.kind === "uagame_private_fragment" && info.fragment) {
@@ -9702,6 +9866,10 @@ function gcloudCompareEventRows(ev, info, summaryText = "") {
 }
 
 function buildGcloudFieldCompare(ev, info, summaryText = "") {
+  if (info && info.typedRpc) {
+    const compare = pubgm17500RpcCompareRows(ev, info);
+    return compare ? buildPacketFieldTable(compare, ev) : null;
+  }
   if (!info || !info.proto) return null;
   const compare = gcloudCompareEventRows(ev, info, summaryText);
   return buildPacketFieldTable(compare, ev);
@@ -11061,15 +11229,20 @@ function buildCompactGcloudSummaryStrip(ev, summaryText = "") {
   const command = readSummaryValue(summary, "command");
   const name = readSummaryValue(summary, "gcloud_observation_command");
   const verified = readSummaryValue(summary, "gcloud_observation_command_names_verified") === "1";
-  // Static name translation only; never fetch/decode a body to label a row.
-  const text = verified && name ? gcloudCommandDisplay(name) : [command, category || "命令未确认"].filter(Boolean).join(" · ");
+  // Static summary metadata only; never fetch/decode a body to label a row.
+  const pubgmRpc = pubgm17500CompactSummaryInfo(summary, ev);
+  const text = pubgmRpc
+    ? pubgmRpc.text
+    : verified && name ? gcloudCommandDisplay(name) : [command, category || "命令未确认"].filter(Boolean).join(" · ");
   if (!text) return null;
   const strip = document.createElement("span");
   strip.className = "summary-insights";
   const chip = document.createElement("span");
   chip.className = "summary-insight-chip summary-insight-gcloud";
   chip.textContent = text;
-  chip.title = "列表仅使用已捕获摘要；展开时才获取正文并解析协议。";
+  chip.title = pubgmRpc
+    ? pubgmRpc.title
+    : "列表仅使用已捕获摘要；展开时才获取正文并解析协议。";
   strip.appendChild(chip);
   return strip;
 }
