@@ -38,6 +38,15 @@ const state = {
   gcloudAceStatsCache: null,
   aceOverviewRefreshTimer: 0,
   serverClockOffsetMs: 0,
+  accountControl: {
+    open: false,
+    timer: 0,
+    snapshot: null,
+    selectedIdentity: "",
+    generation: 0,
+    refreshGeneration: 0,
+    busy: new Set(),
+  },
 };
 
 const el = {
@@ -1611,6 +1620,28 @@ async function apiPost(url) {
     throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${body.slice(0, 200)}`);
   }
   return resp.json();
+}
+
+async function apiPostJson(url, payload) {
+  const resp = await fetch(url, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  let body = {};
+  try {
+    body = await resp.json();
+  } catch (_error) {
+    body = {};
+  }
+  if (!resp.ok) {
+    const reason = String(body?.reason || body?.detail || resp.statusText || "request failed");
+    const error = new Error(reason);
+    error.payload = body;
+    throw error;
+  }
+  return body;
 }
 
 async function apiPostBytes(url, bytes) {
@@ -21945,6 +21976,305 @@ function renderEvents() {
   if (mrpcsVisibleCandidatesChanged) scheduleMrpcsObservationIndex();
 }
 
+const ACCOUNT_CONTROL_REASON_LABELS = {
+  ready: "可操作",
+  queued: "已提交",
+  building: "正在构造",
+  delivered: "已注入",
+  target_offline: "CS2 离线",
+  gcloud_target_offline: "GCloud 离线",
+  target_ambiguous: "存在多个 CS2 连接",
+  gcloud_target_ambiguous: "存在多个 GCloud 连接",
+  target_starting: "连接正在准备",
+  native_session_not_ready: "等待 CS2 密钥会话",
+  account_context_missing: "等待账号上下文",
+  response_shell_missing: "等待响应封装",
+  response_context_header_missing: "等待响应上下文",
+  transport_context_missing: "等待序列上下文",
+  completion_context_missing: "等待完成包上下文",
+  completion_tracker_unavailable: "完成包跟踪器不可用",
+  gcloud_keys_not_ready: "等待 GCloud 密钥",
+  gcloud_sequence_missing: "等待 GCloud 序号",
+  gcloud_constructor_busy: "GCloud 正在构造",
+  target_context_changed: "连接已经变化，请刷新",
+  gcloud_target_changed: "连接已经变化，请刷新",
+  command_queue_full: "构造队列已满",
+};
+
+function accountControlReason(reason) {
+  const value = String(reason || "");
+  return ACCOUNT_CONTROL_REASON_LABELS[value] || value || "状态未知";
+}
+
+function installAccountControlPanel() {
+  if (TCPV_CONFIG.account_control_enabled !== true || document.getElementById("accountControlDialog")) return;
+  const tabs = document.querySelector(".tabs");
+  if (!tabs) return;
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.id = "accountControlBtn";
+  trigger.className = "account-control-trigger";
+  trigger.textContent = "账号控制";
+  trigger.title = "按 KeyProxy 账号控制当前在线连接";
+  tabs.appendChild(trigger);
+
+  const dialog = document.createElement("dialog");
+  dialog.id = "accountControlDialog";
+  dialog.className = "account-control-dialog";
+  dialog.innerHTML = `
+    <div class="account-control-shell">
+      <header class="account-control-head">
+        <div>
+          <strong>账号控制</strong>
+          <span>按在线 KeyProxy account 导航</span>
+        </div>
+        <div class="account-control-head-actions">
+          <button type="button" data-account-control-refresh>刷新</button>
+          <button type="button" data-account-control-close>关闭</button>
+        </div>
+      </header>
+      <div class="account-control-message" data-account-control-message role="status" aria-live="polite">正在读取账号状态</div>
+      <div class="account-control-body">
+        <nav class="account-control-nav" data-account-control-nav aria-label="在线 KeyProxy 账号"></nav>
+        <div class="account-control-list" data-account-control-list></div>
+      </div>
+    </div>`;
+  document.body.appendChild(dialog);
+
+  const style = document.createElement("style");
+  style.id = "account-control-styles";
+  style.textContent = `
+    .tabs .account-control-trigger{margin-left:auto;height:26px;padding:3px 10px;border:1px solid color-mix(in srgb,var(--accent) 48%,var(--line));border-radius:6px;background:color-mix(in srgb,var(--panel) 82%,var(--accent));color:var(--text);font:inherit;font-weight:700;cursor:pointer}
+    .account-control-dialog{width:min(920px,calc(100vw - 28px));max-height:min(760px,calc(100vh - 28px));padding:0;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);box-shadow:0 24px 90px #0009}
+    .account-control-dialog::backdrop{background:#020617a6;backdrop-filter:blur(2px)}
+    .account-control-shell{display:grid;grid-template-rows:auto auto minmax(0,1fr);max-height:min(760px,calc(100vh - 28px));min-height:300px}
+    .account-control-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line)}
+    .account-control-head>div:first-child{display:grid;gap:3px}.account-control-head strong{font-size:14px}.account-control-head span{color:var(--muted);font-size:11px}
+    .account-control-head-actions{display:flex;gap:6px}.account-control-head button,.account-control-action{height:28px;padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:var(--chip-bg);color:var(--text);font:inherit;cursor:pointer}
+    .account-control-message{min-height:30px;padding:7px 15px;border-bottom:1px solid var(--line);color:var(--muted)}
+    .account-control-message[data-kind="error"]{color:#f87171}.account-control-message[data-kind="success"]{color:#4ade80}
+    .account-control-body{min-height:0;display:grid;grid-template-columns:210px minmax(0,1fr)}
+    .account-control-nav{overflow:auto;padding:8px;border-right:1px solid var(--line);display:grid;align-content:start;gap:5px;overscroll-behavior:contain}
+    .account-control-nav-button{width:100%;display:grid;gap:3px;padding:8px 9px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text);font:inherit;text-align:left;cursor:pointer}
+    .account-control-nav-button:hover{background:var(--chip-bg)}.account-control-nav-button.active{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));background:color-mix(in srgb,var(--chip-bg) 78%,var(--accent))}
+    .account-control-nav-button strong{font-size:12px;overflow-wrap:anywhere}.account-control-nav-button span{color:var(--muted);font-size:10px}
+    .account-control-list{overflow:auto;padding:12px;overscroll-behavior:contain}
+    .account-control-empty{padding:36px 12px;text-align:center;color:var(--muted)}
+    .account-control-card{border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--panel) 92%,var(--bg));overflow:hidden}
+    .account-control-card-head{display:flex;align-items:baseline;gap:9px;padding:9px 11px;border-bottom:1px solid var(--line)}
+    .account-control-card-head strong{font-size:13px}.account-control-card-head span{color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+    .account-control-channel{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px;padding:10px 11px}.account-control-channel+.account-control-channel{border-top:1px solid color-mix(in srgb,var(--line) 70%,transparent)}
+    .account-control-channel-state{display:grid;align-content:start;gap:4px}.account-control-channel-title{display:flex;align-items:center;gap:6px;font-weight:800}.account-control-dot{width:8px;height:8px;border-radius:50%;background:#64748b}.account-control-dot.online{background:#f59e0b}.account-control-dot.ready{background:#22c55e}.account-control-reason{color:var(--muted);font-size:11px;line-height:1.35}
+    .account-control-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:start}.account-control-action{min-width:68px}.account-control-action:hover:not(:disabled){border-color:var(--accent);background:color-mix(in srgb,var(--chip-bg) 76%,var(--accent))}.account-control-action:disabled{opacity:.42;cursor:not-allowed}
+    @media(max-width:680px){.account-control-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.account-control-nav{grid-auto-flow:column;grid-auto-columns:minmax(140px,70%);overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.account-control-channel{grid-template-columns:1fr}.account-control-head{align-items:flex-start}.account-control-card-head{display:grid;gap:3px}}
+  `;
+  document.head.appendChild(style);
+
+  const close = () => {
+    state.accountControl.open = false;
+    state.accountControl.generation += 1;
+    if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
+    state.accountControl.timer = 0;
+    dialog.close();
+  };
+  trigger.addEventListener("click", () => {
+    state.accountControl.open = true;
+    state.accountControl.generation += 1;
+    dialog.showModal();
+    refreshAccountControlPanel();
+    if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
+    state.accountControl.timer = window.setInterval(() => {
+      if (state.accountControl.open) refreshAccountControlPanel({ quiet: true });
+    }, 2000);
+  });
+  dialog.querySelector("[data-account-control-close]")?.addEventListener("click", close);
+  dialog.querySelector("[data-account-control-refresh]")?.addEventListener("click", () => refreshAccountControlPanel());
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+  dialog.addEventListener("close", () => {
+    state.accountControl.open = false;
+    if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
+    state.accountControl.timer = 0;
+  });
+}
+
+function setAccountControlMessage(text, kind = "") {
+  const node = document.querySelector("[data-account-control-message]");
+  if (!node) return;
+  node.textContent = String(text || "");
+  node.dataset.kind = String(kind || "");
+}
+
+function accountControlChannelNode(identity, channelKey, channelState, profiles) {
+  const channel = channelState && typeof channelState === "object" ? channelState : {};
+  const ready = channel.ready === true;
+  const online = channel.online === true;
+  const row = document.createElement("section");
+  row.className = "account-control-channel";
+
+  const stateNode = document.createElement("div");
+  stateNode.className = "account-control-channel-state";
+  const title = document.createElement("div");
+  title.className = "account-control-channel-title";
+  const dot = document.createElement("span");
+  dot.className = `account-control-dot ${ready ? "ready" : online ? "online" : ""}`;
+  const label = document.createElement("span");
+  label.textContent = channelKey === "cs2" ? "CS2" : "GCloud";
+  title.append(dot, label);
+  const reason = document.createElement("div");
+  reason.className = "account-control-reason";
+  reason.textContent = accountControlReason(channel.reason);
+  stateNode.append(title, reason);
+
+  const actions = document.createElement("div");
+  actions.className = "account-control-actions";
+  for (const profile of Array.isArray(profiles) ? profiles : []) {
+    const key = String(profile?.key || "");
+    if (!key) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "account-control-action";
+    button.textContent = key;
+    button.title = `${String(profile?.resource_name || key)} · ${String(profile?.report_code || "")}`;
+    const busyKey = `${identity}|${channelKey}`;
+    button.disabled = !ready || state.accountControl.busy.has(busyKey);
+    button.addEventListener("click", () => submitAccountControl(identity, channelKey, key, channel));
+    actions.appendChild(button);
+  }
+  row.append(stateNode, actions);
+  return row;
+}
+
+function renderAccountControlPanel(snapshot) {
+  const list = document.querySelector("[data-account-control-list]");
+  const nav = document.querySelector("[data-account-control-nav]");
+  if (!list || !nav) return;
+  list.replaceChildren();
+  nav.replaceChildren();
+  const accounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts : [];
+  const channels = snapshot?.channels && typeof snapshot.channels === "object" ? snapshot.channels : {};
+  if (!accounts.length) {
+    const empty = document.createElement("div");
+    empty.className = "account-control-empty";
+    empty.textContent = "当前没有在线 KeyProxy 账号";
+    list.appendChild(empty);
+    return;
+  }
+  const selectable = accounts.filter(account => String(account?.identity || ""));
+  if (!selectable.some(account => String(account.identity) === state.accountControl.selectedIdentity)) {
+    state.accountControl.selectedIdentity = String(selectable[0]?.identity || "");
+  }
+  for (const account of selectable) {
+    const identity = String(account.identity);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `account-control-nav-button${identity === state.accountControl.selectedIdentity ? " active" : ""}`;
+    button.dataset.identity = identity;
+    const name = document.createElement("strong");
+    name.textContent = identity;
+    const detail = document.createElement("span");
+    const available = [account?.cs2?.online ? "CS2" : "", account?.gcloud?.online ? "GCloud" : ""].filter(Boolean);
+    const connectionCount = Number(account?.keyproxy?.connection_count || 0);
+    detail.textContent = available.length
+      ? available.join(" · ")
+      : `${connectionCount || 1} 个在线连接`;
+    button.append(name, detail);
+    button.addEventListener("click", () => {
+      state.accountControl.selectedIdentity = identity;
+      renderAccountControlPanel(state.accountControl.snapshot || snapshot);
+    });
+    nav.appendChild(button);
+  }
+
+  const account = selectable.find(item => String(item.identity) === state.accountControl.selectedIdentity);
+  if (!account) return;
+  const identity = String(account.identity);
+  const card = document.createElement("article");
+  card.className = "account-control-card";
+  const head = document.createElement("div");
+  head.className = "account-control-card-head";
+  const name = document.createElement("strong");
+  name.textContent = identity;
+  const detail = document.createElement("span");
+  const keyproxyConnections = Number(account?.keyproxy?.connection_count || 0);
+  const accountId = String(account?.cs2?.account || "");
+  detail.textContent = [
+    `KeyProxy account · ${keyproxyConnections || 1} 个在线连接`,
+    accountId ? `AccountID ${accountId}` : "",
+  ].filter(Boolean).join(" · ");
+  head.append(name, detail);
+  card.append(
+    head,
+    accountControlChannelNode(identity, "cs2", account?.cs2, channels?.cs2?.profiles),
+    accountControlChannelNode(identity, "gcloud", account?.gcloud, channels?.gcloud?.profiles),
+  );
+  list.appendChild(card);
+}
+
+async function refreshAccountControlPanel({ quiet = false } = {}) {
+  if (!state.accountControl.open) return;
+  const generation = state.accountControl.generation;
+  if (state.accountControl.refreshGeneration === generation) return;
+  state.accountControl.refreshGeneration = generation;
+  if (!quiet) setAccountControlMessage("正在读取账号状态");
+  try {
+    const snapshot = await apiJson("/api/control/v1/accounts");
+    if (!state.accountControl.open || state.accountControl.generation !== generation) return;
+    state.accountControl.snapshot = snapshot;
+    renderAccountControlPanel(snapshot);
+    if (!quiet) setAccountControlMessage(`已读取 ${Array.isArray(snapshot?.accounts) ? snapshot.accounts.length : 0} 个账号`);
+  } catch (error) {
+    if (!quiet && state.accountControl.generation === generation) {
+      setAccountControlMessage(`读取失败：${error.message}`, "error");
+    }
+  } finally {
+    if (state.accountControl.refreshGeneration === generation) {
+      state.accountControl.refreshGeneration = 0;
+    }
+  }
+}
+
+async function waitForAccountControlResult(channel, identity, requestId) {
+  const params = new URLSearchParams({ channel, identity, request_id: requestId });
+  for (let attempt = 0; attempt < 48; attempt += 1) {
+    const result = await apiJson(`/api/control/v1/status?${params.toString()}`);
+    if (["delivered", "failed", "unknown"].includes(String(result?.status || ""))) return result;
+    await new Promise(resolve => window.setTimeout(resolve, 250));
+  }
+  throw new Error("等待执行结果超时");
+}
+
+async function submitAccountControl(identity, channel, profile, channelState) {
+  const busyKey = `${identity}|${channel}`;
+  if (state.accountControl.busy.has(busyKey)) return;
+  state.accountControl.busy.add(busyKey);
+  renderAccountControlPanel(state.accountControl.snapshot || {});
+  setAccountControlMessage(`正在为 ${identity} 构造 ${channel === "cs2" ? "CS2" : "GCloud"} ${profile}`);
+  try {
+    let result = await apiPostJson("/api/control/v1/commands", {
+      identity,
+      channel,
+      profile,
+      target_token: String(channelState?.target_token || ""),
+      target_flow_id: String(channelState?.flow_id || ""),
+      target_account: String(channelState?.account || ""),
+    });
+    if (String(result?.status || "") === "queued" && result?.request_id) {
+      result = await waitForAccountControlResult(channel, identity, String(result.request_id));
+    }
+    const ok = result?.success === true && String(result?.status || "") === "delivered";
+    setAccountControlMessage(
+      `${identity} · ${channel === "cs2" ? "CS2" : "GCloud"} ${profile}：${accountControlReason(result?.reason || result?.status)}`,
+      ok ? "success" : "error",
+    );
+  } catch (error) {
+    setAccountControlMessage(`${identity} · ${profile}：${accountControlReason(error.message)}`, "error");
+  } finally {
+    state.accountControl.busy.delete(busyKey);
+    await refreshAccountControlPanel({ quiet: true });
+  }
+}
+
 async function tick() {
   try {
     const s = await apiJson("/stats");
@@ -22241,6 +22571,7 @@ if (systemThemeQuery) {
   installDumpAsciiRowStyles();
   installAceFilterControl();
   installViewerControls();
+  installAccountControlPanel();
   loadRules();
   setupSplitter();
   setupWheelRouting();

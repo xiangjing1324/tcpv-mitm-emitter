@@ -80,6 +80,7 @@ class TcpvRuntime:
         self._drop_before_ts_ms: dict[str, int] = {}
         self._analyzer = TersafeAnalyzer()
         self._cleanup_instance_on_stop = True
+        self._control_provider: Any = None
 
     def start(
         self,
@@ -91,6 +92,7 @@ class TcpvRuntime:
         instance_id: str = "",
         cleanup_on_stop: bool | None = None,
         cleanup_previous_on_start: bool | None = None,
+        control_provider: Any = None,
     ) -> bool:
         with self._lock:
             if self.enabled:
@@ -124,6 +126,7 @@ class TcpvRuntime:
                     )
                 self._stop_event.clear()
                 self._drop_before_ts_ms = {}
+                self._control_provider = control_provider
 
                 self._worker_thread = threading.Thread(target=self._writer_loop, name="tcpv-writer", daemon=True)
                 self._worker_thread.start()
@@ -164,6 +167,7 @@ class TcpvRuntime:
                 self._worker_thread = None
                 self._server_thread = None
                 self._drop_before_ts_ms = {}
+                self._control_provider = None
                 self._drain_queue()
                 raise
 
@@ -208,6 +212,7 @@ class TcpvRuntime:
             self._semantic_skipped_payload_count = 0
             self._drop_before_ts_ms = {}
             self._cleanup_instance_on_stop = True
+            self._control_provider = None
             self._drain_queue()
 
     def emit_packet(
@@ -829,6 +834,40 @@ class TcpvRuntime:
     def get_config(self) -> dict[str, Any]:
         return runtime_config()
 
+    def has_control_provider(self) -> bool:
+        with self._lock:
+            return self._control_provider is not None
+
+    def control_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            provider = self._control_provider
+        if provider is None:
+            raise RuntimeError("account_control_unavailable")
+        result = provider.snapshot()
+        if not isinstance(result, dict):
+            raise RuntimeError("account_control_snapshot_invalid")
+        return dict(result)
+
+    def control_submit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            provider = self._control_provider
+        if provider is None:
+            raise RuntimeError("account_control_unavailable")
+        result = provider.submit(dict(payload))
+        if not isinstance(result, dict):
+            raise RuntimeError("account_control_submit_invalid")
+        return dict(result)
+
+    def control_status(self, channel: str, identity: str, request_id: str) -> dict[str, Any]:
+        with self._lock:
+            provider = self._control_provider
+        if provider is None:
+            raise RuntimeError("account_control_unavailable")
+        result = provider.status(str(channel), str(identity), str(request_id))
+        if not isinstance(result, dict):
+            raise RuntimeError("account_control_status_invalid")
+        return dict(result)
+
     @staticmethod
     def _to_bytes(data: Any) -> bytes:
         if isinstance(data, bytes):
@@ -865,6 +904,7 @@ def init_emitter(
     instance_id: str = "",
     cleanup_on_stop: bool | None = None,
     cleanup_previous_on_start: bool | None = None,
+    control_provider: Any = None,
 ) -> bool:
     return TCPV_RUNTIME.start(
         bind_host=bind_host,
@@ -875,6 +915,7 @@ def init_emitter(
         instance_id=instance_id,
         cleanup_on_stop=cleanup_on_stop,
         cleanup_previous_on_start=cleanup_previous_on_start,
+        control_provider=control_provider,
     )
 
 

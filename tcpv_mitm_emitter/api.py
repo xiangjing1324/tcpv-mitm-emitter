@@ -32,6 +32,8 @@ from .web import INDEX_HTML
 
 AUTH_COOKIE_NAME = "tcpv_auth"
 AUTH_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
+ACCOUNT_CONTROL_API_PREFIX = "/api/control/v1"
+ACCOUNT_CONTROL_MAX_BODY_BYTES = 16 * 1024
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -196,12 +198,19 @@ def create_app(runtime) -> FastAPI:
                 )
             events_html = "".join(blocks)
 
+        app_config = dict(runtime.get_config())
+        has_control_provider = getattr(runtime, "has_control_provider", None)
+        app_config["account_control_enabled"] = bool(
+            auth_password
+            and callable(has_control_provider)
+            and has_control_provider()
+        )
         page = INDEX_HTML
         page = page.replace("__ACCOUNT_OPTIONS__", "".join(account_options))
         page = page.replace("__INITIAL_EVENTS__", events_html)
         page = page.replace("__STATUS_BOOT__", f"preload accounts={len(accounts)} events={event_count}")
         page = page.replace("__APP_JS_VERSION__", runtime.instance_id or "dev")
-        page = page.replace("__APP_CONFIG__", json.dumps(runtime.get_config(), ensure_ascii=False))
+        page = page.replace("__APP_CONFIG__", json.dumps(app_config, ensure_ascii=False))
         return page
 
     @app.get("/login", response_class=HTMLResponse)
@@ -254,6 +263,61 @@ def create_app(runtime) -> FastAPI:
             "enabled": runtime.enabled,
             "instance_id": runtime.instance_id,
         }
+
+    def require_account_control() -> None:
+        has_control_provider = getattr(runtime, "has_control_provider", None)
+        if not callable(has_control_provider) or not has_control_provider():
+            raise HTTPException(status_code=404, detail="account control is unavailable")
+        if not auth_password:
+            raise HTTPException(
+                status_code=503,
+                detail="account control requires TCPView authentication",
+            )
+
+    @app.get(f"{ACCOUNT_CONTROL_API_PREFIX}/accounts")
+    def account_control_snapshot() -> JSONResponse:
+        require_account_control()
+        try:
+            payload = runtime.control_snapshot()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="account control snapshot failed") from exc
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.post(f"{ACCOUNT_CONTROL_API_PREFIX}/commands")
+    async def account_control_submit(request: Request) -> JSONResponse:
+        require_account_control()
+        body = await request.body()
+        if len(body) > ACCOUNT_CONTROL_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="account control request is too large")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON request") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON object required")
+        try:
+            result = runtime.control_submit(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="account control submit failed") from exc
+        status_code = 202 if result.get("success") else 409
+        return JSONResponse(
+            result,
+            status_code=status_code,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get(f"{ACCOUNT_CONTROL_API_PREFIX}/status")
+    def account_control_status(
+        channel: str = Query(..., min_length=1, max_length=16),
+        identity: str = Query(..., min_length=1, max_length=128),
+        request_id: str = Query(..., min_length=1, max_length=128),
+    ) -> JSONResponse:
+        require_account_control()
+        try:
+            result = runtime.control_status(channel, identity, request_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="account control status failed") from exc
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     @app.get(f"{AGENT_API_PREFIX}/capabilities")
     def machine_capabilities() -> dict:
