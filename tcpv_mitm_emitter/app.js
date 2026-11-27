@@ -8605,6 +8605,72 @@ function pubgm17500RpcCompareRows(ev, info) {
   );
 }
 
+function pubgm17500AceNode(record, index, recordStart) {
+  if (!Array.isArray(record) || record.length < 10) return null;
+  const reportCode = (
+    ((Number(record[6]) & 0xff) * 0x1000000)
+    + ((Number(record[7]) & 0xff) << 16)
+    + ((Number(record[8]) & 0xff) << 8)
+    + (Number(record[9]) & 0xff)
+  ) >>> 0;
+  const report = detectTssReport(record) || { offset: 6, value: reportCode };
+  const identity = tssRecordIdentity(record, report);
+  const className = classifyRecordBytes(record, reportCode);
+  const node = {
+    index,
+    nodeLabel: `child[${index}]`,
+    offset: recordStart,
+    recordStart,
+    recordEnd: recordStart + record.length,
+    len: record.length,
+    lengthEndian: "be16",
+    reportCode,
+    reportOffset: 6,
+    idValue: identity.idValue,
+    idText: identity.idText,
+    className,
+    valuePreview: formatRecordValuePreview(record, reportCode),
+    timestampCandidates: extractTimestampCandidatesFromRecord(record),
+    hexSignature: className === "binary-like-leaf" ? formatHexSignature(record) : "",
+    xorCommonPreview: className === "binary-like-leaf" ? summarizeCommonFixedXor(record, reportCode) : "",
+  };
+  attachLocalChildSemantic(node, record);
+  return node;
+}
+
+function pubgm17500AceLayout(rpc) {
+  if (!rpc || rpc.ok !== true || rpc.name !== "on_recv_client_data" || !Array.isArray(rpc.body)) return null;
+  const body = rpc.body;
+  const maxHeaderLength = Math.min(64, Math.max(0, body.length - 10));
+  for (let headerLength = 0; headerLength <= maxHeaderLength; headerLength += 1) {
+    const nodes = [];
+    let cursor = headerLength;
+    while (cursor + 10 <= body.length) {
+      if (body[cursor] !== 0x00 || body[cursor + 1] !== 0x00
+          || body[cursor + 2] !== 0x00 || body[cursor + 3] !== 0x01) break;
+      const declaredLength = ((Number(body[cursor + 4]) & 0xff) << 8)
+        | (Number(body[cursor + 5]) & 0xff);
+      if (declaredLength < 10 || cursor + declaredLength > body.length) break;
+      const record = body.slice(cursor, cursor + declaredLength);
+      if ((Number(record[6]) & 0xff) !== 0x01) break;
+      const node = pubgm17500AceNode(record, nodes.length, cursor);
+      if (!node) break;
+      nodes.push(node);
+      cursor += declaredLength;
+    }
+    if (nodes.length > 0 && cursor === body.length) {
+      return {
+        headerLength,
+        headerBytes: body.slice(0, headerLength),
+        nodes,
+        nodeCount: nodes.length,
+        complete: true,
+      };
+    }
+  }
+  return null;
+}
+
 function pubgm17500RpcStructureRows(rpc) {
   if (!rpc || rpc.ok !== true || !Array.isArray(rpc.decoded)) return [];
   const rows = [];
@@ -8705,7 +8771,7 @@ function installPubgm17500RpcStructureStyles() {
     .pubgm-rpc-controls{display:flex;gap:4px;margin-left:auto}
     .pubgm-rpc-controls button{padding:4px 10px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:inherit;cursor:pointer}
     .pubgm-rpc-controls button[aria-pressed=true]{border-color:var(--accent);background:var(--preview-bg);color:var(--accent)}
-    .pubgm-rpc-note{margin-bottom:7px;line-height:1.5}
+    .pubgm-rpc-note{margin-bottom:5px;line-height:1.4}
     .pubgm-rpc-table{max-height:720px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--dump-bg)}
     .pubgm-rpc-inner{min-width:1180px}
     .pubgm-rpc-head,.pubgm-rpc-row{display:grid;grid-template-columns:minmax(370px,1fr) minmax(280px,340px) minmax(370px,1fr)}
@@ -8715,23 +8781,23 @@ function installPubgm17500RpcStructureStyles() {
     .pubgm-rpc-head-before{color:color-mix(in srgb,#d6a85a 82%,var(--text));border-top:2px solid color-mix(in srgb,#d6a85a 70%,transparent)}
     .pubgm-rpc-head-after{color:color-mix(in srgb,#67c58c 82%,var(--text));border-top:2px solid color-mix(in srgb,#67c58c 68%,transparent)}
     .pubgm-rpc-head-field{text-align:center;color:var(--muted);border-inline:1px solid var(--line)}
-    .pubgm-rpc-row{border-bottom:1px solid color-mix(in srgb,var(--line) 52%,transparent)}
+    .pubgm-rpc-row{min-height:23px;border-bottom:1px solid color-mix(in srgb,var(--line) 52%,transparent)}
     .pubgm-rpc-row:last-child{border-bottom:0}
     .pubgm-rpc-structure[data-mode=changes] .pubgm-rpc-row[data-status=same]{display:none}
-    .pubgm-rpc-side{min-width:0;padding:2px 7px;background:color-mix(in srgb,var(--panel) 97%,transparent)}
+    .pubgm-rpc-side{display:flex;align-items:center;min-width:0;padding:1px 7px;background:color-mix(in srgb,var(--panel) 97%,transparent)}
     .pubgm-rpc-side-before{background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 5%,transparent),transparent 76%)}
     .pubgm-rpc-side-after{background:linear-gradient(270deg,color-mix(in srgb,#67c58c 5%,transparent),transparent 76%)}
     .pubgm-rpc-side-empty{display:flex;align-items:center;justify-content:center;color:var(--muted)}
-    .pubgm-rpc-hex-line{display:grid;grid-template-columns:7ch 47ch 16ch;gap:5px;align-items:baseline;min-width:72ch;font:12px/1.42 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}
+    .pubgm-rpc-hex-line{display:grid;grid-template-columns:7ch 47ch 16ch;gap:5px;align-items:baseline;min-width:72ch;font:12px/1.25 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}
     .pubgm-rpc-offset{color:var(--muted);white-space:nowrap}
     .pubgm-rpc-bytes{display:grid;grid-template-columns:repeat(16,2ch);column-gap:1ch;color:color-mix(in srgb,var(--accent) 80%,var(--text));white-space:pre}
     .pubgm-rpc-ascii{display:grid;grid-template-columns:repeat(16,1ch);color:color-mix(in srgb,var(--muted) 82%,var(--text));white-space:pre}
     .pubgm-rpc-byte,.pubgm-rpc-char{text-align:center}
     .pubgm-rpc-byte-changed{color:var(--modified-text);background:var(--modified-bg);box-shadow:inset 0 -1px color-mix(in srgb,var(--modified-text) 42%,transparent);font-weight:750;border-radius:2px}
     .pubgm-rpc-char-changed{color:var(--modified-text);box-shadow:inset 0 -1px color-mix(in srgb,var(--modified-text) 36%,transparent);font-weight:750}
-    .pubgm-rpc-annotation{min-width:0;padding:5px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 64%,transparent);background:color-mix(in srgb,var(--panel) 95%,transparent);font-size:11px;line-height:1.38}
-    .pubgm-rpc-annotation strong{display:block;color:var(--text);font-size:12px;overflow-wrap:anywhere}
-    .pubgm-rpc-annotation span{display:block;margin-top:2px;color:var(--muted);overflow-wrap:anywhere}
+    .pubgm-rpc-annotation{display:grid;grid-template-columns:minmax(7.5em,max-content) minmax(0,1fr) max-content;align-items:center;gap:7px;min-width:0;padding:1px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 64%,transparent);background:color-mix(in srgb,var(--panel) 95%,transparent);font-size:11px;line-height:1.25}
+    .pubgm-rpc-annotation strong{display:block;min-width:0;color:var(--text);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .pubgm-rpc-annotation span{display:block;min-width:0;margin:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .pubgm-rpc-row-marker .pubgm-rpc-annotation strong{color:#a78bfa}
     .pubgm-rpc-row-length .pubgm-rpc-annotation strong{color:#38bdf8}
     .pubgm-rpc-row-name .pubgm-rpc-annotation strong{color:#4ade80}
@@ -8742,6 +8808,27 @@ function installPubgm17500RpcStructureStyles() {
     .pubgm-rpc-row-removed .pubgm-rpc-status{color:#f87171}
     .pubgm-rpc-more{border-top:1px solid var(--line)}
     .pubgm-rpc-more>summary{padding:7px 10px;color:var(--muted);cursor:pointer;font-size:11px}
+    .pubgm-ace-node-panel{display:grid;gap:7px;min-width:0}
+    .pubgm-ace-node-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:7px 12px;padding:1px 2px}
+    .pubgm-ace-node-head strong{color:color-mix(in srgb,#a78bfa 78%,var(--text))}
+    .pubgm-ace-node-head span{color:var(--muted);font-size:11px}
+    .pubgm-ace-outer{border:1px solid color-mix(in srgb,#38bdf8 42%,var(--line));border-radius:6px;background:color-mix(in srgb,#38bdf8 5%,var(--panel));overflow:hidden}
+    .pubgm-ace-outer-title{display:flex;justify-content:space-between;gap:10px;padding:5px 8px;border-bottom:1px solid var(--line);color:color-mix(in srgb,#38bdf8 76%,var(--text));font-size:11px;font-weight:750}
+    .pubgm-ace-outer-title small{color:var(--muted);font-weight:500}
+    .pubgm-ace-outer-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+    .pubgm-ace-outer-single{grid-template-columns:minmax(0,1fr)}
+    .pubgm-ace-outer-side{min-width:0;padding:5px 8px}
+    .pubgm-ace-outer-side:first-child:not(:last-child){border-right:1px solid var(--line)}
+    .pubgm-ace-outer-side strong{display:block;margin-bottom:3px;color:var(--muted);font-size:11px}
+    .pubgm-ace-outer-meta{display:flex;flex-wrap:wrap;gap:3px 10px;margin-bottom:3px;color:var(--muted);font-size:10px}
+    .pubgm-ace-outer-meta code{color:var(--text)}
+    .pubgm-ace-outer-hex{display:grid;grid-template-columns:7ch minmax(0,1fr) 16ch;gap:5px;min-width:0;font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+    .pubgm-ace-outer-hex code{white-space:pre;overflow:hidden;text-overflow:ellipsis}
+    .pubgm-ace-outer-offset{color:var(--muted)}
+    .pubgm-ace-outer-bytes{color:color-mix(in srgb,#38bdf8 72%,var(--text))}
+    .pubgm-ace-outer-ascii{color:var(--muted)}
+    .pubgm-ace-node-panel .child-pair-card{margin:0}
+    @media (max-width:900px){.pubgm-ace-outer-grid{grid-template-columns:minmax(0,1fr)}.pubgm-ace-outer-side:first-child:not(:last-child){border-right:0;border-bottom:1px solid var(--line)}}
   `;
   document.head.appendChild(style);
 }
@@ -8795,13 +8882,124 @@ function pubgm17500RpcAnnotation(row) {
   const afterText = row.after && row.after.description;
   description.textContent = beforeText && afterText && beforeText !== afterText
     ? `${beforeText} → ${afterText}` : afterText || beforeText || "";
+  description.title = description.textContent;
   const status = document.createElement("span");
   status.className = "pubgm-rpc-status";
   status.textContent = ({ same: "相同", changed: "已修改", added: "新增", removed: "删除", current: "当前" })[row.status] || row.status;
+  label.title = label.textContent;
   cell.appendChild(label);
   cell.appendChild(description);
   cell.appendChild(status);
   return cell;
+}
+
+function pubgm17500AceOuterSide(rpc, layout, label) {
+  const side = document.createElement("div");
+  side.className = "pubgm-ace-outer-side";
+  const title = document.createElement("strong");
+  title.textContent = label;
+  side.appendChild(title);
+  if (!rpc || !layout) {
+    const empty = document.createElement("div");
+    empty.className = "child-preview-empty";
+    empty.textContent = "—";
+    side.appendChild(empty);
+    return side;
+  }
+  const meta = document.createElement("div");
+  meta.className = "pubgm-ace-outer-meta";
+  for (const [name, value] of [
+    ["RPC", rpc.name],
+    ["封套", `${rpc.bodyOffset} B`],
+    ["ACE前缀", `${layout.headerLength} B`],
+    ["节点", String(layout.nodeCount)],
+  ]) {
+    const item = document.createElement("span");
+    item.textContent = `${name} `;
+    const code = document.createElement("code");
+    code.textContent = value;
+    item.appendChild(code);
+    meta.appendChild(item);
+  }
+  side.appendChild(meta);
+  const headerBytes = rpc.decoded.slice(0, rpc.bodyOffset + layout.headerLength);
+  for (let offset = 0; offset < headerBytes.length; offset += 16) {
+    const bytes = headerBytes.slice(offset, offset + 16);
+    const line = document.createElement("div");
+    line.className = "pubgm-ace-outer-hex";
+    const offsetNode = document.createElement("code");
+    offsetNode.className = "pubgm-ace-outer-offset";
+    offsetNode.textContent = `+0x${offset.toString(16).padStart(4, "0")}`;
+    const byteNode = document.createElement("code");
+    byteNode.className = "pubgm-ace-outer-bytes";
+    byteNode.textContent = bytes.map((value) => Number(value).toString(16).padStart(2, "0")).join(" ");
+    const asciiNode = document.createElement("code");
+    asciiNode.className = "pubgm-ace-outer-ascii";
+    asciiNode.textContent = bytes.map((value) => Number(value) >= 32 && Number(value) < 127 ? String.fromCharCode(Number(value)) : ".").join("");
+    line.appendChild(offsetNode);
+    line.appendChild(byteNode);
+    line.appendChild(asciiNode);
+    side.appendChild(line);
+  }
+  return side;
+}
+
+function pubgm17500AceChildPanel(beforeRpc, afterRpc, beforeLayout, afterLayout) {
+  ensureChildCommonStyles();
+  installPubgm17500RpcStructureStyles();
+  const panel = document.createElement("section");
+  panel.className = "pubgm-ace-node-panel";
+  const beforeNodes = beforeLayout ? beforeLayout.nodes : [];
+  const afterNodes = afterLayout ? afterLayout.nodes : [];
+  const count = Math.max(beforeNodes.length, afterNodes.length);
+  const head = document.createElement("div");
+  head.className = "pubgm-ace-node-head";
+  const title = document.createElement("strong");
+  title.textContent = "ACE 节点解析";
+  const summary = document.createElement("span");
+  summary.textContent = beforeLayout && afterLayout
+    ? `${beforeNodes.length} → ${afterNodes.length} 个节点 · 严格长度闭合`
+    : `${count} 个节点 · 严格长度闭合`;
+  head.appendChild(title);
+  head.appendChild(summary);
+  panel.appendChild(head);
+
+  const outer = document.createElement("div");
+  outer.className = "pubgm-ace-outer";
+  const outerTitle = document.createElement("div");
+  outerTitle.className = "pubgm-ace-outer-title";
+  const outerName = document.createElement("span");
+  outerName.textContent = "RPC / ACE 外层头";
+  const outerHint = document.createElement("small");
+  outerHint.textContent = "节点前字节放在这里；不混入 child 偏移";
+  outerTitle.appendChild(outerName);
+  outerTitle.appendChild(outerHint);
+  outer.appendChild(outerTitle);
+  const grid = document.createElement("div");
+  grid.className = `pubgm-ace-outer-grid${beforeLayout ? "" : " pubgm-ace-outer-single"}`;
+  if (beforeLayout) grid.appendChild(pubgm17500AceOuterSide(beforeRpc, beforeLayout, "修改前外层头"));
+  grid.appendChild(pubgm17500AceOuterSide(afterRpc, afterLayout, beforeLayout ? "修改后外层头" : "当前外层头"));
+  outer.appendChild(grid);
+  panel.appendChild(outer);
+
+  const actionMap = new Map();
+  for (let index = 0; index < count; index += 1) {
+    panel.appendChild(makeChildCard(
+      beforeNodes,
+      afterNodes,
+      beforeRpc && Array.isArray(beforeRpc.body) ? beforeRpc.body : [],
+      afterRpc && Array.isArray(afterRpc.body) ? afterRpc.body : [],
+      index,
+      actionMap,
+      null,
+      null,
+      {
+        currentOnly: !beforeLayout,
+        forceSideBySideSame: Boolean(beforeLayout),
+      },
+    ));
+  }
+  return panel;
 }
 
 function pubgm17500RpcStructurePanel(ev, info) {
@@ -8810,6 +9008,11 @@ function pubgm17500RpcStructurePanel(ev, info) {
   installPubgm17500RpcStructureStyles();
   const beforeBytes = b64ToBytes(String(ev && ev.before_pay || ""));
   const before = beforeBytes.length ? parsePubgm17500TypedRpc(beforeBytes, info.meta) : null;
+  const beforeAce = pubgm17500AceLayout(before);
+  const afterAce = pubgm17500AceLayout(current);
+  if (beforeAce || afterAce) {
+    return pubgm17500AceChildPanel(before, current, beforeAce, afterAce);
+  }
   const compare = pubgm17500RpcStructureCompare(before, current);
   const section = document.createElement("section");
   section.className = `pubgm-rpc-structure${compare.canCompare ? "" : " pubgm-rpc-current"}`;
@@ -8851,7 +9054,6 @@ function pubgm17500RpcStructurePanel(ev, info) {
     ? `RPC 边界已验证；封套 ${compare.beforeLength} → ${compare.afterLength} 字节，业务正文 ${compare.beforeBodyLength} → ${compare.afterBodyLength} 字节。正文按 16 字节逐行对齐，未知字段只标原始字节。`
     : `RPC 边界已验证；封套 ${compare.afterLength} 字节，业务正文 ${compare.afterBodyLength} 字节。正文按 16 字节逐行展示，未知字段只标原始字节。`;
   section.appendChild(note);
-
   const table = document.createElement("div");
   table.className = "pubgm-rpc-table";
   const inner = document.createElement("div");

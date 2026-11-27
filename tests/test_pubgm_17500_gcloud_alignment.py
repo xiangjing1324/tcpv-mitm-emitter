@@ -25,6 +25,15 @@ def _literal_lz4(data: bytes) -> bytes:
     return bytes(out) + data
 
 
+def _ace_record(report_code: int, payload: bytes = b"") -> bytes:
+    length = 10 + len(payload)
+    return b"\x00\x00\x00\x01" + length.to_bytes(2, "big") + report_code.to_bytes(4, "big") + payload
+
+
+def _ace_body(*records: bytes, prefix: bytes = b"\x02\xaa\x01\x03\xcd\x02") -> bytes:
+    return prefix + b"".join(records)
+
+
 def _event(payload: bytes, *, before: bytes = b"", port: int = 17500) -> dict:
     label = quote("业务心跳保活")
     detail = quote("客户端保活请求；命令名和正文边界已验证。")
@@ -72,6 +81,7 @@ class Element {
       contains: name => this.className.split(/\s+/).includes(name),
     };
   }
+  get childNodes() { return this.children; }
   appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
   addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
   async emit(name) { for (const callback of this.listeners[name] || []) await callback({target:this}); }
@@ -84,6 +94,7 @@ class Element {
 const installed = [];
 const document = {
   createElement: tag => new Element(tag),
+  createTextNode: value => { const node = new Element('#text'); node.textContent = String(value); return node; },
   getElementById: id => installed.find(item => item.id === id) || null,
   head: {appendChild: item => installed.push(item)},
 };
@@ -182,6 +193,76 @@ console.log(JSON.stringify({
         self.assertEqual(result["bodyRows"][-1]["width"], 1)
         self.assertTrue(all("字段含义待确认" in row["description"] for row in result["bodyRows"]))
         self.assertEqual(result["names"], ["命令名称", "命令名称（续 +0x10）"])
+
+    def test_ace_layout_separates_outer_header_and_scans_multiple_nodes(self) -> None:
+        first = _ace_record(0x0112232E, b"\x00\x00\x00\x0drole_id:sunday")
+        second = _ace_record(0x010A0009, b"\x01\x02\x03\x04")
+        body = _ace_body(first, second)
+        event = _event(_typed_rpc("on_recv_client_data", body))
+        result = self.run_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const layout = pubgm17500AceLayout(info.typedRpc);
+console.log(JSON.stringify({
+  headerLength: layout && layout.headerLength,
+  headerHex: layout && layout.headerBytes.map(value => value.toString(16).padStart(2, '0')).join(' '),
+  complete: layout && layout.complete,
+  nodes: layout && layout.nodes.map(node => ({
+    index: node.index,
+    label: node.nodeLabel,
+    start: node.recordStart,
+    end: node.recordEnd,
+    len: node.len,
+    report: node.reportCode,
+  })),
+}));
+""")
+        self.assertEqual(result["headerLength"], 6)
+        self.assertEqual(result["headerHex"], "02 aa 01 03 cd 02")
+        self.assertTrue(result["complete"])
+        self.assertEqual([node["label"] for node in result["nodes"]], ["child[0]", "child[1]"])
+        self.assertEqual([node["report"] for node in result["nodes"]], [0x0112232E, 0x010A0009])
+        self.assertEqual(result["nodes"][0]["start"], 6)
+        self.assertEqual(result["nodes"][0]["end"], 6 + len(first))
+        self.assertEqual(result["nodes"][1]["start"], 6 + len(first))
+
+    def test_ace_layout_requires_closed_lengths_not_a_report_code_coincidence(self) -> None:
+        valid = bytearray(_ace_record(0x0112232E, b"payload"))
+        valid[4:6] = (len(valid) + 1).to_bytes(2, "big")
+        accidental = b"header\x01\x12\x23\x2efooter"
+        events = [
+            _event(_typed_rpc("on_recv_client_data", _ace_body(bytes(valid)))),
+            _event(_typed_rpc("on_recv_client_data", accidental)),
+        ]
+        result = self.run_js(events, r"""
+console.log(JSON.stringify(events.map(event => {
+  const info = analyzeGcloudEvent(event, event.summary);
+  return pubgm17500AceLayout(info.typedRpc);
+})));
+""")
+        self.assertEqual(result, [None, None])
+
+    def test_ace_panel_renders_every_closed_node_with_existing_child_cards(self) -> None:
+        first = _ace_record(0x0112232E, b"config2.dat")
+        second = _ace_record(0x010A0009, b"\x01\x02\x03\x04")
+        current = _typed_rpc("on_recv_client_data", _ace_body(first, second))
+        event = _event(current)
+        result = self.run_dom_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const rpc = info.typedRpc;
+const layout = pubgm17500AceLayout(rpc);
+const panel = pubgm17500AceChildPanel(null, rpc, null, layout);
+console.log(JSON.stringify({
+  cards: nodes(panel, 'child-pair-card').length,
+  outer: nodes(panel, 'pubgm-ace-outer').length,
+  text: text(panel),
+}));
+""")
+        self.assertEqual(result["cards"], 2)
+        self.assertEqual(result["outer"], 1)
+        self.assertIn("child[0]", result["text"])
+        self.assertIn("child[1]", result["text"])
+        self.assertIn("0x0112232e", result["text"])
+        self.assertIn("0x010a0009", result["text"])
 
     def test_structure_compare_aligns_before_after_by_body_offset(self) -> None:
         before_body = bytes(index % 256 for index in range(255))
