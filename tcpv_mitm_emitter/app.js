@@ -8605,6 +8605,303 @@ function pubgm17500RpcCompareRows(ev, info) {
   );
 }
 
+function pubgm17500RpcStructureRows(rpc) {
+  if (!rpc || rpc.ok !== true || !Array.isArray(rpc.decoded)) return [];
+  const rows = [];
+  const append = (key, offset, bytes, label, description, kind = "body") => {
+    const values = Array.isArray(bytes) ? bytes.map((value) => Number(value) & 0xff) : [];
+    rows.push({ key, offset: Number(offset), bytes: values, label, description, kind });
+  };
+  append("marker", 0, rpc.decoded.slice(0, 1), "应用层标记", "RPC 标记 · 0x03", "marker");
+  append(
+    "name_length",
+    1,
+    rpc.decoded.slice(1, 2),
+    "命令名称长度",
+    `${rpc.nameLength} 字节`,
+    "length",
+  );
+  const commandBytes = rpc.decoded.slice(rpc.nameOffset, rpc.nameOffset + rpc.nameLength);
+  for (let index = 0; index < Math.max(1, Math.ceil(commandBytes.length / 16)); index += 1) {
+    const relative = index * 16;
+    append(
+      `name:${relative}`,
+      rpc.nameOffset + relative,
+      commandBytes.slice(relative, relative + 16),
+      index === 0 ? "命令名称" : `命令名称（续 +0x${relative.toString(16).padStart(2, "0")}）`,
+      index === 0 ? pubgm17500RpcDisplayName(rpc) : "ASCII 命令名续行",
+      "name",
+    );
+  }
+  if (!rpc.body.length) {
+    append("body:empty", rpc.bodyOffset, [], "业务正文", "空正文", "body");
+  } else {
+    for (let relative = 0; relative < rpc.body.length; relative += 16) {
+      const chunk = rpc.body.slice(relative, relative + 16);
+      append(
+        `body:${relative}`,
+        rpc.bodyOffset + relative,
+        chunk,
+        `业务正文 +0x${relative.toString(16).padStart(4, "0")}`,
+        `${chunk.length} 字节 · 原始字节（字段含义待确认）`,
+        "body",
+      );
+    }
+  }
+  return rows;
+}
+
+function pubgm17500RpcStructureCompare(beforeRpc, afterRpc) {
+  const beforeRows = pubgm17500RpcStructureRows(beforeRpc);
+  const afterRows = pubgm17500RpcStructureRows(afterRpc);
+  const canCompare = Boolean(beforeRpc && beforeRpc.ok && afterRpc && afterRpc.ok && beforeRpc.name === afterRpc.name);
+  const beforeMap = new Map(beforeRows.map((row) => [row.key, row]));
+  const afterMap = new Map(afterRows.map((row) => [row.key, row]));
+  const keys = canCompare
+    ? [...beforeMap.keys(), ...[...afterMap.keys()].filter((key) => !beforeMap.has(key))]
+    : [...afterMap.keys()];
+  const rows = keys.map((key) => {
+    const before = canCompare ? beforeMap.get(key) || null : null;
+    const after = afterMap.get(key) || null;
+    const limit = Math.max(before ? before.bytes.length : 0, after ? after.bytes.length : 0);
+    const beforeChanged = [];
+    const afterChanged = [];
+    let different = !before || !after;
+    for (let index = 0; index < limit; index += 1) {
+      const left = before && index < before.bytes.length ? before.bytes[index] : null;
+      const right = after && index < after.bytes.length ? after.bytes[index] : null;
+      const changed = left !== right;
+      beforeChanged.push(Boolean(changed && left !== null));
+      afterChanged.push(Boolean(changed && right !== null));
+      different = different || changed;
+    }
+    return {
+      key,
+      before,
+      after,
+      beforeChanged,
+      afterChanged,
+      status: !canCompare ? "current" : !before ? "added" : !after ? "removed" : different ? "changed" : "same",
+    };
+  });
+  return {
+    rows,
+    canCompare,
+    beforeBodyLength: beforeRpc && beforeRpc.ok ? beforeRpc.bodyLength : null,
+    afterBodyLength: afterRpc && afterRpc.ok ? afterRpc.bodyLength : null,
+    beforeLength: beforeRpc && beforeRpc.ok ? beforeRpc.decoded.length : null,
+    afterLength: afterRpc && afterRpc.ok ? afterRpc.decoded.length : null,
+  };
+}
+
+function installPubgm17500RpcStructureStyles() {
+  if (document.getElementById("tcpv-pubgm-17500-structure-style")) return;
+  const style = document.createElement("style");
+  style.id = "tcpv-pubgm-17500-structure-style";
+  style.textContent = `
+    .pubgm-rpc-structure{min-width:0}
+    .pubgm-rpc-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:7px 14px;padding:2px 0 7px}
+    .pubgm-rpc-count,.pubgm-rpc-note{color:var(--muted);font-size:11px}
+    .pubgm-rpc-controls{display:flex;gap:4px;margin-left:auto}
+    .pubgm-rpc-controls button{padding:4px 10px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:inherit;cursor:pointer}
+    .pubgm-rpc-controls button[aria-pressed=true]{border-color:var(--accent);background:var(--preview-bg);color:var(--accent)}
+    .pubgm-rpc-note{margin-bottom:7px;line-height:1.5}
+    .pubgm-rpc-table{max-height:720px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--dump-bg)}
+    .pubgm-rpc-inner{min-width:1180px}
+    .pubgm-rpc-head,.pubgm-rpc-row{display:grid;grid-template-columns:minmax(370px,1fr) minmax(280px,340px) minmax(370px,1fr)}
+    .pubgm-rpc-current .pubgm-rpc-head,.pubgm-rpc-current .pubgm-rpc-row{grid-template-columns:minmax(280px,340px) minmax(370px,1fr)}
+    .pubgm-rpc-head{position:sticky;top:0;z-index:2;background:var(--dump-head-bg);border-bottom:1px solid var(--line);font-size:11px;font-weight:700}
+    .pubgm-rpc-head>div{padding:7px 9px}
+    .pubgm-rpc-head-before{color:color-mix(in srgb,#d6a85a 82%,var(--text));border-top:2px solid color-mix(in srgb,#d6a85a 70%,transparent)}
+    .pubgm-rpc-head-after{color:color-mix(in srgb,#67c58c 82%,var(--text));border-top:2px solid color-mix(in srgb,#67c58c 68%,transparent)}
+    .pubgm-rpc-head-field{text-align:center;color:var(--muted);border-inline:1px solid var(--line)}
+    .pubgm-rpc-row{border-bottom:1px solid color-mix(in srgb,var(--line) 52%,transparent)}
+    .pubgm-rpc-row:last-child{border-bottom:0}
+    .pubgm-rpc-structure[data-mode=changes] .pubgm-rpc-row[data-status=same]{display:none}
+    .pubgm-rpc-side{min-width:0;padding:2px 7px;background:color-mix(in srgb,var(--panel) 97%,transparent)}
+    .pubgm-rpc-side-before{background:linear-gradient(90deg,color-mix(in srgb,#d6a85a 5%,transparent),transparent 76%)}
+    .pubgm-rpc-side-after{background:linear-gradient(270deg,color-mix(in srgb,#67c58c 5%,transparent),transparent 76%)}
+    .pubgm-rpc-side-empty{display:flex;align-items:center;justify-content:center;color:var(--muted)}
+    .pubgm-rpc-hex-line{display:grid;grid-template-columns:7ch 47ch 16ch;gap:5px;align-items:baseline;min-width:72ch;font:12px/1.42 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}
+    .pubgm-rpc-offset{color:var(--muted);white-space:nowrap}
+    .pubgm-rpc-bytes{display:grid;grid-template-columns:repeat(16,2ch);column-gap:1ch;color:color-mix(in srgb,var(--accent) 80%,var(--text));white-space:pre}
+    .pubgm-rpc-ascii{display:grid;grid-template-columns:repeat(16,1ch);color:color-mix(in srgb,var(--muted) 82%,var(--text));white-space:pre}
+    .pubgm-rpc-byte,.pubgm-rpc-char{text-align:center}
+    .pubgm-rpc-byte-changed{color:var(--modified-text);background:var(--modified-bg);box-shadow:inset 0 -1px color-mix(in srgb,var(--modified-text) 42%,transparent);font-weight:750;border-radius:2px}
+    .pubgm-rpc-char-changed{color:var(--modified-text);box-shadow:inset 0 -1px color-mix(in srgb,var(--modified-text) 36%,transparent);font-weight:750}
+    .pubgm-rpc-annotation{min-width:0;padding:5px 8px;border-inline:1px solid color-mix(in srgb,var(--line) 64%,transparent);background:color-mix(in srgb,var(--panel) 95%,transparent);font-size:11px;line-height:1.38}
+    .pubgm-rpc-annotation strong{display:block;color:var(--text);font-size:12px;overflow-wrap:anywhere}
+    .pubgm-rpc-annotation span{display:block;margin-top:2px;color:var(--muted);overflow-wrap:anywhere}
+    .pubgm-rpc-row-marker .pubgm-rpc-annotation strong{color:#a78bfa}
+    .pubgm-rpc-row-length .pubgm-rpc-annotation strong{color:#38bdf8}
+    .pubgm-rpc-row-name .pubgm-rpc-annotation strong{color:#4ade80}
+    .pubgm-rpc-row-changed .pubgm-rpc-annotation{background:color-mix(in srgb,var(--modified-bg) 58%,var(--panel))}
+    .pubgm-rpc-status{font-weight:700;color:var(--muted)}
+    .pubgm-rpc-row-changed .pubgm-rpc-status{color:var(--modified-text)}
+    .pubgm-rpc-row-added .pubgm-rpc-status{color:#4ade80}
+    .pubgm-rpc-row-removed .pubgm-rpc-status{color:#f87171}
+    .pubgm-rpc-more{border-top:1px solid var(--line)}
+    .pubgm-rpc-more>summary{padding:7px 10px;color:var(--muted);cursor:pointer;font-size:11px}
+  `;
+  document.head.appendChild(style);
+}
+
+function pubgm17500RpcHexSide(row, side) {
+  const item = row && row[side];
+  const cell = document.createElement("div");
+  cell.className = `pubgm-rpc-side pubgm-rpc-side-${side}`;
+  if (!item) {
+    cell.className += " pubgm-rpc-side-empty";
+    cell.textContent = "—";
+    return cell;
+  }
+  const line = document.createElement("div");
+  line.className = "pubgm-rpc-hex-line";
+  const offset = document.createElement("code");
+  offset.className = "pubgm-rpc-offset";
+  offset.textContent = `+0x${Math.max(0, Number(item.offset)).toString(16).padStart(4, "0")}`;
+  const bytes = document.createElement("code");
+  bytes.className = "pubgm-rpc-bytes";
+  const ascii = document.createElement("code");
+  ascii.className = "pubgm-rpc-ascii";
+  const changed = side === "before" ? row.beforeChanged : row.afterChanged;
+  for (let index = 0; index < 16; index += 1) {
+    const hasByte = index < item.bytes.length;
+    const value = hasByte ? Number(item.bytes[index]) & 0xff : null;
+    const byte = document.createElement("span");
+    byte.className = `pubgm-rpc-byte${changed[index] ? " pubgm-rpc-byte-changed" : ""}`;
+    byte.textContent = hasByte ? value.toString(16).padStart(2, "0") : "  ";
+    const char = document.createElement("span");
+    char.className = `pubgm-rpc-char${changed[index] ? " pubgm-rpc-char-changed" : ""}`;
+    char.textContent = hasByte && value >= 32 && value < 127 ? String.fromCharCode(value) : hasByte ? "." : " ";
+    bytes.appendChild(byte);
+    ascii.appendChild(char);
+  }
+  line.appendChild(offset);
+  line.appendChild(bytes);
+  line.appendChild(ascii);
+  cell.appendChild(line);
+  return cell;
+}
+
+function pubgm17500RpcAnnotation(row) {
+  const item = row.after || row.before;
+  const cell = document.createElement("div");
+  cell.className = "pubgm-rpc-annotation";
+  const label = document.createElement("strong");
+  label.textContent = item ? item.label : "字段";
+  const description = document.createElement("span");
+  const beforeText = row.before && row.before.description;
+  const afterText = row.after && row.after.description;
+  description.textContent = beforeText && afterText && beforeText !== afterText
+    ? `${beforeText} → ${afterText}` : afterText || beforeText || "";
+  const status = document.createElement("span");
+  status.className = "pubgm-rpc-status";
+  status.textContent = ({ same: "相同", changed: "已修改", added: "新增", removed: "删除", current: "当前" })[row.status] || row.status;
+  cell.appendChild(label);
+  cell.appendChild(description);
+  cell.appendChild(status);
+  return cell;
+}
+
+function pubgm17500RpcStructurePanel(ev, info) {
+  const current = info && info.typedRpc;
+  if (!current) return null;
+  installPubgm17500RpcStructureStyles();
+  const beforeBytes = b64ToBytes(String(ev && ev.before_pay || ""));
+  const before = beforeBytes.length ? parsePubgm17500TypedRpc(beforeBytes, info.meta) : null;
+  const compare = pubgm17500RpcStructureCompare(before, current);
+  const section = document.createElement("section");
+  section.className = `pubgm-rpc-structure${compare.canCompare ? "" : " pubgm-rpc-current"}`;
+  section.dataset.mode = ev && ["all", "changes"].includes(ev.__tcpvPubgmRpcMode)
+    ? ev.__tcpvPubgmRpcMode : "all";
+
+  const changedRows = compare.rows.filter((row) => !["same", "current"].includes(row.status)).length;
+  const toolbar = document.createElement("div");
+  toolbar.className = "pubgm-rpc-toolbar";
+  const title = document.createElement("strong");
+  title.textContent = compare.canCompare ? "结构化字节对照" : "当前结构化字节";
+  const count = document.createElement("span");
+  count.className = "pubgm-rpc-count";
+  count.textContent = compare.canCompare
+    ? `${changedRows} 行变化 / ${compare.rows.length} 行` : `${compare.rows.length} 行`;
+  toolbar.appendChild(title);
+  toolbar.appendChild(count);
+  if (compare.canCompare) {
+    const controls = document.createElement("div");
+    controls.className = "pubgm-rpc-controls";
+    for (const [mode, text] of [["all", "全部行"], ["changes", `只看变化 ${changedRows}`]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = text;
+      button.setAttribute("aria-pressed", String(section.dataset.mode === mode));
+      button.addEventListener("click", () => {
+        section.dataset.mode = mode;
+        if (ev && typeof ev === "object") ev.__tcpvPubgmRpcMode = mode;
+        for (const other of controls.querySelectorAll("button")) other.setAttribute("aria-pressed", String(other === button));
+      });
+      controls.appendChild(button);
+    }
+    toolbar.appendChild(controls);
+  }
+  section.appendChild(toolbar);
+  const note = document.createElement("div");
+  note.className = "pubgm-rpc-note";
+  note.textContent = compare.canCompare
+    ? `RPC 边界已验证；封套 ${compare.beforeLength} → ${compare.afterLength} 字节，业务正文 ${compare.beforeBodyLength} → ${compare.afterBodyLength} 字节。正文按 16 字节逐行对齐，未知字段只标原始字节。`
+    : `RPC 边界已验证；封套 ${compare.afterLength} 字节，业务正文 ${compare.afterBodyLength} 字节。正文按 16 字节逐行展示，未知字段只标原始字节。`;
+  section.appendChild(note);
+
+  const table = document.createElement("div");
+  table.className = "pubgm-rpc-table";
+  const inner = document.createElement("div");
+  inner.className = "pubgm-rpc-inner";
+  const head = document.createElement("div");
+  head.className = "pubgm-rpc-head";
+  const headings = compare.canCompare
+    ? [["pubgm-rpc-head-before", `修改前明文 · ${compare.beforeLength} B`], ["pubgm-rpc-head-field", "结构 / 注释"], ["pubgm-rpc-head-after", `修改后明文 · ${compare.afterLength} B`]]
+    : [["pubgm-rpc-head-field", "结构 / 注释"], ["pubgm-rpc-head-after", `当前明文 · ${compare.afterLength} B`]];
+  for (const [className, text] of headings) {
+    const item = document.createElement("div");
+    item.className = className;
+    item.textContent = text;
+    head.appendChild(item);
+  }
+  inner.appendChild(head);
+
+  const appendRows = (rows, parent) => {
+    for (const row of rows) {
+      const line = document.createElement("div");
+      const kind = String((row.after || row.before || {}).kind || "body");
+      line.className = `pubgm-rpc-row pubgm-rpc-row-${row.status} pubgm-rpc-row-${kind}`;
+      line.dataset.status = row.status;
+      if (compare.canCompare) line.appendChild(pubgm17500RpcHexSide(row, "before"));
+      line.appendChild(pubgm17500RpcAnnotation(row));
+      line.appendChild(pubgm17500RpcHexSide(row, "after"));
+      parent.appendChild(line);
+    }
+  };
+  const initialLimit = 2048;
+  appendRows(compare.rows.slice(0, initialLimit), inner);
+  if (compare.rows.length > initialLimit) {
+    const more = document.createElement("details");
+    more.className = "pubgm-rpc-more";
+    const summary = document.createElement("summary");
+    summary.textContent = `展开剩余 ${compare.rows.length - initialLimit} 行`;
+    more.appendChild(summary);
+    let loaded = false;
+    more.addEventListener("toggle", () => {
+      if (loaded || !more.open) return;
+      loaded = true;
+      appendRows(compare.rows.slice(initialLimit), more);
+    });
+    inner.appendChild(more);
+  }
+  table.appendChild(inner);
+  section.appendChild(table);
+  return section;
+}
+
 function gcloudNumericEnvelopeFromProto(proto) {
   const nodes = proto && Array.isArray(proto.nodes) ? proto.nodes : [];
   for (const node of nodes) {
@@ -9867,8 +10164,7 @@ function gcloudCompareEventRows(ev, info, summaryText = "") {
 
 function buildGcloudFieldCompare(ev, info, summaryText = "") {
   if (info && info.typedRpc) {
-    const compare = pubgm17500RpcCompareRows(ev, info);
-    return compare ? buildPacketFieldTable(compare, ev) : null;
+    return pubgm17500RpcStructurePanel(ev, info);
   }
   if (!info || !info.proto) return null;
   const compare = gcloudCompareEventRows(ev, info, summaryText);
@@ -10336,7 +10632,7 @@ function buildGcloudSecurityPacketPanel(ev, summaryText = "") {
     panel.appendChild(details);
   }
 
-  if (!protoTree && Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
+  if (!protoTree && info.kind !== "pubgm_rpc" && Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
     const details = document.createElement("details");
     details.className = "gcloud-node-details";
     details.open = !protoTree;
@@ -10443,7 +10739,7 @@ function buildGcloudPacketPanel(ev, summaryText = "", displayOptions = {}) {
     panel.appendChild(details);
   }
 
-  if (!protoTree && Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
+  if (!protoTree && info.kind !== "pubgm_rpc" && Array.isArray(info.nodeRows) && info.nodeRows.length > 0) {
     const details = document.createElement("details");
     details.className = "gcloud-node-details";
     details.open = !protoTree;

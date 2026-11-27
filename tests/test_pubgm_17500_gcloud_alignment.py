@@ -61,6 +61,43 @@ class Pubgm17500GcloudAlignmentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-3000:])
         return json.loads(result.stdout)
 
+    def run_dom_js(self, events: list[dict], assertions: str) -> dict:
+        dom = r"""
+class Element {
+  constructor(tag) {
+    this.tag = tag; this.children = []; this.className = ''; this.textContent = '';
+    this.dataset = {}; this.attributes = {}; this.listeners = {}; this.open = false;
+    this.classList = {
+      add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(' '); },
+      contains: name => this.className.split(/\s+/).includes(name),
+    };
+  }
+  appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+  addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
+  async emit(name) { for (const callback of this.listeners[name] || []) await callback({target:this}); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  querySelectorAll(selector) {
+    const matches = node => selector.startsWith('.') ? node.classList.contains(selector.slice(1)) : node.tag === selector;
+    return this.children.flatMap(child => [...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)]);
+  }
+}
+const installed = [];
+const document = {
+  createElement: tag => new Element(tag),
+  getElementById: id => installed.find(item => item.id === id) || null,
+  head: {appendChild: item => installed.push(item)},
+};
+function nodes(root, cls) {
+  if (!root) return [];
+  return [...(root.classList.contains(cls) ? [root] : []), ...root.children.flatMap(child => nodes(child, cls))];
+}
+function text(root) { return root ? [root.textContent, ...root.children.map(text)].filter(Boolean).join('\n') : ''; }
+"""
+        script = self.runtime + "\n" + dom + "\nconst events=" + json.dumps(events) + ";\n" + assertions
+        result = subprocess.run(["node"], input=script, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr[-4000:])
+        return json.loads(result.stdout)
+
     def test_17500_uses_gcloud_panel_with_verified_chinese_rpc_fields(self) -> None:
         event = _event(_typed_rpc("heart_beat", b"\x01\x02\x03"))
         result = self.run_js([event], r"""
@@ -123,6 +160,87 @@ console.log(JSON.stringify({current, other: pubgm17500CompactSummaryInfo(other.s
         self.assertEqual(result["current"]["text"], "业务心跳保活 · heart_beat · 已解密")
         self.assertIn("命令名和正文边界已验证", result["current"]["title"])
         self.assertIsNone(result["other"])
+
+    def test_structure_rows_split_complete_body_into_annotated_sixteen_byte_lines(self) -> None:
+        body = bytes(index % 256 for index in range(257))
+        event = _event(_typed_rpc("on_recv_client_data", body))
+        result = self.run_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const rows = pubgm17500RpcStructureRows(info.typedRpc);
+console.log(JSON.stringify({
+  count: rows.length,
+  maxWidth: Math.max(...rows.map(row => row.bytes.length)),
+  bodyRows: rows.filter(row => row.kind === 'body').map(row => ({key:row.key,offset:row.offset,label:row.label,width:row.bytes.length,description:row.description})),
+  names: rows.filter(row => row.kind === 'name').map(row => row.label),
+}));
+""")
+        self.assertEqual(result["count"], 21)
+        self.assertEqual(result["maxWidth"], 16)
+        self.assertEqual(len(result["bodyRows"]), 17)
+        self.assertEqual(result["bodyRows"][0]["label"], "业务正文 +0x0000")
+        self.assertEqual(result["bodyRows"][-1]["label"], "业务正文 +0x0100")
+        self.assertEqual(result["bodyRows"][-1]["width"], 1)
+        self.assertTrue(all("字段含义待确认" in row["description"] for row in result["bodyRows"]))
+        self.assertEqual(result["names"], ["命令名称", "命令名称（续 +0x10）"])
+
+    def test_structure_compare_aligns_before_after_by_body_offset(self) -> None:
+        before_body = bytes(index % 256 for index in range(255))
+        after_body = before_body + b"\xaa\xbb"
+        event = _event(_typed_rpc("on_recv_client_data", after_body), before=_typed_rpc("on_recv_client_data", before_body))
+        result = self.run_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const before = parsePubgm17500TypedRpc([...Buffer.from(events[0].before_pay, 'base64')], info.meta);
+const compare = pubgm17500RpcStructureCompare(before, info.typedRpc);
+console.log(JSON.stringify({
+  canCompare: compare.canCompare,
+  lengths: [compare.beforeBodyLength, compare.afterBodyLength],
+  rows: compare.rows.map(row => ({key:row.key,status:row.status,before:row.before && row.before.bytes.length,after:row.after && row.after.bytes.length})),
+}));
+""")
+        self.assertTrue(result["canCompare"])
+        self.assertEqual(result["lengths"], [255, 257])
+        rows = {row["key"]: row for row in result["rows"]}
+        self.assertEqual(rows["body:224"]["status"], "same")
+        self.assertEqual(rows["body:240"]["status"], "changed")
+        self.assertEqual(rows["body:256"]["status"], "added")
+
+    def test_expanded_view_is_multiline_three_column_structure_not_one_long_field(self) -> None:
+        before_body = bytes(index % 256 for index in range(255))
+        after_body = before_body + b"\xaa\xbb"
+        event = _event(_typed_rpc("on_recv_client_data", after_body), before=_typed_rpc("on_recv_client_data", before_body))
+        result = self.run_dom_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const panel = pubgm17500RpcStructurePanel(events[0], info);
+const rows = nodes(panel, 'pubgm-rpc-row');
+const bodyRows = nodes(panel, 'pubgm-rpc-row-body');
+const hexLines = nodes(panel, 'pubgm-rpc-hex-line');
+const annotations = nodes(panel, 'pubgm-rpc-annotation');
+const controls = panel.querySelectorAll('button');
+console.log(JSON.stringify({
+  mode: panel.dataset.mode,
+  rows: rows.length,
+  bodyRows: bodyRows.length,
+  hexLines: hexLines.length,
+  annotations: annotations.length,
+  longFields: nodes(panel, 'gcloud-long-value').length,
+  oldTable: nodes(panel, 'gcloud-compare-table').length,
+  headings: nodes(panel, 'pubgm-rpc-head').map(text),
+  allPressed: controls.find(button => button.textContent === '全部行').attributes['aria-pressed'],
+  bodyLabels: annotations.map(text).filter(value => value.includes('业务正文')).slice(0, 3),
+}));
+""")
+        self.assertEqual(result["mode"], "all")
+        self.assertEqual(result["rows"], 21)
+        self.assertEqual(result["bodyRows"], 17)
+        self.assertEqual(result["hexLines"], 41)  # one added row has no before-side line
+        self.assertEqual(result["annotations"], 21)
+        self.assertEqual(result["longFields"], 0)
+        self.assertEqual(result["oldTable"], 0)
+        self.assertEqual(result["allPressed"], "true")
+        self.assertIn("修改前明文", result["headings"][0])
+        self.assertIn("结构 / 注释", result["headings"][0])
+        self.assertIn("修改后明文", result["headings"][0])
+        self.assertTrue(all("业务正文 +0x" in label for label in result["bodyLabels"]))
 
 
 if __name__ == "__main__":
