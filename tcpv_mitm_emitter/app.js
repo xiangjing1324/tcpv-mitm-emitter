@@ -8674,14 +8674,21 @@ function pubgm17500AceLayout(rpc) {
 function pubgmRpcReadVarint(byteValues, offset) {
   const bytes = Array.isArray(byteValues) ? byteValues : [];
   let cursor = Number(offset || 0);
-  let value = 0;
+  let value = 0n;
   for (let index = 0; index < 10 && cursor < bytes.length; index += 1) {
     const byte = Number(bytes[cursor]) & 0xff;
     cursor += 1;
     if (index === 9 && byte > 1) return null;
-    value += (byte & 0x7f) * (2 ** (7 * index));
-    if (!Number.isSafeInteger(value)) return null;
-    if (!(byte & 0x80)) return { value, nextOffset: cursor, length: cursor - Number(offset || 0) };
+    value |= BigInt(byte & 0x7f) << BigInt(7 * index);
+    if (!(byte & 0x80)) {
+      const safe = value <= BigInt(Number.MAX_SAFE_INTEGER);
+      return {
+        value: safe ? Number(value) : value.toString(),
+        safe,
+        nextOffset: cursor,
+        length: cursor - Number(offset || 0),
+      };
+    }
   }
   return null;
 }
@@ -8745,11 +8752,17 @@ function pubgm17500RpcTypedNodes(rpc) {
     } else if (tag === 2) {
       const info = pubgmRpcReadVarint(bytes, cursor);
       if (!info) throw new Error("RPC integer boundary");
-      node.integer = info.value % 2 ? -((info.value + 1) / 2) : info.value / 2;
+      if (info.safe) {
+        node.integer = info.value % 2 ? -((info.value + 1) / 2) : info.value / 2;
+      } else {
+        const encoded = BigInt(info.value);
+        node.integer = (encoded & 1n ? -((encoded + 1n) / 2n) : encoded / 2n).toString();
+        node.integerExact = true;
+      }
       cursor = info.nextOffset;
     } else if (tag === 3) {
       const info = pubgmRpcReadVarint(bytes, cursor);
-      if (!info || info.value > bytes.length - info.nextOffset) throw new Error("RPC string boundary");
+      if (!info || !info.safe || info.value > bytes.length - info.nextOffset) throw new Error("RPC string boundary");
       cursor = info.nextOffset;
       node.valueBytes = bytes.slice(cursor, cursor + info.value);
       cursor += info.value;
@@ -8757,7 +8770,7 @@ function pubgm17500RpcTypedNodes(rpc) {
       stringPool.push(node.valueBytes);
     } else if (tag === 4) {
       const info = pubgmRpcReadVarint(bytes, cursor);
-      if (!info || info.value >= stringPool.length) throw new Error("RPC string reference boundary");
+      if (!info || !info.safe || info.value >= stringPool.length) throw new Error("RPC string reference boundary");
       cursor = info.nextOffset;
       node.referenceIndex = info.value;
       node.valueBytes = stringPool[info.value].slice();
@@ -8819,7 +8832,7 @@ function pubgm17500RpcTableSummary(node) {
   let nested = 0;
   for (const [keyNode, valueNode] of pairs) {
     const key = pubgm17500RpcNodeScalar(keyNode);
-    if (key && key.type === "整数" && Number.isFinite(Number(key.value))) numericKeys.push(Number(key.value));
+    if (key && key.type === "整数" && Number.isSafeInteger(Number(key.value))) numericKeys.push(Number(key.value));
     const value = pubgm17500RpcNodeScalar(valueNode);
     if (value) {
       const label = value.type === "布尔" ? value.value : value.type;
@@ -8905,7 +8918,7 @@ function pubgm17500TdreportLayer(rpc, summaryText = "") {
   const body = rpc.body;
   if (body.length < 4 || Number(body[0]) !== 0x03) return null;
   const lengthInfo = pubgmRpcReadVarint(body, 1);
-  if (!lengthInfo || lengthInfo.value <= 0) return null;
+  if (!lengthInfo || !lengthInfo.safe || lengthInfo.value <= 0) return null;
   const encodedStart = lengthInfo.nextOffset;
   const encodedEnd = encodedStart + lengthInfo.value;
   if (encodedEnd > body.length || lengthInfo.value % 2) return null;

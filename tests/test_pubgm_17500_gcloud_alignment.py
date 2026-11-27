@@ -256,6 +256,20 @@ console.log(JSON.stringify({
         self.assertEqual(result["rows"]["login.arg4"]["status"], "same")
         self.assertIn("2 项 · 数字键 1–2", result["rows"]["login.arg4"]["after"])
 
+    def test_login_keeps_unsafe_64_bit_integer_exact(self) -> None:
+        exact_value = 1_345_785_623_905_087_498
+        event = _event(_typed_rpc("login", _rpc_integer(exact_value)))
+        result = self.run_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const rows = pubgm17500LoginFieldRows(info.typedRpc);
+console.log(JSON.stringify({
+  value: rows && rows[0] && rows[0].value,
+  type: rows && rows[0] && rows[0].type,
+}));
+""")
+        self.assertEqual(result["value"], str(exact_value))
+        self.assertEqual(result["type"], "整数")
+
     def test_login_panel_uses_clear_field_table_instead_of_raw_byte_rows(self) -> None:
         before = _login_rpc("iPad14,3", 3, "Mozilla/5.0 (iPad)")
         after = _login_rpc("iPhone18,2", 4, "Mozilla/5.0 (iPhone)")
