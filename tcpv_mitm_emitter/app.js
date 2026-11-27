@@ -8671,6 +8671,130 @@ function pubgm17500AceLayout(rpc) {
   return null;
 }
 
+function pubgmRpcReadVarint(byteValues, offset) {
+  const bytes = Array.isArray(byteValues) ? byteValues : [];
+  let cursor = Number(offset || 0);
+  let value = 0;
+  for (let index = 0; index < 10 && cursor < bytes.length; index += 1) {
+    const byte = Number(bytes[cursor]) & 0xff;
+    cursor += 1;
+    if (index === 9 && byte > 1) return null;
+    value += (byte & 0x7f) * (2 ** (7 * index));
+    if (!Number.isSafeInteger(value)) return null;
+    if (!(byte & 0x80)) return { value, nextOffset: cursor, length: cursor - Number(offset || 0) };
+  }
+  return null;
+}
+
+function pubgmTdreportRotate32(value, amount) {
+  const shift = Number(amount) & 31;
+  const word = Number(value) >>> 0;
+  if (!shift) return word;
+  return ((word << shift) | (word >>> (32 - shift))) >>> 0;
+}
+
+function pubgmTdreportWordMask(byteValues) {
+  const out = Array.isArray(byteValues) ? byteValues.slice() : [];
+  if (out.length < 8) return null;
+  const token = readLe32(out, 0);
+  if (!Number.isFinite(token)) return null;
+  for (let index = 1; index < Math.floor(out.length / 4); index += 1) {
+    const offset = index * 4;
+    const value = readLe32(out, offset);
+    const masked = (Number(value) ^ pubgmTdreportRotate32(token, index)) >>> 0;
+    out[offset] = masked & 0xff;
+    out[offset + 1] = (masked >>> 8) & 0xff;
+    out[offset + 2] = (masked >>> 16) & 0xff;
+    out[offset + 3] = (masked >>> 24) & 0xff;
+  }
+  return out;
+}
+
+function pubgmByteArraysEqual(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if ((Number(a[index]) & 0xff) !== (Number(b[index]) & 0xff)) return false;
+  }
+  return true;
+}
+
+function pubgmAsciiText(byteValues) {
+  return (Array.isArray(byteValues) ? byteValues : [])
+    .map((value) => String.fromCharCode(Number(value) & 0xff))
+    .join("");
+}
+
+function pubgm17500TdreportLayer(rpc, summaryText = "") {
+  if (!rpc || rpc.ok !== true || rpc.name !== "report_sec_tdreport_req" || !Array.isArray(rpc.body)) return null;
+  const body = rpc.body;
+  if (body.length < 4 || Number(body[0]) !== 0x03) return null;
+  const lengthInfo = pubgmRpcReadVarint(body, 1);
+  if (!lengthInfo || lengthInfo.value <= 0) return null;
+  const encodedStart = lengthInfo.nextOffset;
+  const encodedEnd = encodedStart + lengthInfo.value;
+  if (encodedEnd > body.length || lengthInfo.value % 2) return null;
+  const encodedBytes = body.slice(encodedStart, encodedEnd);
+  const encodedText = pubgmAsciiText(encodedBytes);
+  if (!/^[0-9a-fA-F]+$/.test(encodedText)) return null;
+  const report = [];
+  for (let index = 0; index < encodedText.length; index += 2) {
+    report.push(Number.parseInt(encodedText.slice(index, index + 2), 16));
+  }
+  const signatureLength = 256;
+  const crcTrailerLength = 64;
+  if (report.length <= signatureLength + crcTrailerLength + 4) return null;
+  const masked = report.slice(0, report.length - signatureLength);
+  const signature = report.slice(report.length - signatureLength);
+  const plain = pubgmTdreportWordMask(masked);
+  if (!plain) return null;
+  const remasked = pubgmTdreportWordMask(plain);
+  const maskRoundtrip = Boolean(remasked && pubgmByteArraysEqual(remasked, masked));
+  const content = plain.slice(0, plain.length - crcTrailerLength);
+  const trailer = plain.slice(plain.length - crcTrailerLength);
+  const zeroIndex = trailer.indexOf(0);
+  const crcBytes = zeroIndex >= 0 ? trailer.slice(0, zeroIndex) : trailer.slice();
+  const crcText = pubgmAsciiText(crcBytes);
+  const crcMatchShape = /^RFC=[0-9a-fA-F]{8}\|$/.test(crcText);
+  const trailerPaddingZero = zeroIndex >= 0
+    && trailer.slice(zeroIndex).every((value) => Number(value) === 0);
+  const expectedCrc = crcMatchShape ? Number.parseInt(crcText.slice(4, 12), 16) >>> 0 : null;
+  const actualCrc = tssCrc32(content);
+  const crcMatch = Number.isFinite(expectedCrc) && expectedCrc === actualCrc && trailerPaddingZero;
+  const token = content.slice(0, 4);
+  const fieldText = pubgmAsciiText(content.slice(4));
+  if (!fieldText.startsWith("Version=1|") || !fieldText.endsWith("|")) return null;
+  const fields = [];
+  for (const item of fieldText.slice(0, -1).split("|")) {
+    const separator = item.indexOf("=");
+    if (separator <= 0) return null;
+    const key = item.slice(0, separator);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return null;
+    fields.push({ index: fields.length, key, value: item.slice(separator + 1) });
+  }
+  return {
+    schema: "pubgm_tdreport_second_layer_v1",
+    encodedLength: encodedBytes.length,
+    reportLength: report.length,
+    maskedLength: masked.length,
+    signatureLength: signature.length,
+    signature,
+    plainLength: plain.length,
+    token,
+    tokenHex: token.map((value) => Number(value).toString(16).padStart(2, "0")).join(""),
+    crcText,
+    expectedCrc,
+    actualCrc,
+    crcMatch,
+    maskRoundtrip,
+    fields,
+    trailingArgs: body.slice(encodedEnd),
+    rsaMd5Verified: /(?:^|,)iphone17_17500_tdreport_rsa_md5_verified=1(?:,|\s|$)/i.test(String(summaryText || "")),
+    valid: crcMatch && maskRoundtrip,
+  };
+}
+
 function pubgm17500RpcStructureRows(rpc) {
   if (!rpc || rpc.ok !== true || !Array.isArray(rpc.decoded)) return [];
   const rows = [];
@@ -8828,6 +8952,35 @@ function installPubgm17500RpcStructureStyles() {
     .pubgm-ace-outer-bytes{color:color-mix(in srgb,#38bdf8 72%,var(--text))}
     .pubgm-ace-outer-ascii{color:var(--muted)}
     .pubgm-ace-node-panel .child-pair-card{margin:0}
+    .pubgm-ace-nested{margin:0 0 2px 18px;padding-left:8px;border-left:2px solid color-mix(in srgb,#a78bfa 46%,var(--line));display:grid;gap:5px}
+    .pubgm-ace-nested-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:5px 10px;color:var(--muted);font-size:11px}
+    .pubgm-ace-nested-head strong{color:#c4b5fd}
+    .pubgm-ace-nested-status-ok{color:#4ade80}
+    .pubgm-ace-nested-status-error{color:#f87171}
+    .pubgm-ace-nested .child-compare{margin:0}
+    .pubgm-tdreport-panel{display:grid;gap:7px;min-width:0}
+    .pubgm-tdreport-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:7px 12px;padding:1px 2px}
+    .pubgm-tdreport-head strong{color:color-mix(in srgb,#a78bfa 78%,var(--text))}
+    .pubgm-tdreport-head span{color:var(--muted);font-size:11px}
+    .pubgm-tdreport-layers{display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:6px 8px;border:1px solid color-mix(in srgb,#a78bfa 38%,var(--line));border-radius:6px;background:color-mix(in srgb,#a78bfa 5%,var(--panel));font-size:11px}
+    .pubgm-tdreport-layer{padding:2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--dump-bg);color:var(--text)}
+    .pubgm-tdreport-arrow{color:var(--muted)}
+    .pubgm-tdreport-verification{display:flex;flex-wrap:wrap;gap:5px}
+    .pubgm-tdreport-proof{padding:3px 7px;border:1px solid color-mix(in srgb,#22c55e 42%,var(--line));border-radius:5px;background:color-mix(in srgb,#22c55e 8%,var(--panel));color:#4ade80;font-size:11px}
+    .pubgm-tdreport-proof-muted{border-color:var(--line);background:var(--panel);color:var(--muted)}
+    .pubgm-tdreport-table{overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--dump-bg)}
+    .pubgm-tdreport-row{display:grid;grid-template-columns:minmax(150px,220px) minmax(220px,1fr) minmax(220px,1fr) 70px;min-width:860px;border-bottom:1px solid color-mix(in srgb,var(--line) 58%,transparent)}
+    .pubgm-tdreport-row:last-child{border-bottom:0}
+    .pubgm-tdreport-row>span,.pubgm-tdreport-row>code{min-width:0;padding:4px 7px;border-right:1px solid color-mix(in srgb,var(--line) 58%,transparent);font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;overflow-wrap:anywhere}
+    .pubgm-tdreport-row>*:last-child{border-right:0}
+    .pubgm-tdreport-table-head{background:var(--panel);color:var(--muted);font-weight:700}
+    .pubgm-tdreport-field{color:#67e8f9}
+    .pubgm-tdreport-row-changed{background:color-mix(in srgb,var(--modified-bg) 58%,transparent)}
+    .pubgm-tdreport-row-changed .pubgm-tdreport-status{color:var(--modified-text);font-weight:700}
+    .pubgm-tdreport-raw{border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+    .pubgm-tdreport-raw>summary{padding:6px 8px;color:var(--muted);cursor:pointer;font-size:11px}
+    .pubgm-tdreport-raw-body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;padding:0 8px 7px;font-size:11px;color:var(--muted)}
+    .pubgm-tdreport-raw-body code{color:var(--text);overflow-wrap:anywhere}
     @media (max-width:900px){.pubgm-ace-outer-grid{grid-template-columns:minmax(0,1fr)}.pubgm-ace-outer-side:first-child:not(:last-child){border-right:0;border-bottom:1px solid var(--line)}}
   `;
   document.head.appendChild(style);
@@ -8944,6 +9097,167 @@ function pubgm17500AceOuterSide(rpc, layout, label) {
   return side;
 }
 
+function pubgm17500AceNestedPanel(beforeRecord, afterRecord, nodeLabel) {
+  const beforeEncrypted = decryptDisplayableTssEnvelope(beforeRecord);
+  const afterEncrypted = decryptDisplayableTssEnvelope(afterRecord);
+  if (!beforeEncrypted && !afterEncrypted) return null;
+  const wrap = document.createElement("section");
+  wrap.className = "pubgm-ace-nested";
+  const head = document.createElement("div");
+  head.className = "pubgm-ace-nested-head";
+  const title = document.createElement("strong");
+  title.textContent = `${nodeLabel} 二次解密`;
+  head.appendChild(title);
+  const active = afterEncrypted || beforeEncrypted;
+  const meta = document.createElement("span");
+  meta.textContent = `${active.familyName} · slot[${active.slot}]${active.keyLabel ? `=${active.keyLabel}` : ""} · cipher ${active.cipherLength}B`;
+  head.appendChild(meta);
+  const status = document.createElement("span");
+  const afterOk = afterEncrypted && afterEncrypted.supported && afterEncrypted.crcMatch;
+  const beforeOk = beforeEncrypted && beforeEncrypted.supported && beforeEncrypted.crcMatch;
+  status.className = afterOk || (!afterEncrypted && beforeOk)
+    ? "pubgm-ace-nested-status-ok" : "pubgm-ace-nested-status-error";
+  status.textContent = afterOk || (!afterEncrypted && beforeOk)
+    ? "CRC32 通过" : `未提升为明文：${active.reason || "CRC32 未通过"}`;
+  head.appendChild(status);
+  wrap.appendChild(head);
+  const beforePlain = beforeOk ? beforeEncrypted.plain : [];
+  const afterPlain = afterOk ? afterEncrypted.plain : [];
+  if (beforePlain.length > 0 || afterPlain.length > 0) {
+    const innerPanel = buildChildComparePanel("", "", "", {
+      beforeBytes: beforePlain,
+      afterBytes: afterPlain,
+      forceCurrentOnly: beforePlain.length === 0,
+      forceSideBySideSame: beforePlain.length > 0 && afterPlain.length > 0,
+      title: `${nodeLabel} 解密后节点`,
+      meta: beforePlain.length > 0 && afterPlain.length > 0
+        ? `修改前 ${beforePlain.length}B · 修改后 ${afterPlain.length}B · CRC32 均通过`
+        : `${afterPlain.length || beforePlain.length}B · CRC32 通过`,
+    });
+    if (innerPanel) wrap.appendChild(innerPanel);
+  }
+  return wrap;
+}
+
+function pubgm17500TdreportFieldMap(layer) {
+  const map = new Map();
+  for (const field of layer && Array.isArray(layer.fields) ? layer.fields : []) {
+    if (!map.has(field.key)) map.set(field.key, field.value);
+  }
+  return map;
+}
+
+function pubgm17500TdreportPanel(ev, beforeRpc, afterRpc, beforeLayer, afterLayer) {
+  const current = afterLayer || beforeLayer;
+  if (!current) return null;
+  installPubgm17500RpcStructureStyles();
+  const panel = document.createElement("section");
+  panel.className = "pubgm-tdreport-panel";
+  const head = document.createElement("div");
+  head.className = "pubgm-tdreport-head";
+  const title = document.createElement("strong");
+  title.textContent = "TDReport 二次解析";
+  const summary = document.createElement("span");
+  summary.textContent = `${current.fields.length} 个字段 · ACE 节点 0 · 此命令不是 child 容器`;
+  head.appendChild(title);
+  head.appendChild(summary);
+  panel.appendChild(head);
+
+  const layers = document.createElement("div");
+  layers.className = "pubgm-tdreport-layers";
+  const layerTexts = [
+    `RPC ${afterRpc && afterRpc.name || beforeRpc && beforeRpc.name || "-"}`,
+    `ASCII Hex ${current.encodedLength}B`,
+    `report4 ${current.reportLength}B`,
+    `word-mask ${current.maskedLength}B`,
+    `字段 ${current.fields.length}`,
+  ];
+  layerTexts.forEach((text, index) => {
+    if (index > 0) {
+      const arrow = document.createElement("span");
+      arrow.className = "pubgm-tdreport-arrow";
+      arrow.textContent = ">";
+      layers.appendChild(arrow);
+    }
+    const chip = document.createElement("span");
+    chip.className = "pubgm-tdreport-layer";
+    chip.textContent = text;
+    layers.appendChild(chip);
+  });
+  panel.appendChild(layers);
+
+  const verification = document.createElement("div");
+  verification.className = "pubgm-tdreport-verification";
+  const proofItems = [
+    [current.maskRoundtrip, "word-mask 往返通过"],
+    [current.crcMatch, `CRC32 通过 ${formatHexValue(current.actualCrc, 8)}`],
+    [current.rsaMd5Verified, current.rsaMd5Verified ? "RSA/MD5 后端验证通过" : "RSA/MD5 当前事件无验证标签"],
+  ];
+  for (const [ok, text] of proofItems) {
+    const proof = document.createElement("span");
+    proof.className = `pubgm-tdreport-proof${ok ? "" : " pubgm-tdreport-proof-muted"}`;
+    proof.textContent = text;
+    verification.appendChild(proof);
+  }
+  panel.appendChild(verification);
+
+  const beforeMap = pubgm17500TdreportFieldMap(beforeLayer);
+  const afterMap = pubgm17500TdreportFieldMap(afterLayer);
+  const keys = [];
+  for (const field of [...(beforeLayer && beforeLayer.fields || []), ...(afterLayer && afterLayer.fields || [])]) {
+    if (!keys.includes(field.key)) keys.push(field.key);
+  }
+  const table = document.createElement("div");
+  table.className = "pubgm-tdreport-table";
+  const appendRow = (values, className = "") => {
+    const row = document.createElement("div");
+    row.className = `pubgm-tdreport-row${className ? ` ${className}` : ""}`;
+    values.forEach((value, index) => {
+      const cell = document.createElement(index === 0 ? "span" : "code");
+      if (index === 0) cell.className = "pubgm-tdreport-field";
+      if (index === 3) cell.className = "pubgm-tdreport-status";
+      cell.textContent = value;
+      row.appendChild(cell);
+    });
+    table.appendChild(row);
+  };
+  appendRow(["字段", beforeLayer ? "修改前" : "—", afterLayer ? "修改后" : "当前", "状态"], "pubgm-tdreport-table-head");
+  for (const key of keys) {
+    const beforeValue = beforeMap.has(key) ? beforeMap.get(key) : "—";
+    const afterValue = afterMap.has(key) ? afterMap.get(key) : "—";
+    const changed = beforeLayer && afterLayer && beforeValue !== afterValue;
+    appendRow([key, beforeValue, afterValue, changed ? "已修改" : "相同"], changed ? "pubgm-tdreport-row-changed" : "");
+  }
+  panel.appendChild(table);
+
+  const raw = document.createElement("details");
+  raw.className = "pubgm-tdreport-raw";
+  const rawSummary = document.createElement("summary");
+  rawSummary.textContent = "封套 / 校验证据";
+  raw.appendChild(rawSummary);
+  const rawBody = document.createElement("div");
+  rawBody.className = "pubgm-tdreport-raw-body";
+  const evidence = [
+    ["token", `0x${current.tokenHex}`],
+    ["report4", `${current.reportLength}B`],
+    ["masked/plain", `${current.maskedLength}B / ${current.plainLength}B`],
+    ["signature", `${current.signatureLength}B`],
+    ["CRC trailer", current.crcText || "invalid"],
+    ["RPC 后续参数", current.trailingArgs.map((value) => Number(value).toString(16).padStart(2, "0")).join(" ") || "无"],
+  ];
+  for (const [name, value] of evidence) {
+    const item = document.createElement("span");
+    item.textContent = `${name} `;
+    const code = document.createElement("code");
+    code.textContent = value;
+    item.appendChild(code);
+    rawBody.appendChild(item);
+  }
+  raw.appendChild(rawBody);
+  panel.appendChild(raw);
+  return panel;
+}
+
 function pubgm17500AceChildPanel(beforeRpc, afterRpc, beforeLayout, afterLayout) {
   ensureChildCommonStyles();
   installPubgm17500RpcStructureStyles();
@@ -8984,6 +9298,10 @@ function pubgm17500AceChildPanel(beforeRpc, afterRpc, beforeLayout, afterLayout)
 
   const actionMap = new Map();
   for (let index = 0; index < count; index += 1) {
+    const beforeRecord = beforeLayout && beforeRpc && beforeNodes[index]
+      ? childBytesFromParsed(beforeRpc.body, beforeNodes[index]) : [];
+    const afterRecord = afterLayout && afterRpc && afterNodes[index]
+      ? childBytesFromParsed(afterRpc.body, afterNodes[index]) : [];
     panel.appendChild(makeChildCard(
       beforeNodes,
       afterNodes,
@@ -8998,6 +9316,8 @@ function pubgm17500AceChildPanel(beforeRpc, afterRpc, beforeLayout, afterLayout)
         forceSideBySideSame: Boolean(beforeLayout),
       },
     ));
+    const nested = pubgm17500AceNestedPanel(beforeRecord, afterRecord, `child[${index}]`);
+    if (nested) panel.appendChild(nested);
   }
   return panel;
 }
@@ -9008,6 +9328,11 @@ function pubgm17500RpcStructurePanel(ev, info) {
   installPubgm17500RpcStructureStyles();
   const beforeBytes = b64ToBytes(String(ev && ev.before_pay || ""));
   const before = beforeBytes.length ? parsePubgm17500TypedRpc(beforeBytes, info.meta) : null;
+  const beforeTdreport = pubgm17500TdreportLayer(before, ev && ev.summary);
+  const afterTdreport = pubgm17500TdreportLayer(current, ev && ev.summary);
+  if (beforeTdreport || afterTdreport) {
+    return pubgm17500TdreportPanel(ev, before, current, beforeTdreport, afterTdreport);
+  }
   const beforeAce = pubgm17500AceLayout(before);
   const afterAce = pubgm17500AceLayout(current);
   if (beforeAce || afterAce) {

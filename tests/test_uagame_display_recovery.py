@@ -66,6 +66,14 @@ def js_runtime() -> str:
         maps.append(source[start:source.index("]);", start) + 3])
     start = source.index("const PRINTABLE_RUN_ANCHOR_PATTERNS = [")
     maps.append(source[start:source.index("];", start) + 2])
+    # The extracted PUBGM 17500 view functions now reuse the production TSS
+    # decryptor. Keep its immutable tables and per-process caches in the
+    # harness instead of replacing the real decrypt path with test stubs.
+    if any(name.startswith("tss") or name.startswith("decryptDisplayableTss")
+           for name in extracted):
+        crypto_start = source.index("const TSS_CRYPTO_KEY_LABELS")
+        crypto_end = source.index("function tssRol32(", crypto_start)
+        maps.append(source[crypto_start:crypto_end])
     return "\n".join([
         "const state = {events: [], flows: [], flowId: ''};",
         "const MRPCS_OBSERVATION_MAX_EVENT_BYTES = 128 * 1024;",

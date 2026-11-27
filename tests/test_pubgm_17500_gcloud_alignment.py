@@ -4,6 +4,7 @@ import base64
 import json
 import subprocess
 import unittest
+import zlib
 from urllib.parse import quote
 
 from test_uagame_display_recovery import js_runtime
@@ -32,6 +33,43 @@ def _ace_record(report_code: int, payload: bytes = b"") -> bytes:
 
 def _ace_body(*records: bytes, prefix: bytes = b"\x02\xaa\x01\x03\xcd\x02") -> bytes:
     return prefix + b"".join(records)
+
+
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _rotate32(value: int, amount: int) -> int:
+    amount &= 31
+    return ((value << amount) | (value >> (32 - amount if amount else 32))) & 0xFFFFFFFF
+
+
+def _tdreport_word_mask(data: bytes) -> bytes:
+    out = bytearray(data)
+    token = int.from_bytes(out[:4], "little")
+    for index in range(1, len(out) // 4):
+        offset = index * 4
+        value = int.from_bytes(out[offset : offset + 4], "little")
+        out[offset : offset + 4] = (value ^ _rotate32(token, index)).to_bytes(4, "little")
+    return bytes(out)
+
+
+def _tdreport_rpc(fields: list[tuple[str, str]], token: bytes = b"\x94\x74\x89\x9e") -> bytes:
+    text = b"|".join(key.encode() + b"=" + value.encode() for key, value in fields) + b"|"
+    content = token + text
+    crc = b"RFC=%08x|" % (zlib.crc32(content) & 0xFFFFFFFF)
+    trailer = crc + bytes(64 - len(crc))
+    masked = _tdreport_word_mask(content + trailer)
+    report = masked + bytes([0x5A]) * 256
+    encoded = report.hex().upper().encode()
+    body = b"\x03" + _varint(len(encoded)) + encoded + b"\x09\x0d"
+    return _typed_rpc("report_sec_tdreport_req", body)
 
 
 def _event(payload: bytes, *, before: bytes = b"", port: int = 17500) -> dict:
@@ -263,6 +301,81 @@ console.log(JSON.stringify({
         self.assertIn("child[1]", result["text"])
         self.assertIn("0x0112232e", result["text"])
         self.assertIn("0x010a0009", result["text"])
+
+    def test_tdreport_second_layer_decodes_word_mask_crc_and_fields(self) -> None:
+        before = _tdreport_rpc([("Version", "1"), ("IsRoot", "0"), ("SysVer", "16.3.1")])
+        after = _tdreport_rpc([("Version", "1"), ("IsRoot", "0"), ("SysVer", "27.0.1")])
+        event = _event(after, before=before)
+        event["summary"] += ",iphone17_17500_tdreport_rsa_md5_verified=1"
+        result = self.run_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const before = parsePubgm17500TypedRpc(b64ToBytes(events[0].before_pay), info.meta);
+const beforeLayer = pubgm17500TdreportLayer(before, events[0].summary);
+const afterLayer = pubgm17500TdreportLayer(info.typedRpc, events[0].summary);
+console.log(JSON.stringify({
+  before: beforeLayer,
+  after: afterLayer,
+}));
+""")
+        self.assertTrue(result["before"]["valid"])
+        self.assertTrue(result["after"]["valid"])
+        self.assertTrue(result["after"]["maskRoundtrip"])
+        self.assertTrue(result["after"]["crcMatch"])
+        self.assertTrue(result["after"]["rsaMd5Verified"])
+        self.assertEqual(result["after"]["signatureLength"], 256)
+        self.assertEqual(
+            {field["key"]: field["value"] for field in result["before"]["fields"]}["SysVer"],
+            "16.3.1",
+        )
+        self.assertEqual(
+            {field["key"]: field["value"] for field in result["after"]["fields"]}["SysVer"],
+            "27.0.1",
+        )
+
+    def test_tdreport_panel_states_that_fields_are_not_ace_child_nodes(self) -> None:
+        before = _tdreport_rpc([("Version", "1"), ("IsRoot", "0"), ("SysVer", "16.3.1")])
+        after = _tdreport_rpc([("Version", "1"), ("IsRoot", "0"), ("SysVer", "27.0.1")])
+        event = _event(after, before=before)
+        result = self.run_dom_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const panel = pubgm17500RpcStructurePanel(events[0], info);
+console.log(JSON.stringify({
+  changed: nodes(panel, 'pubgm-tdreport-row-changed').length,
+  text: text(panel),
+}));
+""")
+        self.assertEqual(result["changed"], 1)
+        self.assertIn("TDReport 二次解析", result["text"])
+        self.assertIn("ACE 节点 0", result["text"])
+        self.assertIn("SysVer", result["text"])
+        self.assertIn("16.3.1", result["text"])
+        self.assertIn("27.0.1", result["text"])
+
+    def test_ace_encrypted_node_renders_verified_second_layer_panel(self) -> None:
+        envelope = bytearray.fromhex(
+            "000000010055010a0037000000000000000000000108196d32fd0039"
+            "f16c4aff1395d71ca64685e9c13a7a5d57b00452007523b70bc3e703"
+            "55668025e56f3997e8f7742eb6177251c8d8c870dfb667c26fc75ac64c"
+        )
+        envelope[6:10] = bytes.fromhex("010a0009")
+        event = _event(_typed_rpc("on_recv_client_data", _ace_body(bytes(envelope))))
+        result = self.run_dom_js([event], r"""
+const record = Array.from(new Uint8Array(Buffer.from(events[0].pay, 'base64')));
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const layout = pubgm17500AceLayout(info.typedRpc);
+const child = childBytesFromParsed(info.typedRpc.body, layout.nodes[0]);
+const nested = pubgm17500AceNestedPanel([], child, 'child[0]');
+console.log(JSON.stringify({
+  nested: nodes(nested, 'pubgm-ace-nested').length,
+  cards: nodes(nested, 'child-pair-card').length,
+  text: text(nested),
+}));
+""")
+        self.assertEqual(result["nested"], 1)
+        self.assertGreaterEqual(result["cards"], 1)
+        self.assertIn("二次解密", result["text"])
+        self.assertIn("CRC32 通过", result["text"])
+        self.assertIn("0x010a005b", result["text"])
 
     def test_structure_compare_aligns_before_after_by_body_offset(self) -> None:
         before_body = bytes(index % 256 for index in range(255))
