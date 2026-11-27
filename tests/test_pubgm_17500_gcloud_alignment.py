@@ -15,6 +15,41 @@ def _typed_rpc(name: str, body: bytes = b"", *, marker: bytes = b"") -> bytes:
     return marker + b"\x03" + bytes([len(command)]) + command + body
 
 
+def _rpc_string(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    return b"\x03" + _varint(len(encoded)) + encoded
+
+
+def _rpc_integer(value: int) -> bytes:
+    if 0 <= value <= 246:
+        return bytes([value + 9])
+    zigzag = value * 2 if value >= 0 else (-value * 2) - 1
+    return b"\x02" + _varint(zigzag)
+
+
+def _rpc_table(pairs: list[tuple[str, bytes]]) -> bytes:
+    return b"\x07" + b"".join(_rpc_string(key) + value for key, value in pairs) + b"\x08"
+
+
+def _login_rpc(model: str, render_quality: int, user_agent: str, stable: str = "keep") -> bytes:
+    numeric_flags = b"\x07" + _rpc_integer(1) + b"\x05" + _rpc_integer(2) + b"\x06\x08"
+    body = (
+        _rpc_string("1.39.13.16319")
+        + _rpc_table(
+            [
+                ("CpuHardware", _rpc_string(model)),
+                ("RenderQualityApply", _rpc_integer(render_quality)),
+                ("UserAgent", _rpc_string(user_agent)),
+                ("StableField", _rpc_string(stable)),
+            ]
+        )
+        + _rpc_string("arg2")
+        + _rpc_table([("app_version", _rpc_string("1.39.13.16319"))])
+        + numeric_flags
+    )
+    return _typed_rpc("login", body)
+
+
 def _literal_lz4(data: bytes) -> bytes:
     out = bytearray([min(len(data), 15) << 4])
     extra = len(data) - 15
@@ -113,7 +148,7 @@ class Pubgm17500GcloudAlignmentTests(unittest.TestCase):
 class Element {
   constructor(tag) {
     this.tag = tag; this.children = []; this.className = ''; this.textContent = '';
-    this.dataset = {}; this.attributes = {}; this.listeners = {}; this.open = false;
+    this.dataset = {}; this.attributes = {}; this.listeners = {}; this.open = false; this.style = {};
     this.classList = {
       add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(' '); },
       contains: name => this.className.split(/\s+/).includes(name),
@@ -189,6 +224,61 @@ console.log(JSON.stringify({
         self.assertEqual(result["states"]["rpc.name"], "same")
         self.assertEqual(result["states"]["rpc.body"], "changed")
         self.assertIn("17500 RPC", result["reason"])
+
+    def test_login_typed_rpc_is_aligned_by_semantic_table_key(self) -> None:
+        before = _login_rpc("iPad14,3", 3, "Mozilla/5.0 (iPad)")
+        after = _login_rpc("iPhone18,2", 4, "Mozilla/5.0 (iPhone)")
+        event = _event(after, before=before)
+        result = self.run_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const previous = parsePubgm17500TypedRpc(b64ToBytes(events[0].before_pay), info.meta);
+const compare = pubgm17500LoginCompare(previous, info.typedRpc);
+console.log(JSON.stringify({
+  title: compare.title,
+  defaultMode: compare.defaultMode,
+  rows: Object.fromEntries(compare.rows.map(row => [row.key, {
+    label: row.label,
+    status: row.status,
+    before: row.before && row.before.value,
+    after: row.after && row.after.value,
+  }])),
+}));
+""")
+        self.assertEqual(result["title"], "登录字段对照")
+        self.assertEqual(result["defaultMode"], "all")
+        self.assertEqual(result["rows"]["login.arg0"]["status"], "same")
+        self.assertEqual(result["rows"]["login.arg1.CpuHardware"]["before"], "iPad14,3")
+        self.assertEqual(result["rows"]["login.arg1.CpuHardware"]["after"], "iPhone18,2")
+        self.assertEqual(result["rows"]["login.arg1.RenderQualityApply"]["status"], "changed")
+        self.assertEqual(result["rows"]["login.arg1.UserAgent"]["status"], "changed")
+        self.assertEqual(result["rows"]["login.arg1.StableField"]["status"], "same")
+        self.assertEqual(result["rows"]["login.arg3.app_version"]["status"], "same")
+        self.assertEqual(result["rows"]["login.arg4"]["status"], "same")
+        self.assertIn("2 项 · 数字键 1–2", result["rows"]["login.arg4"]["after"])
+
+    def test_login_panel_uses_clear_field_table_instead_of_raw_byte_rows(self) -> None:
+        before = _login_rpc("iPad14,3", 3, "Mozilla/5.0 (iPad)")
+        after = _login_rpc("iPhone18,2", 4, "Mozilla/5.0 (iPhone)")
+        event = _event(after, before=before)
+        result = self.run_dom_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const panel = pubgm17500RpcStructurePanel(events[0], info);
+console.log(JSON.stringify({
+  mode: panel.dataset.mode,
+  fieldTables: nodes(panel, 'gcloud-compare-table').length,
+  rawTables: nodes(panel, 'pubgm-rpc-table').length,
+  rows: nodes(panel, 'gcloud-compare-row').length,
+  text: text(panel),
+}));
+""")
+        self.assertEqual(result["mode"], "all")
+        self.assertEqual(result["fieldTables"], 1)
+        self.assertEqual(result["rawTables"], 0)
+        self.assertGreaterEqual(result["rows"], 6)
+        self.assertIn("登录字段对照", result["text"])
+        self.assertIn("CpuHardware", result["text"])
+        self.assertIn("iPad14,3", result["text"])
+        self.assertIn("iPhone18,2", result["text"])
 
     def test_adapter_does_not_claim_65010_or_invalid_rpc_bytes(self) -> None:
         valid = _typed_rpc("heart_beat", b"\x01")
@@ -350,6 +440,30 @@ console.log(JSON.stringify({
         self.assertIn("SysVer", result["text"])
         self.assertIn("16.3.1", result["text"])
         self.assertIn("27.0.1", result["text"])
+
+    def test_tdreport_panel_shows_multiline_hex_and_precise_tss_structure_verdict(self) -> None:
+        report = _tdreport_rpc([("Version", "1"), ("IsRoot", "0"), ("SysVer", "27.0.1")])
+        event = _event(report)
+        result = self.run_dom_js([event], r"""
+const info = analyzeGcloudEvent(events[0], events[0].summary);
+const layer = pubgm17500TdreportLayer(info.typedRpc, events[0].summary);
+const panel = pubgm17500RpcStructurePanel(events[0], info);
+console.log(JSON.stringify({
+  inspection: nodes(panel, 'pubgm-tdreport-inspection').length,
+  lines: nodes(panel, 'pubgm-tdreport-hex-line').length,
+  maskedLength: layer.maskedLength,
+  signatureOffset: `+0x${layer.maskedLength.toString(16).padStart(4, '0')}`,
+  text: text(panel),
+}));
+""")
+        self.assertEqual(result["inspection"], 1)
+        self.assertGreater(result["lines"], 10)
+        self.assertIn("属于安全上报，但不是普通 TSS child 记录封装", result["text"])
+        self.assertIn("标准 TSS 记录头", result["text"])
+        self.assertIn("不匹配", result["text"])
+        self.assertIn("RSA/MD5 签名", result["text"])
+        self.assertIn("+0x0000", result["text"])
+        self.assertIn(result["signatureOffset"], result["text"])
 
     def test_ace_encrypted_node_renders_verified_second_layer_panel(self) -> None:
         envelope = bytearray.fromhex(

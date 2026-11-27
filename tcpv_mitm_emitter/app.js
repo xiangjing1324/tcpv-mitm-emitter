@@ -8726,6 +8726,180 @@ function pubgmAsciiText(byteValues) {
     .join("");
 }
 
+function pubgm17500RpcTypedNodes(rpc) {
+  if (!rpc || rpc.ok !== true || !Array.isArray(rpc.decoded)) return null;
+  const bytes = rpc.decoded;
+  const stringPool = [];
+  let cursor = 0;
+  let nodeCount = 0;
+  const readNode = (depth = 0) => {
+    if (depth > 64 || nodeCount >= 100000 || cursor >= bytes.length) throw new Error("RPC node boundary");
+    nodeCount += 1;
+    const start = cursor;
+    const tag = Number(bytes[cursor]) & 0xff;
+    cursor += 1;
+    const node = { tag, start, end: cursor, raw: [], valueBytes: null, pairs: [] };
+    if (tag === 1) {
+      if (cursor + 8 > bytes.length) throw new Error("RPC fixed64 boundary");
+      cursor += 8;
+    } else if (tag === 2) {
+      const info = pubgmRpcReadVarint(bytes, cursor);
+      if (!info) throw new Error("RPC integer boundary");
+      node.integer = info.value % 2 ? -((info.value + 1) / 2) : info.value / 2;
+      cursor = info.nextOffset;
+    } else if (tag === 3) {
+      const info = pubgmRpcReadVarint(bytes, cursor);
+      if (!info || info.value > bytes.length - info.nextOffset) throw new Error("RPC string boundary");
+      cursor = info.nextOffset;
+      node.valueBytes = bytes.slice(cursor, cursor + info.value);
+      cursor += info.value;
+      node.stringIndex = stringPool.length;
+      stringPool.push(node.valueBytes);
+    } else if (tag === 4) {
+      const info = pubgmRpcReadVarint(bytes, cursor);
+      if (!info || info.value >= stringPool.length) throw new Error("RPC string reference boundary");
+      cursor = info.nextOffset;
+      node.referenceIndex = info.value;
+      node.valueBytes = stringPool[info.value].slice();
+    } else if (tag === 7) {
+      while (true) {
+        if (cursor >= bytes.length) throw new Error("RPC table boundary");
+        if (Number(bytes[cursor]) === 8) {
+          cursor += 1;
+          break;
+        }
+        const key = readNode(depth + 1);
+        if (cursor >= bytes.length || Number(bytes[cursor]) === 8) throw new Error("RPC table value boundary");
+        node.pairs.push([key, readNode(depth + 1)]);
+      }
+    } else if (tag === 8) {
+      throw new Error("RPC table terminator outside table");
+    } else if (tag >= 9) {
+      node.integer = tag - 9;
+    } else if (![0, 5, 6].includes(tag)) {
+      throw new Error("RPC tag boundary");
+    }
+    node.end = cursor;
+    node.raw = bytes.slice(start, cursor);
+    return node;
+  };
+  try {
+    const nodes = [];
+    while (cursor < bytes.length) nodes.push(readNode());
+    if (!nodes.length || !Array.isArray(nodes[0].valueBytes)
+        || pubgmAsciiText(nodes[0].valueBytes) !== rpc.name) return null;
+    return nodes;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function pubgm17500RpcNodeScalar(node) {
+  if (!node || typeof node !== "object") return null;
+  if (node.tag === 0) return { value: "null", type: "空值", raw: node.raw };
+  if (node.tag === 1) return { value: gcloudHexBytes(node.raw.slice(1), 8), type: "固定 64 位", raw: node.raw };
+  if (node.tag === 2 || node.tag >= 9) return { value: String(node.integer), type: "整数", raw: node.raw };
+  if (node.tag === 5 || node.tag === 6) return { value: node.tag === 6 ? "true" : "false", type: "布尔", raw: node.raw };
+  if ([3, 4].includes(node.tag) && Array.isArray(node.valueBytes)) {
+    const text = gcloudBytesToUtf8(node.valueBytes);
+    const readable = !text.includes("\ufffd") && !/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text);
+    return {
+      value: readable ? (text || "（空字符串）") : gcloudHexBytes(node.valueBytes, node.valueBytes.length),
+      type: readable ? "文本" : "二进制文本",
+      raw: node.valueBytes,
+    };
+  }
+  return null;
+}
+
+function pubgm17500RpcTableSummary(node) {
+  const pairs = node && node.tag === 7 && Array.isArray(node.pairs) ? node.pairs : [];
+  const numericKeys = [];
+  const valueCounts = new Map();
+  let nested = 0;
+  for (const [keyNode, valueNode] of pairs) {
+    const key = pubgm17500RpcNodeScalar(keyNode);
+    if (key && key.type === "整数" && Number.isFinite(Number(key.value))) numericKeys.push(Number(key.value));
+    const value = pubgm17500RpcNodeScalar(valueNode);
+    if (value) {
+      const label = value.type === "布尔" ? value.value : value.type;
+      valueCounts.set(label, (valueCounts.get(label) || 0) + 1);
+    } else {
+      nested += 1;
+    }
+  }
+  const parts = [`${pairs.length} 项`];
+  if (numericKeys.length === pairs.length && numericKeys.length) {
+    const [minimum, maximum] = numericKeys.reduce(
+      ([low, high], value) => [Math.min(low, value), Math.max(high, value)],
+      [numericKeys[0], numericKeys[0]],
+    );
+    parts.push(`数字键 ${minimum}–${maximum}`);
+  } else {
+    parts.push("未命名键");
+  }
+  for (const [value, count] of valueCounts) parts.push(`${value} ×${count}`);
+  if (nested) parts.push(`嵌套值 ×${nested}`);
+  return parts.join(" · ");
+}
+
+function pubgm17500LoginFieldRows(rpc) {
+  if (!rpc || rpc.name !== "login") return null;
+  const nodes = pubgm17500RpcTypedNodes(rpc);
+  if (!nodes || nodes.length < 2) return null;
+  const rows = [];
+  const appendNode = (node, path, label) => {
+    if (node && node.tag === 7) {
+      const namedTable = node.pairs.every(([keyNode]) => {
+        const key = pubgm17500RpcNodeScalar(keyNode);
+        return key && key.type === "文本";
+      });
+      if (!namedTable) {
+        rows.push(packetFieldItem(
+          path,
+          label,
+          pubgm17500RpcTableSummary(node),
+          node.raw,
+          "数字键表（逐项字段名未知）",
+          path,
+        ));
+        return;
+      }
+      const occurrences = new Map();
+      node.pairs.forEach(([keyNode, valueNode], index) => {
+        const key = pubgm17500RpcNodeScalar(keyNode);
+        const base = key && key.type === "文本" ? key.value : `entry${index}`;
+        const occurrence = occurrences.get(base) || 0;
+        occurrences.set(base, occurrence + 1);
+        const suffix = occurrence ? `[${occurrence + 1}]` : "";
+        appendNode(valueNode, `${path}.${base}${suffix}`, `${base}${suffix}`);
+      });
+      return;
+    }
+    const scalar = pubgm17500RpcNodeScalar(node);
+    if (!scalar) return;
+    rows.push(packetFieldItem(path, label, scalar.value, scalar.raw, scalar.type, path));
+  };
+  nodes.slice(1).forEach((node, index) => appendNode(node, `login.arg${index}`, `arg${index}`));
+  return rows;
+}
+
+function pubgm17500LoginCompare(beforeRpc, afterRpc) {
+  if (!afterRpc || afterRpc.name !== "login") return null;
+  const afterRows = pubgm17500LoginFieldRows(afterRpc);
+  if (!afterRows || !afterRows.length) return null;
+  const beforeRows = beforeRpc && beforeRpc.name === "login" ? pubgm17500LoginFieldRows(beforeRpc) : null;
+  const canCompare = Boolean(beforeRows && beforeRows.length);
+  const compare = packetCompareFieldRows(beforeRows || [], afterRows, canCompare,
+    canCompare
+      ? "按 typed-RPC 表键逐项对应；字段顺序或字符串池索引变化不会造成错位。"
+      : "当前 login 已按 typed-RPC 表键展开；没有完整修改前内容。"
+  );
+  compare.title = canCompare ? "登录字段对照" : "当前登录字段";
+  compare.defaultMode = "all";
+  return compare;
+}
+
 function pubgm17500TdreportLayer(rpc, summaryText = "") {
   if (!rpc || rpc.ok !== true || rpc.name !== "report_sec_tdreport_req" || !Array.isArray(rpc.body)) return null;
   const body = rpc.body;
@@ -8777,6 +8951,7 @@ function pubgm17500TdreportLayer(rpc, summaryText = "") {
     schema: "pubgm_tdreport_second_layer_v1",
     encodedLength: encodedBytes.length,
     reportLength: report.length,
+    report,
     maskedLength: masked.length,
     signatureLength: signature.length,
     signature,
@@ -8968,6 +9143,24 @@ function installPubgm17500RpcStructureStyles() {
     .pubgm-tdreport-verification{display:flex;flex-wrap:wrap;gap:5px}
     .pubgm-tdreport-proof{padding:3px 7px;border:1px solid color-mix(in srgb,#22c55e 42%,var(--line));border-radius:5px;background:color-mix(in srgb,#22c55e 8%,var(--panel));color:#4ade80;font-size:11px}
     .pubgm-tdreport-proof-muted{border-color:var(--line);background:var(--panel);color:var(--muted)}
+    .pubgm-tdreport-inspection{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);border:1px solid color-mix(in srgb,#38bdf8 38%,var(--line));border-radius:6px;overflow:hidden;background:var(--dump-bg)}
+    .pubgm-tdreport-hex{min-width:0;border-right:1px solid var(--line)}
+    .pubgm-tdreport-box-title{padding:6px 9px;border-bottom:1px solid var(--line);background:var(--dump-head-bg);color:color-mix(in srgb,#38bdf8 78%,var(--text));font-size:11px;font-weight:750}
+    .pubgm-tdreport-hex-scroll{max-height:430px;overflow:auto;padding:3px 0}
+    .pubgm-tdreport-segment{padding:4px 8px;color:#c4b5fd;background:color-mix(in srgb,#a78bfa 7%,var(--panel));border-block:1px solid color-mix(in srgb,var(--line) 58%,transparent);font-size:10px;font-weight:700}
+    .pubgm-tdreport-segment:first-child{border-top:0}
+    .pubgm-tdreport-hex-line{display:grid;grid-template-columns:7ch 47ch 16ch;gap:5px;align-items:baseline;min-width:72ch;padding:1px 8px;font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}
+    .pubgm-tdreport-hex-offset{color:var(--muted)}
+    .pubgm-tdreport-hex-bytes{color:color-mix(in srgb,#38bdf8 78%,var(--text));white-space:pre}
+    .pubgm-tdreport-hex-ascii{color:var(--muted);white-space:pre}
+    .pubgm-tdreport-decision{min-width:0;background:color-mix(in srgb,var(--panel) 97%,transparent)}
+    .pubgm-tdreport-decision-body{display:grid;gap:7px;padding:8px 10px;font-size:11px;line-height:1.45}
+    .pubgm-tdreport-verdict{color:#fbbf24;font-weight:750}
+    .pubgm-tdreport-decision dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 9px;margin:0}
+    .pubgm-tdreport-decision dt{color:var(--muted)}
+    .pubgm-tdreport-decision dd{min-width:0;margin:0;color:var(--text);overflow-wrap:anywhere}
+    .pubgm-tdreport-decision code{color:#67e8f9}
+    .pubgm-tdreport-caveat{padding-top:6px;border-top:1px solid var(--line);color:var(--muted)}
     .pubgm-tdreport-table{overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--dump-bg)}
     .pubgm-tdreport-row{display:grid;grid-template-columns:minmax(150px,220px) minmax(220px,1fr) minmax(220px,1fr) 70px;min-width:860px;border-bottom:1px solid color-mix(in srgb,var(--line) 58%,transparent)}
     .pubgm-tdreport-row:last-child{border-bottom:0}
@@ -8981,7 +9174,7 @@ function installPubgm17500RpcStructureStyles() {
     .pubgm-tdreport-raw>summary{padding:6px 8px;color:var(--muted);cursor:pointer;font-size:11px}
     .pubgm-tdreport-raw-body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;padding:0 8px 7px;font-size:11px;color:var(--muted)}
     .pubgm-tdreport-raw-body code{color:var(--text);overflow-wrap:anywhere}
-    @media (max-width:900px){.pubgm-ace-outer-grid{grid-template-columns:minmax(0,1fr)}.pubgm-ace-outer-side:first-child:not(:last-child){border-right:0;border-bottom:1px solid var(--line)}}
+    @media (max-width:1000px){.pubgm-ace-outer-grid,.pubgm-tdreport-inspection{grid-template-columns:minmax(0,1fr)}.pubgm-ace-outer-side:first-child:not(:last-child),.pubgm-tdreport-hex{border-right:0;border-bottom:1px solid var(--line)}}
   `;
   document.head.appendChild(style);
 }
@@ -9147,6 +9340,106 @@ function pubgm17500TdreportFieldMap(layer) {
   return map;
 }
 
+function pubgm17500TdreportHexSegment(parent, bytes, start, end, title) {
+  const segment = document.createElement("div");
+  segment.className = "pubgm-tdreport-segment";
+  segment.textContent = title;
+  parent.appendChild(segment);
+  for (let offset = start; offset < end; offset += 16) {
+    const values = bytes.slice(offset, Math.min(offset + 16, end));
+    const line = document.createElement("div");
+    line.className = "pubgm-tdreport-hex-line";
+    const position = document.createElement("code");
+    position.className = "pubgm-tdreport-hex-offset";
+    position.textContent = `+0x${offset.toString(16).padStart(4, "0")}`;
+    const hex = document.createElement("code");
+    hex.className = "pubgm-tdreport-hex-bytes";
+    hex.textContent = values.map((value) => Number(value).toString(16).padStart(2, "0")).join(" ").padEnd(47, " ");
+    const ascii = document.createElement("code");
+    ascii.className = "pubgm-tdreport-hex-ascii";
+    ascii.textContent = values.map((value) => Number(value) >= 32 && Number(value) < 127
+      ? String.fromCharCode(Number(value)) : ".").join("").padEnd(16, " ");
+    line.appendChild(position);
+    line.appendChild(hex);
+    line.appendChild(ascii);
+    parent.appendChild(line);
+  }
+}
+
+function pubgm17500TdreportInspection(layer) {
+  if (!layer || !Array.isArray(layer.report)) return null;
+  const inspection = document.createElement("section");
+  inspection.className = "pubgm-tdreport-inspection";
+
+  const hexBox = document.createElement("div");
+  hexBox.className = "pubgm-tdreport-hex";
+  const hexTitle = document.createElement("div");
+  hexTitle.className = "pubgm-tdreport-box-title";
+  hexTitle.textContent = `report4 原始字节 · ${layer.reportLength} B · 16 字节/行`;
+  hexBox.appendChild(hexTitle);
+  const scroll = document.createElement("div");
+  scroll.className = "pubgm-tdreport-hex-scroll";
+  const maskedEnd = Math.min(layer.report.length, Number(layer.maskedLength) || 0);
+  pubgm17500TdreportHexSegment(
+    scroll,
+    layer.report,
+    0,
+    maskedEnd,
+    `word-mask 区 +0x0000–+0x${Math.max(0, maskedEnd - 1).toString(16).padStart(4, "0")} · ${maskedEnd} B`,
+  );
+  pubgm17500TdreportHexSegment(
+    scroll,
+    layer.report,
+    maskedEnd,
+    layer.report.length,
+    `RSA/MD5 签名 +0x${maskedEnd.toString(16).padStart(4, "0")}–+0x${Math.max(maskedEnd, layer.report.length - 1).toString(16).padStart(4, "0")} · ${layer.report.length - maskedEnd} B`,
+  );
+  hexBox.appendChild(scroll);
+  inspection.appendChild(hexBox);
+
+  const decision = document.createElement("div");
+  decision.className = "pubgm-tdreport-decision";
+  const decisionTitle = document.createElement("div");
+  decisionTitle.className = "pubgm-tdreport-box-title";
+  decisionTitle.textContent = "结构判定";
+  decision.appendChild(decisionTitle);
+  const body = document.createElement("div");
+  body.className = "pubgm-tdreport-decision-body";
+  const verdict = document.createElement("div");
+  verdict.className = "pubgm-tdreport-verdict";
+  verdict.textContent = "属于安全上报，但不是普通 TSS child 记录封装";
+  body.appendChild(verdict);
+  const facts = document.createElement("dl");
+  const firstBytes = layer.report.slice(0, 10)
+    .map((value) => Number(value).toString(16).padStart(2, "0")).join(" ");
+  const rows = [
+    ["当前起始", firstBytes || "—"],
+    ["标准 TSS 记录头", "00 00 00 01 + BE16 长度 + report@+0x06"],
+    ["记录头匹配", "不匹配"],
+    ["严格长度闭合", "不适用"],
+    ["报告体", `${layer.maskedLength}B word-mask + ${layer.signatureLength}B RSA/MD5`],
+    ["CRC 位置", "解掩码后位于 word-mask 尾部 64B"],
+  ];
+  for (const [name, value] of rows) {
+    const term = document.createElement("dt");
+    term.textContent = name;
+    const description = document.createElement("dd");
+    const code = document.createElement("code");
+    code.textContent = value;
+    description.appendChild(code);
+    facts.appendChild(term);
+    facts.appendChild(description);
+  }
+  body.appendChild(facts);
+  const caveat = document.createElement("div");
+  caveat.className = "pubgm-tdreport-caveat";
+  caveat.textContent = "这是封装结构判断：它仍属于 TerSafe / 安全模块报告链路，只是不是普通 TSS record / child 节点格式。";
+  body.appendChild(caveat);
+  decision.appendChild(body);
+  inspection.appendChild(decision);
+  return inspection;
+}
+
 function pubgm17500TdreportPanel(ev, beforeRpc, afterRpc, beforeLayer, afterLayer) {
   const current = afterLayer || beforeLayer;
   if (!current) return null;
@@ -9200,6 +9493,9 @@ function pubgm17500TdreportPanel(ev, beforeRpc, afterRpc, beforeLayer, afterLaye
     verification.appendChild(proof);
   }
   panel.appendChild(verification);
+
+  const inspection = pubgm17500TdreportInspection(current);
+  if (inspection) panel.appendChild(inspection);
 
   const beforeMap = pubgm17500TdreportFieldMap(beforeLayer);
   const afterMap = pubgm17500TdreportFieldMap(afterLayer);
@@ -9328,6 +9624,8 @@ function pubgm17500RpcStructurePanel(ev, info) {
   installPubgm17500RpcStructureStyles();
   const beforeBytes = b64ToBytes(String(ev && ev.before_pay || ""));
   const before = beforeBytes.length ? parsePubgm17500TypedRpc(beforeBytes, info.meta) : null;
+  const loginCompare = pubgm17500LoginCompare(before, current);
+  if (loginCompare) return buildPacketFieldTable(loginCompare, ev);
   const beforeTdreport = pubgm17500TdreportLayer(before, ev && ev.summary);
   const afterTdreport = pubgm17500TdreportLayer(current, ev && ev.summary);
   if (beforeTdreport || afterTdreport) {
@@ -10868,12 +11166,14 @@ function buildPacketFieldTable(compare, ev = null) {
   section.className = "gcloud-field-compare packet-field-compare";
   const changes = compare.rows.filter((row) => !["same", "current"].includes(row.status));
   const savedMode = ev && ev.__tcpvFieldCompareMode;
+  const defaultMode = ["changes", "all"].includes(compare.defaultMode)
+    ? compare.defaultMode : compare.canCompare && changes.length ? "changes" : "all";
   section.dataset.mode = ["changes", "all"].includes(savedMode) ? savedMode
-    : compare.canCompare && changes.length ? "changes" : "all";
+    : defaultMode;
   const toolbar = document.createElement("div");
   toolbar.className = "gcloud-compare-toolbar";
   const title = document.createElement("strong");
-  title.textContent = compare.canCompare ? "字段对照" : "当前字段";
+  title.textContent = compare.title || (compare.canCompare ? "字段对照" : "当前字段");
   toolbar.appendChild(title);
   const count = document.createElement("span");
   count.className = "gcloud-compare-count";
