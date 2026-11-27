@@ -132,7 +132,7 @@ class AccountControlTests(unittest.TestCase):
         self.assertIn('"account_control_enabled": false', page.text)
         self.assertEqual(client.get("/api/control/v1/accounts").status_code, 503)
 
-    def test_popup_is_lazy_and_does_not_replace_tcpview_layout(self) -> None:
+    def test_modeless_panel_is_lazy_and_does_not_replace_tcpview_layout(self) -> None:
         source = APP_JS.read_text()
         install_start = source.index("function installAccountControlPanel()")
         install_end = source.index("function setAccountControlMessage(")
@@ -140,14 +140,31 @@ class AccountControlTests(unittest.TestCase):
         self.assertIn("TCPV_CONFIG.account_control_enabled !== true", install)
         self.assertIn('document.createElement("dialog")', install)
         self.assertIn("document.body.appendChild(dialog)", install)
-        self.assertIn("dialog.showModal()", install)
+        self.assertIn("dialog.show()", install)
+        self.assertNotIn("dialog.showModal()", install)
         self.assertIn("refreshAccountControlPanel()", install)
-        self.assertLess(install.index("dialog.showModal()"), install.index("refreshAccountControlPanel()"))
+        self.assertLess(install.index("dialog.show()"), install.index("refreshAccountControlPanel()"))
         self.assertIn("window.clearInterval", install)
+        self.assertIn("position:fixed", install)
+        self.assertNotIn("::backdrop", install)
+        self.assertIn("data-account-control-minimize", install)
+        self.assertIn("data-account-control-drag", install)
+        self.assertIn('positionKey = "tcpv_account_control_position_v1"', install)
+        self.assertIn('window.addEventListener("pointermove", move)', install)
         self.assertNotIn("api/control/v1", source[:install_start])
         self.assertIn('apiJson("/api/control/v1/accounts")', source)
         self.assertIn('data-account-control-nav aria-label="在线 KeyProxy 账号"', install)
         self.assertIn("state.accountControl.selectedIdentity", source)
+
+    def test_panel_filters_offline_accounts_and_channel_rows(self) -> None:
+        source = APP_JS.read_text()
+        render_start = source.index("function renderAccountControlPanel(")
+        render_end = source.index("async function refreshAccountControlPanel(")
+        render = source[render_start:render_end]
+        self.assertIn("account?.cs2?.online === true || account?.gcloud?.online === true", render)
+        self.assertIn('if (account?.cs2?.online === true)', render)
+        self.assertIn('if (account?.gcloud?.online === true)', render)
+        self.assertIn("当前没有在线的 CS2 或 GCloud 连接", render)
 
 
 if __name__ == "__main__":

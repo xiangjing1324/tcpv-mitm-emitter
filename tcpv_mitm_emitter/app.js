@@ -40,6 +40,7 @@ const state = {
   serverClockOffsetMs: 0,
   accountControl: {
     open: false,
+    minimized: false,
     timer: 0,
     snapshot: null,
     selectedIdentity: "",
@@ -22024,13 +22025,14 @@ function installAccountControlPanel() {
   dialog.className = "account-control-dialog";
   dialog.innerHTML = `
     <div class="account-control-shell">
-      <header class="account-control-head">
+      <header class="account-control-head" data-account-control-drag>
         <div>
           <strong>账号控制</strong>
-          <span>按在线 KeyProxy account 导航</span>
+          <span>按当前在线 CS2 / GCloud 导航</span>
         </div>
         <div class="account-control-head-actions">
           <button type="button" data-account-control-refresh>刷新</button>
+          <button type="button" data-account-control-minimize aria-expanded="true">最小化</button>
           <button type="button" data-account-control-close>关闭</button>
         </div>
       </header>
@@ -22046,12 +22048,11 @@ function installAccountControlPanel() {
   style.id = "account-control-styles";
   style.textContent = `
     .tabs .account-control-trigger{margin-left:auto;height:26px;padding:3px 10px;border:1px solid color-mix(in srgb,var(--accent) 48%,var(--line));border-radius:6px;background:color-mix(in srgb,var(--panel) 82%,var(--accent));color:var(--text);font:inherit;font-weight:700;cursor:pointer}
-    .account-control-dialog{width:min(920px,calc(100vw - 28px));max-height:min(760px,calc(100vh - 28px));padding:0;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);box-shadow:0 24px 90px #0009}
-    .account-control-dialog::backdrop{background:#020617a6;backdrop-filter:blur(2px)}
-    .account-control-shell{display:grid;grid-template-rows:auto auto minmax(0,1fr);max-height:min(760px,calc(100vh - 28px));min-height:300px}
-    .account-control-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line)}
+    .account-control-dialog{position:fixed;inset:64px 16px auto auto;z-index:1200;width:min(920px,calc(100vw - 28px));height:min(620px,calc(100vh - 84px));min-width:min(520px,calc(100vw - 28px));min-height:300px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);margin:0;padding:0;overflow:hidden;resize:both;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);box-shadow:0 24px 90px #0009}
+    .account-control-shell{display:grid;grid-template-rows:auto auto minmax(0,1fr);height:100%;min-height:0}
+    .account-control-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line);cursor:move;user-select:none;touch-action:none}
     .account-control-head>div:first-child{display:grid;gap:3px}.account-control-head strong{font-size:14px}.account-control-head span{color:var(--muted);font-size:11px}
-    .account-control-head-actions{display:flex;gap:6px}.account-control-head button,.account-control-action{height:28px;padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:var(--chip-bg);color:var(--text);font:inherit;cursor:pointer}
+    .account-control-head-actions{display:flex;gap:6px;cursor:default}.account-control-head button,.account-control-action{height:28px;padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:var(--chip-bg);color:var(--text);font:inherit;cursor:pointer}
     .account-control-message{min-height:30px;padding:7px 15px;border-bottom:1px solid var(--line);color:var(--muted)}
     .account-control-message[data-kind="error"]{color:#f87171}.account-control-message[data-kind="success"]{color:#4ade80}
     .account-control-body{min-height:0;display:grid;grid-template-columns:210px minmax(0,1fr)}
@@ -22067,11 +22068,77 @@ function installAccountControlPanel() {
     .account-control-channel{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px;padding:10px 11px}.account-control-channel+.account-control-channel{border-top:1px solid color-mix(in srgb,var(--line) 70%,transparent)}
     .account-control-channel-state{display:grid;align-content:start;gap:4px}.account-control-channel-title{display:flex;align-items:center;gap:6px;font-weight:800}.account-control-dot{width:8px;height:8px;border-radius:50%;background:#64748b}.account-control-dot.online{background:#f59e0b}.account-control-dot.ready{background:#22c55e}.account-control-reason{color:var(--muted);font-size:11px;line-height:1.35}
     .account-control-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:start}.account-control-action{min-width:68px}.account-control-action:hover:not(:disabled){border-color:var(--accent);background:color-mix(in srgb,var(--chip-bg) 76%,var(--accent))}.account-control-action:disabled{opacity:.42;cursor:not-allowed}
-    @media(max-width:680px){.account-control-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.account-control-nav{grid-auto-flow:column;grid-auto-columns:minmax(140px,70%);overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.account-control-channel{grid-template-columns:1fr}.account-control-head{align-items:flex-start}.account-control-card-head{display:grid;gap:3px}}
+    .account-control-dialog.minimized{width:min(360px,calc(100vw - 16px))!important;height:auto!important;min-width:0;min-height:0;resize:none}.account-control-dialog.minimized .account-control-message,.account-control-dialog.minimized .account-control-body{display:none}.account-control-dialog.minimized .account-control-shell{height:auto}.account-control-dialog.minimized .account-control-head{border-bottom:0}
+    @media(max-width:680px){.account-control-dialog{min-width:0;width:calc(100vw - 16px);height:min(620px,calc(100vh - 16px));max-height:calc(100dvh - 16px)}.account-control-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.account-control-nav{grid-auto-flow:column;grid-auto-columns:minmax(140px,70%);overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.account-control-channel{grid-template-columns:1fr}.account-control-head{align-items:flex-start}.account-control-card-head{display:grid;gap:3px}}
   `;
   document.head.appendChild(style);
 
+  const positionKey = "tcpv_account_control_position_v1";
+  const savePosition = () => {
+    if (!dialog.open) return;
+    const rect = dialog.getBoundingClientRect();
+    try {
+      window.localStorage.setItem(positionKey, JSON.stringify({ left: rect.left, top: rect.top }));
+    } catch (_error) {
+      // Position memory is optional when storage is blocked.
+    }
+  };
+  const applySavedPosition = () => {
+    if (!dialog.open) return;
+    let saved = null;
+    try {
+      saved = JSON.parse(window.localStorage.getItem(positionKey) || "null");
+    } catch (_error) {
+      saved = null;
+    }
+    const rect = dialog.getBoundingClientRect();
+    const rawLeft = Number(saved?.left);
+    const rawTop = Number(saved?.top);
+    const left = Number.isFinite(rawLeft) ? rawLeft : rect.left;
+    const top = Number.isFinite(rawTop) ? rawTop : rect.top;
+    const maxLeft = Math.max(8, window.innerWidth - Math.min(rect.width, window.innerWidth - 16) - 8);
+    const maxTop = Math.max(8, window.innerHeight - Math.min(rect.height, window.innerHeight - 16) - 8);
+    dialog.style.left = `${Math.min(Math.max(8, left), maxLeft)}px`;
+    dialog.style.top = `${Math.min(Math.max(8, top), maxTop)}px`;
+    dialog.style.right = "auto";
+  };
+  const setMinimized = minimized => {
+    state.accountControl.minimized = minimized;
+    dialog.classList.toggle("minimized", minimized);
+    const button = dialog.querySelector("[data-account-control-minimize]");
+    if (button) {
+      button.textContent = minimized ? "还原" : "最小化";
+      button.setAttribute("aria-expanded", minimized ? "false" : "true");
+    }
+    window.requestAnimationFrame(applySavedPosition);
+  };
+
+  dialog.querySelector("[data-account-control-drag]")?.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.target.closest("button")) return;
+    const rect = dialog.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    event.preventDefault();
+    const move = moveEvent => {
+      const maxLeft = Math.max(8, window.innerWidth - Math.min(rect.width, window.innerWidth - 16) - 8);
+      const maxTop = Math.max(8, window.innerHeight - Math.min(rect.height, window.innerHeight - 16) - 8);
+      dialog.style.left = `${Math.min(Math.max(8, rect.left + moveEvent.clientX - startX), maxLeft)}px`;
+      dialog.style.top = `${Math.min(Math.max(8, rect.top + moveEvent.clientY - startY), maxTop)}px`;
+      dialog.style.right = "auto";
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      savePosition();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  });
+
   const close = () => {
+    savePosition();
     state.accountControl.open = false;
     state.accountControl.generation += 1;
     if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
@@ -22081,7 +22148,8 @@ function installAccountControlPanel() {
   trigger.addEventListener("click", () => {
     state.accountControl.open = true;
     state.accountControl.generation += 1;
-    dialog.showModal();
+    if (!dialog.open) dialog.show();
+    window.requestAnimationFrame(applySavedPosition);
     refreshAccountControlPanel();
     if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
     state.accountControl.timer = window.setInterval(() => {
@@ -22090,12 +22158,14 @@ function installAccountControlPanel() {
   });
   dialog.querySelector("[data-account-control-close]")?.addEventListener("click", close);
   dialog.querySelector("[data-account-control-refresh]")?.addEventListener("click", () => refreshAccountControlPanel());
+  dialog.querySelector("[data-account-control-minimize]")?.addEventListener("click", () => setMinimized(!state.accountControl.minimized));
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
   dialog.addEventListener("close", () => {
     state.accountControl.open = false;
     if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
     state.accountControl.timer = 0;
   });
+  window.addEventListener("resize", applySavedPosition);
 }
 
 function setAccountControlMessage(text, kind = "") {
@@ -22153,14 +22223,16 @@ function renderAccountControlPanel(snapshot) {
   nav.replaceChildren();
   const accounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts : [];
   const channels = snapshot?.channels && typeof snapshot.channels === "object" ? snapshot.channels : {};
-  if (!accounts.length) {
+  const selectable = accounts.filter(account => (
+    String(account?.identity || "") && (account?.cs2?.online === true || account?.gcloud?.online === true)
+  ));
+  if (!selectable.length) {
     const empty = document.createElement("div");
     empty.className = "account-control-empty";
-    empty.textContent = "当前没有在线 KeyProxy 账号";
+    empty.textContent = "当前没有在线的 CS2 或 GCloud 连接";
     list.appendChild(empty);
     return;
   }
-  const selectable = accounts.filter(account => String(account?.identity || ""));
   if (!selectable.some(account => String(account.identity) === state.accountControl.selectedIdentity)) {
     state.accountControl.selectedIdentity = String(selectable[0]?.identity || "");
   }
@@ -22196,18 +22268,20 @@ function renderAccountControlPanel(snapshot) {
   const name = document.createElement("strong");
   name.textContent = identity;
   const detail = document.createElement("span");
-  const keyproxyConnections = Number(account?.keyproxy?.connection_count || 0);
+  const onlineChannels = [account?.cs2?.online === true, account?.gcloud?.online === true].filter(Boolean).length;
   const accountId = String(account?.cs2?.account || "");
   detail.textContent = [
-    `KeyProxy account · ${keyproxyConnections || 1} 个在线连接`,
+    `KeyProxy account · ${onlineChannels} 个在线连接`,
     accountId ? `AccountID ${accountId}` : "",
   ].filter(Boolean).join(" · ");
   head.append(name, detail);
-  card.append(
-    head,
-    accountControlChannelNode(identity, "cs2", account?.cs2, channels?.cs2?.profiles),
-    accountControlChannelNode(identity, "gcloud", account?.gcloud, channels?.gcloud?.profiles),
-  );
+  card.appendChild(head);
+  if (account?.cs2?.online === true) {
+    card.appendChild(accountControlChannelNode(identity, "cs2", account.cs2, channels?.cs2?.profiles));
+  }
+  if (account?.gcloud?.online === true) {
+    card.appendChild(accountControlChannelNode(identity, "gcloud", account.gcloud, channels?.gcloud?.profiles));
+  }
   list.appendChild(card);
 }
 
