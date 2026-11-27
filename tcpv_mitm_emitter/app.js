@@ -21979,6 +21979,7 @@ function renderEvents() {
 
 const ACCOUNT_CONTROL_REASON_LABELS = {
   ready: "可操作",
+  partial_ready: "部分按钮可操作",
   queued: "已提交",
   building: "正在构造",
   delivered: "已注入",
@@ -21993,6 +21994,9 @@ const ACCOUNT_CONTROL_REASON_LABELS = {
   response_context_header_missing: "等待响应上下文",
   transport_context_missing: "等待序列上下文",
   completion_context_missing: "等待完成包上下文",
+  increment_context_missing: "等待完成包计数",
+  increment_context_stale: "完成包计数已过期",
+  increment_context_regressed: "完成包计数发生回退",
   completion_tracker_unavailable: "完成包跟踪器不可用",
   gcloud_keys_not_ready: "等待 GCloud 密钥",
   gcloud_sequence_missing: "等待 GCloud 序号",
@@ -22041,21 +22045,29 @@ function installAccountControlPanel() {
         <nav class="account-control-nav" data-account-control-nav aria-label="在线 KeyProxy 账号"></nav>
         <div class="account-control-list" data-account-control-list></div>
       </div>
-    </div>`;
+    </div>
+    <span class="account-control-resize n" data-account-control-resize="n" aria-hidden="true"></span>
+    <span class="account-control-resize e" data-account-control-resize="e" aria-hidden="true"></span>
+    <span class="account-control-resize s" data-account-control-resize="s" aria-hidden="true"></span>
+    <span class="account-control-resize w" data-account-control-resize="w" aria-hidden="true"></span>
+    <span class="account-control-resize ne" data-account-control-resize="ne" aria-hidden="true"></span>
+    <span class="account-control-resize se" data-account-control-resize="se" aria-hidden="true"></span>
+    <span class="account-control-resize sw" data-account-control-resize="sw" aria-hidden="true"></span>
+    <span class="account-control-resize nw" data-account-control-resize="nw" aria-hidden="true"></span>`;
   document.body.appendChild(dialog);
 
   const style = document.createElement("style");
   style.id = "account-control-styles";
   style.textContent = `
     .tabs .account-control-trigger{margin-left:auto;height:26px;padding:3px 10px;border:1px solid color-mix(in srgb,var(--accent) 48%,var(--line));border-radius:6px;background:color-mix(in srgb,var(--panel) 82%,var(--accent));color:var(--text);font:inherit;font-weight:700;cursor:pointer}
-    .account-control-dialog{position:fixed;inset:64px 16px auto auto;z-index:1200;width:min(920px,calc(100vw - 28px));height:min(620px,calc(100vh - 84px));min-width:min(520px,calc(100vw - 28px));min-height:300px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);margin:0;padding:0;overflow:hidden;resize:both;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);box-shadow:0 24px 90px #0009}
+    .account-control-dialog{position:fixed;inset:64px 16px auto auto;z-index:1200;width:min(680px,calc(100vw - 28px));height:min(380px,calc(100vh - 84px));min-width:min(420px,calc(100vw - 16px));min-height:min(230px,calc(100vh - 16px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);margin:0;padding:0;overflow:hidden;resize:none;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);box-shadow:0 24px 90px #0009}
     .account-control-shell{display:grid;grid-template-rows:auto auto minmax(0,1fr);height:100%;min-height:0}
     .account-control-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line);cursor:move;user-select:none;touch-action:none}
     .account-control-head>div:first-child{display:grid;gap:3px}.account-control-head strong{font-size:14px}.account-control-head span{color:var(--muted);font-size:11px}
     .account-control-head-actions{display:flex;gap:6px;cursor:default}.account-control-head button,.account-control-action{height:28px;padding:3px 9px;border:1px solid var(--line);border-radius:6px;background:var(--chip-bg);color:var(--text);font:inherit;cursor:pointer}
     .account-control-message{min-height:30px;padding:7px 15px;border-bottom:1px solid var(--line);color:var(--muted)}
     .account-control-message[data-kind="error"]{color:#f87171}.account-control-message[data-kind="success"]{color:#4ade80}
-    .account-control-body{min-height:0;display:grid;grid-template-columns:210px minmax(0,1fr)}
+    .account-control-body{min-height:0;display:grid;grid-template-columns:170px minmax(0,1fr)}
     .account-control-nav{overflow:auto;padding:8px;border-right:1px solid var(--line);display:grid;align-content:start;gap:5px;overscroll-behavior:contain}
     .account-control-nav-button{width:100%;display:grid;gap:3px;padding:8px 9px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text);font:inherit;text-align:left;cursor:pointer}
     .account-control-nav-button:hover{background:var(--chip-bg)}.account-control-nav-button.active{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));background:color-mix(in srgb,var(--chip-bg) 78%,var(--accent))}
@@ -22066,43 +22078,64 @@ function installAccountControlPanel() {
     .account-control-card-head{display:flex;align-items:baseline;gap:9px;padding:9px 11px;border-bottom:1px solid var(--line)}
     .account-control-card-head strong{font-size:13px}.account-control-card-head span{color:var(--muted);font-size:11px;overflow-wrap:anywhere}
     .account-control-channel{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px;padding:10px 11px}.account-control-channel+.account-control-channel{border-top:1px solid color-mix(in srgb,var(--line) 70%,transparent)}
-    .account-control-channel-state{display:grid;align-content:start;gap:4px}.account-control-channel-title{display:flex;align-items:center;gap:6px;font-weight:800}.account-control-dot{width:8px;height:8px;border-radius:50%;background:#64748b}.account-control-dot.online{background:#f59e0b}.account-control-dot.ready{background:#22c55e}.account-control-reason{color:var(--muted);font-size:11px;line-height:1.35}
+    .account-control-channel-state{display:grid;align-content:start;gap:4px}.account-control-channel-title{display:flex;align-items:center;gap:6px;font-weight:800}.account-control-dot{width:8px;height:8px;border-radius:50%;background:#64748b}.account-control-dot.online{background:#22c55e}.account-control-reason{color:var(--muted);font-size:11px;line-height:1.35}
     .account-control-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:start}.account-control-action{min-width:68px}.account-control-action:hover:not(:disabled){border-color:var(--accent);background:color-mix(in srgb,var(--chip-bg) 76%,var(--accent))}.account-control-action:disabled{opacity:.42;cursor:not-allowed}
-    .account-control-dialog.minimized{width:min(360px,calc(100vw - 16px))!important;height:auto!important;min-width:0;min-height:0;resize:none}.account-control-dialog.minimized .account-control-message,.account-control-dialog.minimized .account-control-body{display:none}.account-control-dialog.minimized .account-control-shell{height:auto}.account-control-dialog.minimized .account-control-head{border-bottom:0}
-    @media(max-width:680px){.account-control-dialog{min-width:0;width:calc(100vw - 16px);height:min(620px,calc(100vh - 16px));max-height:calc(100dvh - 16px)}.account-control-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.account-control-nav{grid-auto-flow:column;grid-auto-columns:minmax(140px,70%);overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.account-control-channel{grid-template-columns:1fr}.account-control-head{align-items:flex-start}.account-control-card-head{display:grid;gap:3px}}
+    .account-control-resize{position:absolute;z-index:4;touch-action:none}.account-control-resize.n,.account-control-resize.s{left:12px;right:12px;height:8px;cursor:ns-resize}.account-control-resize.n{top:-3px}.account-control-resize.s{bottom:-3px}.account-control-resize.e,.account-control-resize.w{top:12px;bottom:12px;width:8px;cursor:ew-resize}.account-control-resize.e{right:-3px}.account-control-resize.w{left:-3px}.account-control-resize.ne,.account-control-resize.se,.account-control-resize.sw,.account-control-resize.nw{width:16px;height:16px}.account-control-resize.ne{right:-3px;top:-3px;cursor:nesw-resize}.account-control-resize.se{right:-3px;bottom:-3px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 44%,color-mix(in srgb,var(--muted) 75%,transparent) 45% 52%,transparent 53% 62%,color-mix(in srgb,var(--muted) 75%,transparent) 63% 70%,transparent 71%)}.account-control-resize.sw{left:-3px;bottom:-3px;cursor:nesw-resize}.account-control-resize.nw{left:-3px;top:-3px;cursor:nwse-resize}
+    .account-control-dialog.minimized{width:min(340px,calc(100vw - 16px))!important;height:auto!important;min-width:0;min-height:0}.account-control-dialog.minimized .account-control-message,.account-control-dialog.minimized .account-control-body,.account-control-dialog.minimized .account-control-resize{display:none}.account-control-dialog.minimized .account-control-shell{height:auto}.account-control-dialog.minimized .account-control-head{border-bottom:0}
+    @media(max-width:680px){.account-control-dialog{min-width:0;width:calc(100vw - 16px);height:min(430px,calc(100vh - 16px));max-height:calc(100dvh - 16px)}.account-control-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.account-control-nav{grid-auto-flow:column;grid-auto-columns:minmax(140px,70%);overflow-x:auto;border-right:0;border-bottom:1px solid var(--line)}.account-control-channel{grid-template-columns:1fr}.account-control-head{align-items:flex-start}.account-control-card-head{display:grid;gap:3px}}
   `;
   document.head.appendChild(style);
 
-  const positionKey = "tcpv_account_control_position_v1";
-  const savePosition = () => {
-    if (!dialog.open) return;
+  const geometryKey = "tcpv_account_control_geometry_v2";
+  const saveGeometry = () => {
+    if (!dialog.open || state.accountControl.minimized) return;
     const rect = dialog.getBoundingClientRect();
     try {
-      window.localStorage.setItem(positionKey, JSON.stringify({ left: rect.left, top: rect.top }));
+      window.localStorage.setItem(geometryKey, JSON.stringify({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      }));
     } catch (_error) {
-      // Position memory is optional when storage is blocked.
+      // Geometry memory is optional when storage is blocked.
     }
   };
-  const applySavedPosition = () => {
-    if (!dialog.open) return;
+  const applySavedGeometry = () => {
+    if (!dialog.open || state.accountControl.minimized) return;
     let saved = null;
     try {
-      saved = JSON.parse(window.localStorage.getItem(positionKey) || "null");
+      saved = JSON.parse(window.localStorage.getItem(geometryKey) || "null");
     } catch (_error) {
       saved = null;
     }
     const rect = dialog.getBoundingClientRect();
+    const minWidth = Math.min(420, Math.max(240, window.innerWidth - 16));
+    const minHeight = Math.min(230, Math.max(160, window.innerHeight - 16));
+    const rawWidth = Number(saved?.width);
+    const rawHeight = Number(saved?.height);
+    const width = Math.min(
+      Math.max(minWidth, Number.isFinite(rawWidth) ? rawWidth : rect.width),
+      Math.max(minWidth, window.innerWidth - 16),
+    );
+    const height = Math.min(
+      Math.max(minHeight, Number.isFinite(rawHeight) ? rawHeight : rect.height),
+      Math.max(minHeight, window.innerHeight - 16),
+    );
     const rawLeft = Number(saved?.left);
     const rawTop = Number(saved?.top);
     const left = Number.isFinite(rawLeft) ? rawLeft : rect.left;
     const top = Number.isFinite(rawTop) ? rawTop : rect.top;
-    const maxLeft = Math.max(8, window.innerWidth - Math.min(rect.width, window.innerWidth - 16) - 8);
-    const maxTop = Math.max(8, window.innerHeight - Math.min(rect.height, window.innerHeight - 16) - 8);
+    const maxLeft = Math.max(8, window.innerWidth - width - 8);
+    const maxTop = Math.max(8, window.innerHeight - height - 8);
+    dialog.style.width = `${width}px`;
+    dialog.style.height = `${height}px`;
     dialog.style.left = `${Math.min(Math.max(8, left), maxLeft)}px`;
     dialog.style.top = `${Math.min(Math.max(8, top), maxTop)}px`;
     dialog.style.right = "auto";
   };
   const setMinimized = minimized => {
+    if (minimized) saveGeometry();
     state.accountControl.minimized = minimized;
     dialog.classList.toggle("minimized", minimized);
     const button = dialog.querySelector("[data-account-control-minimize]");
@@ -22110,7 +22143,7 @@ function installAccountControlPanel() {
       button.textContent = minimized ? "还原" : "最小化";
       button.setAttribute("aria-expanded", minimized ? "false" : "true");
     }
-    window.requestAnimationFrame(applySavedPosition);
+    if (!minimized) window.requestAnimationFrame(applySavedGeometry);
   };
 
   dialog.querySelector("[data-account-control-drag]")?.addEventListener("pointerdown", event => {
@@ -22130,15 +22163,61 @@ function installAccountControlPanel() {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
       window.removeEventListener("pointercancel", stop);
-      savePosition();
+      saveGeometry();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop);
     window.addEventListener("pointercancel", stop);
   });
 
+  for (const handle of dialog.querySelectorAll("[data-account-control-resize]")) {
+    handle.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || state.accountControl.minimized) return;
+      const direction = String(handle.dataset.accountControlResize || "");
+      const rect = dialog.getBoundingClientRect();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const minWidth = Math.min(420, Math.max(240, window.innerWidth - 16));
+      const minHeight = Math.min(230, Math.max(160, window.innerHeight - 16));
+      event.preventDefault();
+      event.stopPropagation();
+      const move = moveEvent => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        let left = rect.left;
+        let top = rect.top;
+        let width = rect.width;
+        let height = rect.height;
+        if (direction.includes("e")) width = Math.min(window.innerWidth - rect.left - 8, Math.max(minWidth, rect.width + dx));
+        if (direction.includes("s")) height = Math.min(window.innerHeight - rect.top - 8, Math.max(minHeight, rect.height + dy));
+        if (direction.includes("w")) {
+          left = Math.min(rect.right - minWidth, Math.max(8, rect.left + dx));
+          width = rect.right - left;
+        }
+        if (direction.includes("n")) {
+          top = Math.min(rect.bottom - minHeight, Math.max(8, rect.top + dy));
+          height = rect.bottom - top;
+        }
+        dialog.style.left = `${left}px`;
+        dialog.style.top = `${top}px`;
+        dialog.style.right = "auto";
+        dialog.style.width = `${width}px`;
+        dialog.style.height = `${height}px`;
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+        window.removeEventListener("pointercancel", stop);
+        saveGeometry();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+      window.addEventListener("pointercancel", stop);
+    });
+  }
+
   const close = () => {
-    savePosition();
+    saveGeometry();
     state.accountControl.open = false;
     state.accountControl.generation += 1;
     if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
@@ -22149,7 +22228,7 @@ function installAccountControlPanel() {
     state.accountControl.open = true;
     state.accountControl.generation += 1;
     if (!dialog.open) dialog.show();
-    window.requestAnimationFrame(applySavedPosition);
+    window.requestAnimationFrame(applySavedGeometry);
     refreshAccountControlPanel();
     if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
     state.accountControl.timer = window.setInterval(() => {
@@ -22165,7 +22244,7 @@ function installAccountControlPanel() {
     if (state.accountControl.timer) window.clearInterval(state.accountControl.timer);
     state.accountControl.timer = 0;
   });
-  window.addEventListener("resize", applySavedPosition);
+  window.addEventListener("resize", applySavedGeometry);
 }
 
 function setAccountControlMessage(text, kind = "") {
@@ -22187,13 +22266,21 @@ function accountControlChannelNode(identity, channelKey, channelState, profiles)
   const title = document.createElement("div");
   title.className = "account-control-channel-title";
   const dot = document.createElement("span");
-  dot.className = `account-control-dot ${ready ? "ready" : online ? "online" : ""}`;
+  dot.className = `account-control-dot ${online ? "online" : ""}`;
   const label = document.createElement("span");
-  label.textContent = channelKey === "cs2" ? "CS2" : "GCloud";
+  label.textContent = `${channelKey === "cs2" ? "CS2" : "GCloud"}${online ? " · 在线" : " · 离线"}`;
   title.append(dot, label);
   const reason = document.createElement("div");
   reason.className = "account-control-reason";
-  reason.textContent = accountControlReason(channel.reason);
+  const profileStates = channel.profile_states && typeof channel.profile_states === "object"
+    ? channel.profile_states
+    : {};
+  const enabledProfiles = (Array.isArray(profiles) ? profiles : [])
+    .map(profile => String(profile?.key || ""))
+    .filter(key => key && profileStates?.[key]?.ready === true);
+  reason.textContent = channel.reason === "partial_ready" && enabledProfiles.length
+    ? `${enabledProfiles.join(" / ")} 可操作；其余${accountControlReason("increment_context_missing")}`
+    : `${online ? "在线 · " : ""}${accountControlReason(channel.reason)}`;
   stateNode.append(title, reason);
 
   const actions = document.createElement("div");
@@ -22205,9 +22292,17 @@ function accountControlChannelNode(identity, channelKey, channelState, profiles)
     button.type = "button";
     button.className = "account-control-action";
     button.textContent = key;
-    button.title = `${String(profile?.resource_name || key)} · ${String(profile?.report_code || "")}`;
+    const profileState = profileStates?.[key];
+    const profileReady = profileState && typeof profileState === "object"
+      ? profileState.ready === true
+      : ready;
+    const blockedReason = profileReady ? "" : accountControlReason(profileState?.reason || channel.reason);
+    button.title = [
+      `${String(profile?.resource_name || key)} · ${String(profile?.report_code || "")}`,
+      blockedReason,
+    ].filter(Boolean).join(" · ");
     const busyKey = `${identity}|${channelKey}`;
-    button.disabled = !ready || state.accountControl.busy.has(busyKey);
+    button.disabled = !profileReady || state.accountControl.busy.has(busyKey);
     button.addEventListener("click", () => submitAccountControl(identity, channelKey, key, channel));
     actions.appendChild(button);
   }

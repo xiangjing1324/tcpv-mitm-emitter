@@ -149,12 +149,25 @@ class AccountControlTests(unittest.TestCase):
         self.assertNotIn("::backdrop", install)
         self.assertIn("data-account-control-minimize", install)
         self.assertIn("data-account-control-drag", install)
-        self.assertIn('positionKey = "tcpv_account_control_position_v1"', install)
+        self.assertIn('geometryKey = "tcpv_account_control_geometry_v2"', install)
+        self.assertIn('data-account-control-resize="se"', install)
+        self.assertIn("saveGeometry", install)
         self.assertIn('window.addEventListener("pointermove", move)', install)
         self.assertNotIn("api/control/v1", source[:install_start])
         self.assertIn('apiJson("/api/control/v1/accounts")', source)
         self.assertIn('data-account-control-nav aria-label="在线 KeyProxy 账号"', install)
         self.assertIn("state.accountControl.selectedIdentity", source)
+
+    def test_online_state_and_profile_buttons_are_independent(self) -> None:
+        source = APP_JS.read_text()
+        channel_start = source.index("function accountControlChannelNode(")
+        channel_end = source.index("function renderAccountControlPanel(")
+        channel = source[channel_start:channel_end]
+        self.assertIn('online ? "online"', channel)
+        self.assertIn('" · 在线"', channel)
+        self.assertIn("channel.profile_states", channel)
+        self.assertIn("profileState.ready === true", channel)
+        self.assertIn("button.disabled = !profileReady", channel)
 
     def test_panel_filters_offline_accounts_and_channel_rows(self) -> None:
         source = APP_JS.read_text()
