@@ -84,7 +84,7 @@ console.log(JSON.stringify(installed[0].textContent));
         # Keep every parser, comparison authority, child/hex renderer, style
         # owner and byte-copy path outside that exact presentation scope frozen.
         changed = {"gcloudProtoFieldAlias", "gcloudCompareFieldLabel", "gcloudCompareLeafRows",
-                   "buildPacketFieldTable", "installGcloudCompareStyles"}
+                   "buildPacketFieldTable", "installGcloudCompareStyles", "buildChildComparePanel"}
         added = {"gcloudUnconfirmedLoginResponseField", "gcloudFieldHierarchyEntries", "gcloudFieldDisplayType"}
         self.assertEqual(names(self.baseline) - names(self.source), set(), "production functions were removed")
         self.assertEqual(names(self.source) - names(self.baseline), added, "unexpected new production functions")

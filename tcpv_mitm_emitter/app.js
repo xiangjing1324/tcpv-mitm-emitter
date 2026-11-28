@@ -16409,19 +16409,11 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
   const summaryKv = parseSummaryKeyValues(summaryText);
   const timestampHintMap = parseSummaryChildTimestampHints(summaryText);
   const counts = parseChildSummaryCounts(summaryText);
-  const visibleIndices = [];
-  const addVisibleIndex = (value) => {
-    const index = Number.parseInt(value, 10);
-    if (!Number.isFinite(index) || index < 0 || index >= total) return;
-    if (!visibleIndices.includes(index)) visibleIndices.push(index);
-  };
-  if (actionMap instanceof Map) {
-    Array.from(actionMap.keys()).sort((left, right) => Number(left) - Number(right)).forEach(addVisibleIndex);
-  }
-  for (let index = 0; index < total && visibleIndices.length < 8; index += 1) {
-    addVisibleIndex(index);
-  }
-  const visible = visibleIndices.length;
+  // This is the full packet-detail view, not a list preview. Rendering only
+  // the first eight nodes hid later records (including observed MRPCS resource
+  // nodes) even though their bytes and parsed structure were already present.
+  const visibleIndices = Array.from({ length: total }, (_unused, index) => index);
+  const visible = total;
   const panel = document.createElement("section");
   panel.className = "child-compare";
   if (originalOnly || currentOnly) panel.classList.add("child-compare-current-only");
@@ -16480,13 +16472,6 @@ function buildChildComparePanel(beforeBase64, decodedBase64, summaryText = "", p
     ));
   }
   panel.appendChild(grid);
-
-  if (total > visible) {
-    const note = document.createElement("div");
-    note.className = "child-compare-note";
-    note.textContent = `还有 ${total - visible} 个节点未展开显示；当前视图优先展示前 8 个用于快速判断。`;
-    panel.appendChild(note);
-  }
 
   return panel;
 }

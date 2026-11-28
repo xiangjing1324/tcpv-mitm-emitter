@@ -168,9 +168,10 @@ function fixtureCompare(before, after, canCompare = true) {
         import subprocess
         source = APP_JS.read_text()
         baseline = subprocess.check_output(["git", "show", "4d0a438:tcpv_mitm_emitter/app.js"], text=True)
-        # Only the GCloud outer composition changes. Shared child cards, their
-        # complete previews and recursive expansion keep their existing code.
-        for name in ("makeChildCard", "buildChildComparePanel", "makeChildPreviewRow", "makeChildPreviewBox", "renderTssRecursiveTree", "renderTssRecursiveNode", "buildGcloudStandaloneTssRecursivePanel", "makeGcloudAceCompareStatus", "analyzeGcloudBeforeVariant", "appendGcloudReadableStrings"):
+        # Only the GCloud outer composition and the separately tested shared
+        # child-node visibility policy change. Child cards, their complete
+        # previews and recursive expansion keep their existing code.
+        for name in ("makeChildCard", "makeChildPreviewRow", "makeChildPreviewBox", "renderTssRecursiveTree", "renderTssRecursiveNode", "buildGcloudStandaloneTssRecursivePanel", "makeGcloudAceCompareStatus", "analyzeGcloudBeforeVariant", "appendGcloudReadableStrings"):
             self.assertEqual(_packet_function(source, name), _packet_function(baseline, name), name)
         for name in ("buildGcloudSecurityPacketPanel",):
             self.assertEqual(_packet_function(source, name), _packet_function(baseline, name), name)
